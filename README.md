@@ -192,7 +192,12 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Support
 
-For issues, questions, or feature requests, please open an issue on GitHub.
+For issues, questions, or feature requests, please contact us:
+
+- **Email**: [hhuangweijia@gmail.com](mailto:hhuangweijia@gmail.com)
+- **Phone**: [(646) 567-1456](tel:+16465671456)
+- **GitHub Issues**: [Open an issue](https://github.com/Xavierhuang/LingCode/issues)
+- **Website**: [https://xavierhuang.github.io/LingCode/](https://xavierhuang.github.io/LingCode/)
 
 ---
 
