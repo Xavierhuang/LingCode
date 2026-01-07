@@ -1,0 +1,11 @@
+# GitHub Pages Configuration
+title: LingCode
+description: AI-Powered Code Editor for macOS
+theme: jekyll-theme-minimal
+plugins:
+  - jekyll-sitemap
+
+# GitHub Pages settings
+github:
+  repository_url: https://github.com/Xavierhuang/LingCode
+
