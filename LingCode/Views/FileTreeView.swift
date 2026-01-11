@@ -89,8 +89,14 @@ struct FileTreeView: NSViewRepresentable {
         if rootChanged || context.coordinator.lastRefreshTrigger != refreshTrigger {
             context.coordinator.lastRefreshTrigger = refreshTrigger
             print("🔄 FileTreeView: Reloading outline view data, rootURL is: \(context.coordinator.rootURL?.path ?? "nil")")
+            
+            // Reload file items from disk when refresh is triggered
+            if rootURL != nil {
+                context.coordinator.reloadFileItems()
+            }
+            
             outlineView.reloadData()
-
+            
             if rootURL != nil {
                 outlineView.expandItem(nil, expandChildren: false)
             }
@@ -352,9 +358,14 @@ struct FileTreeView: NSViewRepresentable {
         }
         
         @objc private func refresh() {
+            reloadFileItems()
+            outlineView?.reloadData()
+        }
+        
+        func reloadFileItems() {
             guard let rootURL = rootURL else { return }
             fileItems = loadFileItems(at: rootURL)
-            outlineView?.reloadData()
+            print("🔄 FileTreeView: Reloaded \(fileItems.count) file items from: \(rootURL.path)")
         }
         
         @objc private func openFile(_ sender: NSMenuItem) {

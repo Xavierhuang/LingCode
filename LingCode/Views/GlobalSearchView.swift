@@ -34,30 +34,37 @@ struct GlobalSearchView: View {
             }
             .padding()
             
-            HStack {
-                TextField("Search...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($isFocused)
-                    .onSubmit {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    TextField("Search...", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isFocused)
+                        .onSubmit {
+                            performSearch()
+                        }
+                    
+                    Button(action: {
                         performSearch()
+                    }) {
+                        if isSearching {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "magnifyingglass")
+                        }
                     }
-                
-                Button(action: {
-                    performSearch()
-                }) {
-                    if isSearching {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                    } else {
-                        Image(systemName: "magnifyingglass")
-                    }
+                    .disabled(searchText.isEmpty || isSearching)
                 }
-                .disabled(searchText.isEmpty || isSearching)
                 
-                Toggle("Regex", isOn: $useRegex)
-                Toggle("Case Sensitive", isOn: $caseSensitive)
-                Toggle("Semantic", isOn: $useSemanticSearch)
-                    .help("Use AI to understand search intent and find relevant code")
+                HStack(spacing: 12) {
+                    Toggle("Regex", isOn: $useRegex)
+                        .toggleStyle(.checkbox)
+                    Toggle("Case", isOn: $caseSensitive)
+                        .toggleStyle(.checkbox)
+                    Toggle("Semantic", isOn: $useSemanticSearch)
+                        .toggleStyle(.checkbox)
+                        .help("Use AI to understand search intent and find relevant code")
+                }
             }
             .padding(.horizontal)
             
@@ -130,7 +137,7 @@ struct GlobalSearchView: View {
                 }
             }
         }
-        .frame(width: 700, height: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             isFocused = true
         }

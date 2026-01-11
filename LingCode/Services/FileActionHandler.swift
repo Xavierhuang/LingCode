@@ -43,7 +43,10 @@ class FileActionHandler {
             print("📂 Updating existing file: \(fileURL.path)")
             do {
                 try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
-                editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                // Defer state changes outside of view update cycle
+                Task { @MainActor in
+                    editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                }
             } catch {
                 print("❌ Failed to update file: \(error)")
             }
@@ -54,15 +57,20 @@ class FileActionHandler {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
                 print("✅ Created and opened file: \(fileURL.path)")
-                // New files: highlight everything as new (pass empty string as original)
-                editorViewModel.openFile(at: fileURL, originalContent: "")
-                // Refresh file tree to show new file immediately
-                editorViewModel.refreshFileTree()
+                // Defer state changes outside of view update cycle
+                Task { @MainActor in
+                    // New files: highlight everything as new (pass empty string as original)
+                    editorViewModel.openFile(at: fileURL, originalContent: "")
+                    // Refresh file tree to show new file immediately
+                    editorViewModel.refreshFileTree()
+                }
             } catch {
                 print("❌ Failed to create file: \(error)")
                 // Try to open anyway if it exists now
                 if FileManager.default.fileExists(atPath: fileURL.path) {
-                    editorViewModel.openFile(at: fileURL)
+                    Task { @MainActor in
+                        editorViewModel.openFile(at: fileURL)
+                    }
                 }
             }
         }
@@ -85,11 +93,14 @@ class FileActionHandler {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
             
-            // Open with change highlighting
-            editorViewModel.openFile(at: fileURL, originalContent: originalContent ?? "")
-            
-            // Refresh file tree to show new file immediately
-            editorViewModel.refreshFileTree()
+            // Defer state changes outside of view update cycle to avoid "Publishing changes" warnings
+            Task { @MainActor in
+                // Open with change highlighting
+                editorViewModel.openFile(at: fileURL, originalContent: originalContent ?? "")
+                
+                // Refresh file tree to show new file immediately
+                editorViewModel.refreshFileTree()
+            }
         } catch {
             print("Failed to apply file: \(error)")
         }
@@ -127,11 +138,14 @@ class FileActionHandler {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             action.status = .completed
             
-            // Open with change highlighting
-            editorViewModel.openFile(at: fileURL, originalContent: originalContent ?? "")
-            
-            // Refresh file tree to show new file immediately
-            editorViewModel.refreshFileTree()
+            // Defer state changes outside of view update cycle
+            Task { @MainActor in
+                // Open with change highlighting
+                editorViewModel.openFile(at: fileURL, originalContent: originalContent ?? "")
+                
+                // Refresh file tree to show new file immediately
+                editorViewModel.refreshFileTree()
+            }
         } catch {
             action.status = .failed
             action.error = error.localizedDescription

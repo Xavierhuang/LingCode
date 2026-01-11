@@ -177,7 +177,7 @@ class PerformanceService: ObservableObject {
     private func getMemoryUsage() -> Double {
         // Simplified memory usage - in production would use proper system APIs
         // For macOS, we can use ProcessInfo
-        let processInfo = ProcessInfo.processInfo
+        _ = ProcessInfo.processInfo
         // This is a simplified approach - real implementation would use mach_task_basic_info
         return 100.0 // Placeholder - would calculate actual memory usage
     }

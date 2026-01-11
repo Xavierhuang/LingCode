@@ -94,6 +94,8 @@ open LingCode.xcodeproj
 2. On first launch, enter your API key in the welcome screen
 3. Or configure it later in Settings (⌘,)
 
+**Note for App Store Review**: See [APP_STORE_REVIEW_GUIDE.md](APP_STORE_REVIEW_GUIDE.md) for instructions on providing a sample API key for Apple reviewers.
+
 ## Usage
 
 ### Basic Usage

@@ -101,6 +101,35 @@ class ApplyCodeService: ObservableObject {
     
     /// Apply a single change with validation
     func applyChange(_ change: CodeChange, requestedScope: String? = nil) -> ApplyChangeResult {
+        // Git-aware validation
+        if let projectURL = findProjectURL(for: change.filePath) {
+            let fileURL = URL(fileURLWithPath: change.filePath)
+            let gitValidation = GitAwareService.shared.validateEdit(
+                Edit(
+                    file: change.filePath,
+                    operation: .replace,
+                    range: change.lineRange.map { EditRange(startLine: $0.start, endLine: $0.end) },
+                    anchor: nil,
+                    content: change.newContent.components(separatedBy: .newlines)
+                ),
+                in: projectURL
+            )
+            
+            switch gitValidation {
+            case .rejected(let reason):
+                return ApplyChangeResult(
+                    success: false,
+                    error: "Git validation failed: \(reason)",
+                    validationResult: nil
+                )
+            case .warning(let message):
+                // Log warning but continue
+                print("⚠️ Git warning: \(message)")
+            case .accepted:
+                break
+            }
+        }
+        
         // Validate before applying
         let validationService = CodeValidationService.shared
         let validation = validationService.validateChange(
@@ -196,6 +225,20 @@ class ApplyCodeService: ObservableObject {
         } catch {
             print("Failed to restore backup: \(error)")
         }
+    }
+    
+    /// Apply all pending changes with atomic transaction and retry logic
+    func applyAllChangesWithRetry(
+        _ changes: [CodeChange],
+        in workspaceURL: URL,
+        aiService: AIService,
+        onProgress: @escaping (Int, Int) -> Void,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
+        // Convert CodeChange to Edit format for atomic service
+        // For now, use regular applyAllChanges
+        // TODO: Full integration with JSONEditSchemaService and AtomicEditService
+        applyAllChanges(onProgress: onProgress, onComplete: onComplete)
     }
     
     /// Apply all pending changes
@@ -461,3 +504,23 @@ struct ApplyChangeResult {
     }
 }
 
+// MARK: - Helper Methods
+
+extension ApplyCodeService {
+    /// Find project URL for file path
+    func findProjectURL(for filePath: String) -> URL? {
+        let fileURL = URL(fileURLWithPath: filePath)
+        // Try to find project root (look for .git, package.json, etc.)
+        var current = fileURL.deletingLastPathComponent()
+        while current.path != "/" {
+            let gitPath = current.appendingPathComponent(".git")
+            let packagePath = current.appendingPathComponent("package.json")
+            if FileManager.default.fileExists(atPath: gitPath.path) ||
+               FileManager.default.fileExists(atPath: packagePath.path) {
+                return current
+            }
+            current = current.deletingLastPathComponent()
+        }
+        return fileURL.deletingLastPathComponent() // Fallback to file's directory
+    }
+}

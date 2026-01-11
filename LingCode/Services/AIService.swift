@@ -172,6 +172,7 @@ class AIService {
         _ message: String,
         context: String? = nil,
         images: [AttachedImage] = [],
+        maxTokens: Int? = nil,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -181,11 +182,13 @@ class AIService {
             return
         }
         
+        let tokens = maxTokens ?? 4096 // Default to 4096, but allow override for project generation
+        
         switch provider {
         case .openAI:
-            streamOpenAIMessage(message, context: context, images: images, apiKey: apiKey, onChunk: onChunk, onComplete: onComplete, onError: onError)
+            streamOpenAIMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, onChunk: onChunk, onComplete: onComplete, onError: onError)
         case .anthropic:
-            streamAnthropicMessage(message, context: context, images: images, apiKey: apiKey, onChunk: onChunk, onComplete: onComplete, onError: onError)
+            streamAnthropicMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, onChunk: onChunk, onComplete: onComplete, onError: onError)
         }
     }
     
@@ -293,6 +296,7 @@ class AIService {
         context: String?,
         images: [AttachedImage],
         apiKey: String,
+        maxTokens: Int,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -334,6 +338,7 @@ class AIService {
                 ["role": "user", "content": messageContent]
             ],
             "temperature": 0.7,
+            "max_tokens": maxTokens,
             "stream": true
         ]
         
@@ -551,6 +556,7 @@ class AIService {
         context: String?,
         images: [AttachedImage],
         apiKey: String,
+        maxTokens: Int,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -591,7 +597,7 @@ class AIService {
         
         let body: [String: Any] = [
             "model": anthropicModel.rawValue,
-            "max_tokens": 4096,
+            "max_tokens": maxTokens,
             "stream": true,
             "messages": [
                 ["role": "user", "content": content]

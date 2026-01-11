@@ -238,14 +238,13 @@ class CodeValidationService {
         // Basic Python validation
         // Check indentation consistency
         let lines = code.components(separatedBy: .newlines)
-        var indentLevel = 0
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             
-            let leadingSpaces = line.count - line.trimmingLeadingWhitespaces().count
             if line.hasPrefix(" ") || line.hasPrefix("\t") {
                 // Check if indentation is consistent
+                _ = line.count - line.trimmingLeadingWhitespaces().count
             }
         }
         return nil

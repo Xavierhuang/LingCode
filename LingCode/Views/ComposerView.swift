@@ -488,7 +488,6 @@ struct ComposerView: View {
         guard !composerInput.isEmpty else { return }
         
         isGenerating = true
-        let request = composerInput
         composerInput = ""
         
         // Get context
@@ -502,20 +501,6 @@ struct ComposerView: View {
             terminalOutput: nil
         )
         context += mentionContext
-        
-        // Build enhanced prompt for multi-file editing
-        let enhancedPrompt = """
-        You are editing multiple files. The user wants to make changes across their codebase.
-        
-        User request: \(request)
-        
-        Please provide code changes in the following format:
-        ```file:path/to/file.ext
-        // Full file content with changes
-        ```
-        
-        Provide changes for all relevant files. Be comprehensive and make sure all files work together.
-        """
         
         // Send to AI
         viewModel.sendMessage(
@@ -547,8 +532,9 @@ struct ComposerView: View {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try file.newContent.write(to: fileURL, atomically: true, encoding: .utf8)
 
-            // Open with change highlighting (use originalContent from ComposerFile if available)
-            editorViewModel.openFile(at: fileURL, originalContent: file.originalContent ?? originalContent ?? "")
+            // Open with change highlighting (use originalContent from ComposerFile if available, otherwise use read content)
+            let contentForHighlighting = file.originalContent.isEmpty ? (originalContent ?? "") : file.originalContent
+            editorViewModel.openFile(at: fileURL, originalContent: contentForHighlighting)
 
             // Refresh file tree to show new file immediately
             editorViewModel.refreshFileTree()

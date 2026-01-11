@@ -63,6 +63,36 @@ class FileDependencyService {
         return result
     }
     
+    /// Find files directly imported by the given file
+    func findImportedFiles(for fileURL: URL, in projectURL: URL) -> [URL] {
+        if lastProjectURL != projectURL {
+            graphCache = buildDependencyGraph(projectURL: projectURL)
+            lastProjectURL = projectURL
+        }
+        
+        guard let graph = graphCache,
+              let node = graph.nodes[fileURL] else {
+            return []
+        }
+        
+        return Array(node.imports).sorted { $0.path < $1.path }
+    }
+    
+    /// Find files that reference symbols from the given file
+    func findReferencedFiles(for fileURL: URL, in projectURL: URL) -> [URL] {
+        if lastProjectURL != projectURL {
+            graphCache = buildDependencyGraph(projectURL: projectURL)
+            lastProjectURL = projectURL
+        }
+        
+        guard let graph = graphCache,
+              let node = graph.nodes[fileURL] else {
+            return []
+        }
+        
+        return Array(node.importedBy).sorted { $0.path < $1.path }
+    }
+    
     func buildDependencyGraph(projectURL: URL) -> DependencyGraph {
         var graph = DependencyGraph()
         

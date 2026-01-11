@@ -31,6 +31,9 @@ class AIViewModel: ObservableObject {
     private let actionExecutor = ActionExecutor.shared
     private let projectGenerator = ProjectGeneratorService.shared
     
+    // Reference to editor state (set by EditorViewModel)
+    weak var editorViewModel: EditorViewModel?
+    
     func sendMessage(context: String? = nil, projectURL: URL? = nil, images: [AttachedImage] = []) {
         guard !currentInput.isEmpty, !isLoading else { return }
         
@@ -47,6 +50,45 @@ class AIViewModel: ObservableObject {
         
         // Detect if this is a "run it" request
         let isRunRequest = stepParser.detectRunRequest(userMessage)
+        
+        // Fast task classification with heuristics
+        let classifier = TaskClassifier.shared
+        let editorState = editorViewModel?.editorState
+        let classificationContext = ClassificationContext(
+            userInput: userMessage,
+            cursorIsMidLine: false, // TODO: Get from editor state
+            diagnosticsPresent: false, // TODO: Get from diagnostics
+            selectionExists: !(editorState?.selectedText.isEmpty ?? true),
+            activeFile: editorState?.activeDocument?.filePath,
+            selectedText: (editorState?.selectedText.isEmpty ?? true) ? nil : editorState?.selectedText
+        )
+        let taskType = classifier.classify(context: classificationContext)
+        
+        // Convert AITaskType to AITask for model selection
+        let aiTask: AITask = {
+            switch taskType {
+            case .autocomplete: return .autocomplete
+            case .inlineEdit: return .inlineEdit
+            case .refactor: return .refactor
+            case .debug: return .debug
+            case .generate: return .generate
+            case .chat: return .chat
+            }
+        }()
+        
+        // Model selection based on task (with offline-first support)
+        let localModelService = LocalModelService.shared
+        let (_, _) = localModelService.selectModel(
+            for: aiTask,
+            requiresReasoning: aiTask == .refactor || aiTask == .debug
+        )
+        
+        // Show offline mode badge if active
+        if let badge = localModelService.offlineModeBadge {
+            print("ℹ️ \(badge)")
+        }
+        
+        // TODO: Apply model selection to AI service (requires updating AIService to accept model parameter)
         
         // Clear previous thinking steps
         thinkingSteps = []
@@ -91,12 +133,29 @@ class AIViewModel: ObservableObject {
         thinkingSteps.append(initialStep)
         
         // Try streaming first for better UX
+        // Use higher token limit for project generation (multiple files need more tokens)
+        let maxTokens = isProjectRequest ? 16384 : nil // 16k tokens for projects, default (4k) for regular requests
+        
+        // Track latency
+        let contextStart = Date()
+        let contextTime = Date().timeIntervalSince(contextStart)
+        LatencyOptimizer.shared.recordContextBuild(contextTime)
+        
+        // Parse edits from stream as they come
+        var detectedEdits: [Edit]? = nil
+        
         aiService.streamMessage(
             enhancedPrompt,
             context: fullContext.isEmpty ? nil : fullContext,
             images: images,
+            maxTokens: maxTokens,
             onChunk: { chunk in
                 accumulatedResponse += chunk
+                
+                // Try to parse edits from stream early
+                if detectedEdits == nil {
+                    detectedEdits = LatencyOptimizer.shared.parseEditsFromStream(accumulatedResponse)
+                }
                 
                 // Parse steps incrementally as we receive chunks
                 let parsed = self.stepParser.parseResponse(accumulatedResponse)
@@ -151,6 +210,16 @@ class AIViewModel: ObservableObject {
                     role: .assistant,
                     content: assistantResponse
                 )
+                
+                // Check for missing referenced files (especially for website projects)
+                if isProjectRequest {
+                    self.checkAndRequestMissingFiles(
+                        from: assistantResponse,
+                        parsedActions: parsed.actions,
+                        projectURL: projectURL,
+                        originalPrompt: userMessage
+                    )
+                }
                 
                 // Execute code generation if enabled
                 if self.autoExecuteCode {
@@ -227,7 +296,58 @@ class AIViewModel: ObservableObject {
             "from scratch",
             "boilerplate",
             "starter",
-            "template project"
+            "template project",
+            // Web-related keywords
+            "landing page",
+            "write me a landing page",
+            "create a landing page",
+            "build a landing page",
+            "make a landing page",
+            "website",
+            "dating website",
+            "ecommerce website",
+            "portfolio website",
+            "blog website",
+            "create a website",
+            "build a website",
+            "make a website",
+            "web app",
+            "web application",
+            "create a web app",
+            "build a web app",
+            "webpage",
+            "web page",
+            "create a page",
+            "build a page",
+            "make a page",
+            "site",
+            "create a site",
+            "build a site",
+            // UI/Component keywords that typically need multiple files
+            "dashboard",
+            "create a dashboard",
+            "admin panel",
+            "create an admin",
+            "portfolio",
+            "create a portfolio",
+            "blog",
+            "create a blog",
+            "e-commerce",
+            "ecommerce",
+            "shop",
+            "store",
+            // Framework-specific that imply full apps
+            "react app",
+            "vue app",
+            "angular app",
+            "next.js",
+            "nextjs",
+            "nuxt",
+            "svelte app",
+            "flask app",
+            "django app",
+            "rails app",
+            "express app"
         ]
         
         let lowercased = message.lowercased()
@@ -331,6 +451,74 @@ class AIViewModel: ObservableObject {
             onComplete: completeHandler,
             onError: errorHandler
         )
+    }
+    
+    /// Check if HTML references CSS/JS files that weren't generated, and request them
+    private func checkAndRequestMissingFiles(
+        from response: String,
+        parsedActions: [AIAction],
+        projectURL: URL?,
+        originalPrompt: String
+    ) {
+        // Only check for website requests
+        let lowercased = originalPrompt.lowercased()
+        let isWebsite = lowercased.contains("website") ||
+                       lowercased.contains("web page") ||
+                       lowercased.contains("webpage") ||
+                       lowercased.contains("landing page") ||
+                       lowercased.contains("site") ||
+                       lowercased.contains("dating website") ||
+                       lowercased.contains("ecommerce website")
+        
+        guard isWebsite else { return }
+        
+        // Extract all generated file paths
+        let generatedFiles = Set(parsedActions.compactMap { $0.filePath })
+        
+        // Check if HTML was generated
+        guard let htmlContent = parsedActions.first(where: { $0.filePath?.hasSuffix(".html") == true })?.fileContent,
+              htmlContent.contains("styles.css") || htmlContent.contains("script.js") else {
+            return // No HTML or no references found
+        }
+        
+        // Check for missing files
+        var missingFiles: [String] = []
+        if htmlContent.contains("styles.css") && !generatedFiles.contains("styles.css") {
+            missingFiles.append("styles.css")
+        }
+        if htmlContent.contains("script.js") && !generatedFiles.contains("script.js") {
+            missingFiles.append("script.js")
+        }
+        
+        // If files are missing, automatically request them
+        if !missingFiles.isEmpty {
+            let missingFilesList = missingFiles.joined(separator: ", ")
+            let followUpPrompt = """
+            You generated index.html but forgot to generate the following referenced files: \(missingFilesList)
+            
+            Please generate these files now. Use the exact format:
+            
+            `\(missingFiles[0])`:
+            ```css
+            /* Complete CSS code here */
+            ```
+            
+            \(missingFiles.count > 1 ? """
+            `\(missingFiles[1])`:
+            ```javascript
+            // Complete JavaScript code here
+            ```
+            """ : "")
+            
+            Generate complete, working code for these files.
+            """
+            
+            // Add a small delay then send follow-up
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.currentInput = followUpPrompt
+                self.sendMessage(projectURL: projectURL)
+            }
+        }
     }
     
     private func handleCodeGenerationError(_ error: Error) {

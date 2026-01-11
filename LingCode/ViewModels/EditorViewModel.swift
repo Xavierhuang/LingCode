@@ -40,6 +40,8 @@ class EditorViewModel: ObservableObject {
     private var editorStateCancellable: AnyCancellable?
     
     init() {
+        // Set editor reference in AIViewModel
+        aiViewModel.editorViewModel = self
         // Forward editorState changes to this view model so SwiftUI updates
         editorStateCancellable = editorState.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -140,8 +142,14 @@ class EditorViewModel: ObservableObject {
     }
     
     func openFile(at url: URL, originalContent: String? = nil) {
+        // Precompute AST in background for performance
+        if let projectURL = rootFolderURL {
+            Task(priority: .utility) {
+                await LatencyOptimizer.shared.precompute(for: url, projectURL: projectURL)
+            }
+        }
         // Resolve symlinks and standardize the URL
-        let resolvedURL = (try? url.resolvingSymlinksInPath()) ?? url
+        let resolvedURL = url.resolvingSymlinksInPath()
         let standardizedURL = URL(fileURLWithPath: resolvedURL.path)
 
         // Check if file is already open (compare by path to handle URL variations)
@@ -256,17 +264,77 @@ class EditorViewModel: ObservableObject {
     // MARK: - Context for AI
     
     func getContextForAI(query: String? = nil) -> String? {
-        var context = ""
-        let indexService = CodebaseIndexService.shared
+        // Use new Cursor-style context ranking with token budget optimization
+        let rankingService = ContextRankingService.shared
+        
+        let activeFile = editorState.activeDocument?.filePath
+        let selectedRange = editorState.selectedText.isEmpty ? nil : editorState.selectedText
+        let diagnostics: [String]? = nil // TODO: Integrate with diagnostics system
+        
+        // Start speculative context building if not already done
+        if let activeFile = activeFile {
+            Task {
+                LatencyOptimizer.shared.startSpeculativeContext(
+                    activeFile: activeFile,
+                    selectedText: selectedRange,
+                    projectURL: rootFolderURL,
+                    query: query
+                )
+            }
+        }
+        
+        // Try to use speculative context first
+        if let speculative = LatencyOptimizer.shared.getSpeculativeContext() {
+            return speculative
+        }
+        
+        let rankedContext = rankingService.buildContext(
+            activeFile: activeFile,
+            selectedRange: selectedRange,
+            diagnostics: diagnostics,
+            projectURL: rootFolderURL,
+            query: query,
+            tokenLimit: 8000
+        )
         
         // Add codebase overview if indexed
+        var context = ""
+        let indexService = CodebaseIndexService.shared
         if indexService.totalSymbolCount > 0 {
             context += indexService.generateCodebaseOverview()
             context += "\n\n"
         }
         
+        context += rankedContext
+        
+        // Check if this is a website modification request
+        let lowercasedQuery = query?.lowercased() ?? ""
+        let isWebsiteModification = (lowercasedQuery.contains("upgrade") || 
+                                     lowercasedQuery.contains("modify") || 
+                                     lowercasedQuery.contains("improve") ||
+                                     lowercasedQuery.contains("update")) &&
+                                    (lowercasedQuery.contains("website") || 
+                                     lowercasedQuery.contains("site") ||
+                                     lowercasedQuery.contains("web page"))
+        
+        // If website modification, automatically include all website files
+        if isWebsiteModification, let projectURL = rootFolderURL {
+            context += "--- EXISTING WEBSITE FILES (PRESERVE ALL CODE FROM THESE) ---\n"
+            let websiteFiles = ["index.html", "styles.css", "script.js", "main.html", "style.css", "app.js", "main.js"]
+            for fileName in websiteFiles {
+                let fileURL = projectURL.appendingPathComponent(fileName)
+                if FileManager.default.fileExists(atPath: fileURL.path),
+                   let fileContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                    context += "\n--- \(fileName) (EXISTING - PRESERVE ALL CODE) ---\n"
+                    context += fileContent
+                    context += "\n"
+                }
+            }
+            context += "\n"
+        }
+        
         // Add relevant files from codebase based on query
-        if let query = query, !query.isEmpty, let projectURL = rootFolderURL {
+        if let query = query, !query.isEmpty, rootFolderURL != nil {
             let relevantFiles = indexService.getRelevantFiles(for: query, limit: 5)
             if !relevantFiles.isEmpty {
                 context += "--- Relevant Files from Codebase ---\n"
@@ -322,7 +390,7 @@ class EditorViewModel: ObservableObject {
         
         // If no active file but we have a project, include key files
         if editorState.activeDocument == nil,
-           let projectURL = rootFolderURL,
+           rootFolderURL != nil,
            indexService.totalSymbolCount > 0 {
             let keyFiles = indexService.getKeyFiles(limit: 3)
             

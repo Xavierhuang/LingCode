@@ -27,6 +27,8 @@ struct CursorStreamingFileCard: View {
     @State private var isApplied = false
     @State private var isRejected = false
     @State private var validationResult: ValidationResult?
+    @State private var shouldAutoScroll = true // Track if we should auto-scroll
+    @State private var scrollPosition: CGFloat = 0
     
     init(
         file: StreamingFileInfo,
@@ -431,20 +433,41 @@ struct CursorStreamingFileCard: View {
                 codeLinesView
                     .padding(.vertical, 8)
                     .id("bottom")
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear
+                                .preference(key: ScrollOffsetPreferenceKey.self, value: geometry.frame(in: .named("scroll")).minY)
+                        }
+                    )
             }
+            .coordinateSpace(name: "scroll")
             .frame(height: 300) // Fixed height, scrollable
             .background(
                 Color(NSColor.textBackgroundColor)
                     .opacity(0.5)
             )
+            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
+                // Track scroll position
+                scrollPosition = offset
+                // If user scrolls up significantly, disable auto-scroll
+                if offset < -50 {
+                    shouldAutoScroll = false
+                } else if offset > -10 {
+                    // Near bottom, re-enable auto-scroll
+                    shouldAutoScroll = true
+                }
+            }
             .onChange(of: file.content) { _, _ in
-                // Auto-scroll to bottom when content changes
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                // Only auto-scroll if user is near bottom or hasn't manually scrolled
+                if shouldAutoScroll {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             .onAppear {
                 // Scroll to bottom on appear
+                shouldAutoScroll = true
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
         }
@@ -661,3 +684,11 @@ struct CursorStreamingFileCard: View {
     }
 }
 
+// MARK: - Scroll Position Tracking
+
+struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}

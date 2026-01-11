@@ -265,40 +265,191 @@ class AIStepParser {
     /// Enhance prompt for step-by-step execution
     func enhancePromptForSteps(_ originalPrompt: String) -> String {
         // Detect if this is a project generation request
-        let isProjectRequest = originalPrompt.lowercased().contains("project") ||
-                              originalPrompt.lowercased().contains("app") ||
-                              originalPrompt.lowercased().contains("application") ||
-                              originalPrompt.lowercased().contains("create") ||
-                              originalPrompt.lowercased().contains("build") ||
-                              originalPrompt.lowercased().contains("scaffold")
+        let lowercased = originalPrompt.lowercased()
+        let isProjectRequest = lowercased.contains("project") ||
+                              lowercased.contains("app") ||
+                              lowercased.contains("application") ||
+                              lowercased.contains("create") ||
+                              lowercased.contains("build") ||
+                              lowercased.contains("scaffold") ||
+                              lowercased.contains("landing page") ||
+                              lowercased.contains("website") ||
+                              lowercased.contains("web app") ||
+                              lowercased.contains("web application") ||
+                              lowercased.contains("dashboard") ||
+                              lowercased.contains("portfolio") ||
+                              lowercased.contains("blog") ||
+                              lowercased.contains("write me") ||
+                              lowercased.contains("make me") ||
+                              lowercased.contains("build me")
         
         if isProjectRequest {
             return enhancePromptForProject(originalPrompt)
         }
         
+        // Even for single-file requests, encourage complete implementations
         return enhancePromptForCode(originalPrompt)
     }
     
     /// Enhanced prompt for multi-file project generation
     private func enhancePromptForProject(_ originalPrompt: String) -> String {
+        let lowercased = originalPrompt.lowercased()
+        let isWebsite = lowercased.contains("website") || 
+                       lowercased.contains("web page") || 
+                       lowercased.contains("webpage") ||
+                       lowercased.contains("landing page") ||
+                       lowercased.contains("site")
+        
+        var websiteSpecificInstructions = ""
+        if isWebsite {
+            websiteSpecificInstructions = """
+            
+            ⚠️⚠️⚠️ **MANDATORY WEBSITE GENERATION PROTOCOL** ⚠️⚠️⚠️
+            
+            **YOU ARE REQUIRED TO GENERATE EXACTLY 3 FILES. NO EXCEPTIONS.**
+            
+            **STEP-BY-STEP CHECKLIST (YOU MUST COMPLETE ALL STEPS):**
+            
+            STEP 1: Generate `index.html`
+            - HTML structure ONLY
+            - MUST include: <link rel="stylesheet" href="styles.css">
+            - MUST include: <script src="script.js"></script>
+            - NO <style> tags with CSS code
+            - NO <script> tags with JavaScript code (only the src attribute)
+            
+            STEP 2: Generate `styles.css`  
+            - ALL CSS styling goes here
+            - Complete, working stylesheet
+            - NO inline styles in HTML
+            - NO <style> tags in HTML
+            
+            STEP 3: Generate `script.js`
+            - ALL JavaScript functionality goes here
+            - Complete, working JavaScript code
+            - NO <script> tags with code in HTML
+            - Only <script src="script.js"></script> in HTML
+            
+            **OUTPUT FORMAT - COPY THIS EXACT STRUCTURE:**
+            
+            `index.html`:
+            ```html
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>My Website</title>
+                <link rel="stylesheet" href="styles.css">
+            </head>
+            <body>
+                <!-- Your HTML content here -->
+                <script src="script.js"></script>
+            </body>
+            </html>
+            ```
+            
+            `styles.css`:
+            ```css
+            /* ALL your CSS styling goes here */
+            body {
+                margin: 0;
+                padding: 0;
+            }
+            /* Continue with all styles... */
+            ```
+            
+            `script.js`:
+            ```javascript
+            // ALL your JavaScript code goes here
+            document.addEventListener('DOMContentLoaded', function() {
+                // Your code...
+            });
+            ```
+            
+            **CRITICAL REMINDERS:**
+            - You MUST output all 3 files in your response
+            - Do NOT stop after generating index.html
+            - Do NOT embed CSS or JS in HTML
+            - If you reference a file (styles.css, script.js), you MUST generate that file
+            - Your response is incomplete if it only contains index.html
+            
+            **VERIFICATION: Before you finish, check:**
+            ✓ Did I generate index.html? 
+            ✓ Did I generate styles.css?
+            ✓ Did I generate script.js?
+            ✓ Are all 3 files in my response?
+            
+            If any answer is NO, you MUST continue generating until all 3 files are complete.
+            
+            """
+        }
+        
         return """
         \(originalPrompt)
         
-        Generate ALL files needed for this project. Use this EXACT format:
+        **CRITICAL: Generate a COMPLETE, WORKING application with ALL necessary files.**
+        
+        This means:
+        - HTML/CSS/JS files (if web-based) - SEPARATE FILES, not embedded!
+        - Configuration files (package.json, requirements.txt, etc.)
+        - README.md with setup instructions
+        - All assets and dependencies
+        - A fully functional, runnable application
+        \(websiteSpecificInstructions)
+        Use this EXACT format for each file:
         
         `path/to/file.ext`:
         ```language
-        // complete code here
+        // complete code here - NO placeholders!
         ```
         
-        Include: main code, config files (package.json etc), README.md
-        Use relative paths. Provide COMPLETE working code - no placeholders!
+        **DO NOT** generate just one file. Generate the ENTIRE application structure.
+        **DO NOT** embed CSS in <style> tags or JS in <script> tags - use separate files!
+        **DO NOT** ask questions - make reasonable assumptions and build it.
+        **DO NOT** use placeholders like "..." or "// rest of code here"
+        
+        Include ALL files needed to run the application immediately.
+        Use relative paths from the project root.
+        Provide COMPLETE working code - no placeholders!
         Just build it - no questions!
         """
     }
     
     /// Enhanced prompt for single file code generation
     private func enhancePromptForCode(_ originalPrompt: String) -> String {
+        // Check if this might actually need multiple files
+        let lowercased = originalPrompt.lowercased()
+        let mightNeedMultipleFiles = lowercased.contains("page") ||
+                                    lowercased.contains("site") ||
+                                    lowercased.contains("component") ||
+                                    lowercased.contains("feature") ||
+                                    lowercased.contains("module")
+        
+        if mightNeedMultipleFiles {
+            return """
+            \(originalPrompt)
+            
+            **IMPORTANT: If this request requires multiple files (HTML + CSS + JS, or multiple components), generate ALL of them.**
+            
+            Use this format for each file:
+            
+            `path/to/file.ext`:
+            ```language
+            // complete code - NO placeholders!
+            ```
+            
+            Generate a COMPLETE, working implementation. If it needs:
+            - HTML file → generate it
+            - CSS file → generate it
+            - JavaScript file → generate it
+            - Config files → generate them
+            - README → generate it
+            
+            Don't just generate one file if the request needs multiple files to work.
+            Make reasonable assumptions and build the complete solution.
+            """
+        }
+        
         return """
         \(originalPrompt)
         
@@ -324,17 +475,47 @@ class AIStepParser {
         3. NEVER say "I need more information" - just create something useful
         4. Be proactive and creative with implementations
 
-        When creating NEW projects:
-        1. ALWAYS provide complete, working code for ALL files
+        When creating NEW projects or applications:
+        1. ALWAYS provide complete, working code for ALL files needed
         2. Use proper project structure conventions for the language/framework
-        3. Include all necessary configuration files
-        4. Follow best practices for the technology stack
-        5. Provide clear file paths in the format `path/to/file.ext`:
+        3. Include all necessary configuration files (package.json, requirements.txt, etc.)
+        4. Include README.md with setup and run instructions
+        5. Follow best practices for the technology stack
+        6. Provide clear file paths in the format `path/to/file.ext`:
+        7. **CRITICAL for websites/web pages**: You MUST generate EXACTLY 3 SEPARATE FILES:
+           STEP 1: Generate index.html (HTML structure only, MUST use <link rel="stylesheet" href="styles.css"> and <script src="script.js"></script>)
+           STEP 2: Generate styles.css (ALL CSS styling, NO <style> tags in HTML, NO inline styles)
+           STEP 3: Generate script.js (ALL JavaScript, NO <script> tags with code in HTML, only <script src="script.js"></script>)
+           **YOU MUST COMPLETE ALL 3 STEPS. DO NOT STOP AFTER STEP 1. YOUR RESPONSE IS INCOMPLETE IF IT ONLY HAS HTML.**
+        8. If it's a React/Vue/Angular app, include all component files and config
+        9. Make it runnable immediately - no missing dependencies or files
+        10. **NEVER generate just one HTML file with embedded CSS/JS for websites!**
+        11. **If you reference a file in HTML (like styles.css or script.js), YOU MUST GENERATE THAT FILE IN THE SAME RESPONSE!**
+        12. **For website requests, count your files before finishing: You need 3 files (HTML, CSS, JS). If you only have 1, you're not done!**
 
         When MODIFYING existing files:
         **CRITICAL: Always output the COMPLETE file, not snippets!**
         The system replaces entire files - partial code will delete the rest!
-        Include ALL original code + your changes.
+        
+        **BEFORE MODIFYING ANY FILE:**
+        1. Look for the existing file content in the context above (it will be marked with "--- filename.ext ---" or "--- filename.ext (EXISTING - PRESERVE ALL CODE) ---")
+        2. Read and preserve ALL existing code from that file - EVERY LINE, EVERY FUNCTION, EVERY VARIABLE
+        3. Make your changes while keeping ALL original code intact
+        4. Output the COMPLETE file with ALL original code + your changes
+        
+        **CRITICAL RULES FOR MODIFICATIONS:**
+        - NEVER delete existing code unless explicitly asked to remove it
+        - NEVER replace entire functions - only modify what needs to change
+        - ALWAYS include ALL original code in your output
+        - If you see "EXISTING - PRESERVE ALL CODE" in context, that file MUST keep all its current content
+        - When upgrading/improving, ADD new features while keeping ALL existing features
+        - If you don't see the file content in context, you MUST ask or preserve what you know should be there
+        
+        **Example of CORRECT modification:**
+        Original file has 500 lines of JavaScript code.
+        User asks to "upgrade" or "improve" it.
+        Your output MUST include all 500 original lines PLUS your improvements.
+        Your output should be 500+ lines, not 10 lines!
 
         OUTPUT FORMAT (REQUIRED):
 
@@ -426,6 +607,30 @@ class AIStepParser {
 
         CRITICAL FILE OUTPUT RULE:
         **ALWAYS output the COMPLETE file content, never just snippets.**
+        
+        PREFERRED OUTPUT FORMAT (for edits):
+        For code modifications, you can use structured JSON edit format:
+        ```json
+        {
+          "edits": [
+            {
+              "file": "path/to/file.ext",
+              "operation": "replace",
+              "range": {
+                "startLine": 10,
+                "endLine": 15
+              },
+              "content": [
+                "line 1 of new code",
+                "line 2 of new code"
+              ]
+            }
+          ]
+        }
+        ```
+        
+        Operations: "insert", "replace", "delete"
+        If using JSON format, ensure all edits are valid and within file bounds.
 
         WHY: The system replaces entire files. Partial snippets will delete the rest of the file!
 

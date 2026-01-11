@@ -31,7 +31,6 @@ class PTYTerminalService: ObservableObject {
     /// Open a PTY pair
     private func openPTY() -> Bool {
         var masterFD: Int32 = -1
-        var slaveFD: Int32 = -1
         
         // Open master PTY
         masterFD = Darwin.posix_openpt(O_RDWR)

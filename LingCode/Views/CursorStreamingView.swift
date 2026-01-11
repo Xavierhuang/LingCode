@@ -46,12 +46,41 @@ struct CursorStreamingView: View {
                 editorViewModel: editorViewModel,
                 activeMentions: $activeMentions,
                 onSendMessage: sendMessage,
-                onImageDrop: handleImageDrop
+                onImageDrop: { providers in
+                    return await handleImageDrop(providers: providers)
+                }
             )
         }
         .background(DesignSystem.Colors.primaryBackground)
-        .onChange(of: viewModel.conversation.messages.last?.content, perform: handleMessageChange)
-        .onChange(of: viewModel.currentActions, perform: handleActionsChange)
+        .onChange(of: viewModel.conversation.messages.last?.content) { _, newContent in
+            handleMessageChange(newContent)
+        }
+        .onChange(of: viewModel.currentActions) { _, newActions in
+            handleActionsChange(newActions)
+        }
+        .onChange(of: viewModel.isGeneratingProject) { wasGenerating, isGenerating in
+            // When project generation completes, auto-apply all generated files
+            if wasGenerating && !isGenerating {
+                // Defer state changes outside of view update cycle
+                Task { @MainActor in
+                    // Small delay to ensure files are fully parsed
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                    if !self.parsedFiles.isEmpty {
+                        self.autoApplyAllFiles()
+                    }
+                }
+            }
+        }
+        .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
+            // Also auto-apply when loading completes if it was a project generation
+            if wasLoading && !isLoading && viewModel.isGeneratingProject == false && !parsedFiles.isEmpty {
+                // Defer state changes outside of view update cycle
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                    self.autoApplyAllFiles()
+                }
+            }
+        }
         .onAppear(perform: handleAppear)
         .sheet(isPresented: $showGraphiteView) {
             if !parsedFiles.isEmpty {
@@ -100,14 +129,22 @@ struct CursorStreamingView: View {
                 .padding(.vertical, DesignSystem.Spacing.md)
             }
             .onChange(of: streamingText) { _, _ in
-                withAnimation(DesignSystem.Animation.smooth) {
-                    proxy.scrollTo("streaming", anchor: .bottom)
+                // Only auto-scroll if user hasn't manually scrolled
+                // Use a debounced approach - only scroll if content changed significantly
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    withAnimation(DesignSystem.Animation.smooth) {
+                        proxy.scrollTo("streaming", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: parsedFiles.count) { oldCount, newCount in
-                if let lastFile = parsedFiles.last {
-                    withAnimation(DesignSystem.Animation.smooth) {
-                        proxy.scrollTo(lastFile.id, anchor: .center)
+                // Only scroll to new file if it's the first one or user is near bottom
+                if newCount > oldCount, let lastFile = parsedFiles.last {
+                    // Use a gentler scroll that doesn't interrupt user scrolling
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        withAnimation(DesignSystem.Animation.smooth) {
+                            proxy.scrollTo(lastFile.id, anchor: .center)
+                        }
                     }
                 }
 
@@ -118,8 +155,11 @@ struct CursorStreamingView: View {
             }
             .onChange(of: parsedCommands.count) { _, _ in
                 if let lastCommand = parsedCommands.last {
-                    withAnimation(DesignSystem.Animation.smooth) {
-                        proxy.scrollTo(lastCommand.id.uuidString, anchor: .center)
+                    // Debounce scroll to avoid interrupting user
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        withAnimation(DesignSystem.Animation.smooth) {
+                            proxy.scrollTo(lastCommand.id.uuidString, anchor: .center)
+                        }
                     }
                 }
             }
@@ -371,6 +411,25 @@ struct CursorStreamingView: View {
         fileActionHandler.applyFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
     }
     
+    private func autoApplyAllFiles() {
+        // Auto-apply all parsed files when project generation completes
+        // Apply files sequentially to avoid state update conflicts
+        let filesToApply = Array(parsedFiles)
+        Task { @MainActor in
+            for (index, file) in filesToApply.enumerated() {
+                // Small delay between each file to avoid overwhelming the system
+                if index > 0 {
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s delay between files
+                }
+                self.applyFile(file)
+            }
+            
+            // Final refresh after all files are applied to ensure file tree is updated
+            try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s delay to ensure all writes complete
+            self.editorViewModel.refreshFileTree()
+        }
+    }
+    
     private func openAction(_ action: AIAction) {
         fileActionHandler.openAction(action, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
     }
@@ -381,7 +440,7 @@ struct CursorStreamingView: View {
     
     // MARK: - Drag and Drop
     
-    nonisolated private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {
+    private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {
         var handled = false
         
         for provider in providers {
@@ -447,7 +506,8 @@ struct CursorStreamingView: View {
         streamingText = ""
         parsedFiles = []
         parsedCommands = [] // Clear previous commands
-        var context = editorViewModel.getContextForAI() ?? ""
+        // Pass user message as query to detect website modifications and include existing files
+        var context = editorViewModel.getContextForAI(query: viewModel.currentInput) ?? ""
         
         // Build context from mentions
         let mentionContext = MentionParser.shared.buildContextFromMentions(

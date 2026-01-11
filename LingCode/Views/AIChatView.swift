@@ -341,12 +341,6 @@ struct AIChatView: View {
         .sheet(isPresented: $showProjectGenerator) {
             ProjectGenerationView(viewModel: viewModel, isPresented: $showProjectGenerator)
         }
-        .overlay(alignment: .bottom) {
-            if viewModel.isGeneratingProject {
-                ProjectProgressOverlay(viewModel: viewModel)
-                    .padding()
-            }
-        }
     }
     
     // MARK: - Left Edge Collapse Button

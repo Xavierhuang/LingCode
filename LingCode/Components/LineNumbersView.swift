@@ -38,7 +38,7 @@ struct LineNumbersView: NSViewRepresentable {
         context.coordinator.editorScrollView = editorScrollView
         
         // Synchronize scrolling
-        if let editorScrollView = editorScrollView {
+        if editorScrollView != nil {
             context.coordinator.synchronizeScrolling()
         }
         
@@ -94,7 +94,7 @@ struct LineNumbersView: NSViewRepresentable {
             }
             
             guard let editorScrollView = editorScrollView,
-                  let scrollView = scrollView else { return }
+                  scrollView != nil else { return }
             
             // Set up scroll synchronization
             editorScrollView.contentView.postsBoundsChangedNotifications = true

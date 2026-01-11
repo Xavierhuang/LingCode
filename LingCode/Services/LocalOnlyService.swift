@@ -14,7 +14,7 @@ class LocalOnlyService {
     static let shared = LocalOnlyService()
     
     var isLocalModeEnabled: Bool = false
-    var availableLocalModels: [LocalModel] = []
+    var availableLocalModels: [LocalModelInfo] = []
     
     private init() {
         loadSettings()
@@ -74,7 +74,7 @@ class LocalOnlyService {
     }
     
     private func processWithLocalModel(
-        model: LocalModel,
+        model: LocalModelInfo,
         prompt: String,
         context: String?,
         onResponse: @escaping (String) -> Void,
@@ -134,7 +134,7 @@ class LocalOnlyService {
 
 // MARK: - Models
 
-struct LocalModel {
+struct LocalModelInfo {
     let id: String
     let name: String
     let provider: String // "ollama", "lmstudio", etc.

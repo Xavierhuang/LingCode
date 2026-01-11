@@ -175,11 +175,35 @@ struct GhostTextEditor: NSViewRepresentable {
             let position = textView.selectedRange().location
             let content = textView.string
             
-            InlineSuggestionService.shared.requestSuggestion(
-                for: content,
-                at: position,
-                language: language,
-                context: content
+            // Use new inline autocomplete service with optimized context
+            let lines = content.components(separatedBy: .newlines)
+            let lineNumber = content.prefix(position).components(separatedBy: .newlines).count
+            let last200Lines = Array(lines.suffix(200)).joined(separator: "\n")
+            
+            let context = AutocompleteContext(
+                fileContent: content,
+                cursorPosition: lineNumber,
+                last200Lines: last200Lines,
+                language: language ?? "swift"
+            )
+            
+            // Check power-saving settings
+            let powerSettings = PerformanceOptimizer.shared.getPowerSavingSettings()
+            if powerSettings.reduceAutocompleteFrequency {
+                // Skip autocomplete in power-saving mode
+                return
+            }
+            
+            InlineAutocompleteService.shared.requestSuggestion(
+                context: context,
+                onSuggestion: { suggestion in
+                    if let suggestion = suggestion {
+                        textView.ghostText = suggestion.currentText
+                    }
+                },
+                onCancel: {
+                    // Canceled - do nothing
+                }
             )
         }
         
