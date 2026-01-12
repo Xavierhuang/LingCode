@@ -1,0 +1,17 @@
+{
+  "apiKey": "REPLACE_WITH_YOUR_TEST_API_KEY",
+  "provider": "anthropic",
+  "note": "This is a test API key for App Store review purposes only. Replace REPLACE_WITH_YOUR_TEST_API_KEY with your actual test key before submitting to App Store.",
+  "instructions": "Use this key in the LingCode app welcome screen to test AI functionality. The key should have reasonable usage limits set to prevent abuse.",
+  "contact": {
+    "email": "hhuangweijia@gmail.com",
+    "phone": "(646) 567-1456"
+  },
+  "alternatives": {
+    "anthropic": "https://console.anthropic.com/settings/keys",
+    "openai": "https://platform.openai.com/api-keys"
+  }
+}
+
+
+
