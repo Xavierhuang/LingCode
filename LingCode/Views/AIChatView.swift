@@ -16,16 +16,17 @@ struct AIChatView: View {
     @State private var activeMentions: [Mention] = []
     @State private var showFileSelector: Bool = false
     @State private var showProjectGenerator: Bool = false
-    @State private var viewMode: AIViewMode = .progress  // Show progress by default like Cursor
+    @State private var viewMode: AIViewMode = .agent  // Default to Agent mode
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var shouldAutoScroll: Bool = true  // Track if we should auto-scroll
     @State private var lastMessageCount: Int = 0
+    @State private var isHoveringToggle: Bool = false
     
     enum AIViewMode {
-        case chat
-        case cursor  // Cursor-style experience (default)
-        case progress
-        case composer  // Multi-file editing mode
+        case agent   // Agent mode - autonomous task execution
+        case plan    // Plan mode - show planning/thinking process
+        case debug   // Debug mode - debugging assistance
+        case ask     // Ask mode - regular chat (default)
     }
     
     // Show Cursor experience when AI is working
@@ -49,20 +50,20 @@ struct AIChatView: View {
                         
                         Spacer()
                         
-                        // View mode toggle
-                        Picker("", selection: $viewMode) {
-                            Image(systemName: "list.bullet.rectangle")
-                                .tag(AIViewMode.progress)
-                            Image(systemName: "sparkles")
-                                .tag(AIViewMode.cursor)
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .tag(AIViewMode.chat)
-                            Image(systemName: "square.stack.3d.up")
-                                .tag(AIViewMode.composer)
+                        // Mode selector - Agent, Plan, Debug, Ask
+                        HStack(spacing: 2) {
+                            modeButton(.agent, icon: "infinity", label: "Agent", shortcut: "⌘I")
+                            modeButton(.plan, icon: "list.bullet.rectangle", label: "Plan")
+                            modeButton(.debug, icon: "ant", label: "Debug")
+                            modeButton(.ask, icon: "bubble.left.and.bubble.right", label: "Ask")
                         }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 160)
-                        .help("Switch between Progress, Cursor-style, Chat, and Composer view")
+                        .padding(2)
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(NSColor.separatorColor), lineWidth: 0.5)
+                        )
                         
                         // New Project button
                         Button(action: { showProjectGenerator = true }) {
@@ -102,273 +103,22 @@ struct AIChatView: View {
                     
                     // Switch between views based on mode
                     switch viewMode {
-                    case .cursor:
-                        // Cursor-level polished experience (default)
-                        CursorLevelAIView(viewModel: viewModel, editorViewModel: editorViewModel)
-                        
-                    case .progress:
-                        // Cursor-style streaming experience (exact like Cursor)
+                    case .agent:
+                        // Agent Mode - Full interactive experience with thinking, code generation, and summaries
+                        // Use CursorStreamingView for the full experience
                         CursorStreamingView(viewModel: viewModel, editorViewModel: editorViewModel)
-                    
-                    case .composer:
-                        // Composer Mode - Multi-file editing
-                        ComposerView(viewModel: viewModel, editorViewModel: editorViewModel)
-                    
-                    case .chat:
-                    // Traditional chat view
-                    VStack(spacing: 0) {
-                        // Show file progress inline when loading
-                        if viewModel.isLoading && !viewModel.currentActions.isEmpty {
-                            InlineProgressBar(viewModel: viewModel)
-                        }
                         
-                        // Show thinking process if enabled and loading
-                        if viewModel.showThinkingProcess && viewModel.isLoading {
-                            ThinkingProcessView(viewModel: viewModel)
-                                .padding(.vertical, 8)
-                        }
+                    case .plan:
+                        // Plan Mode - Show planning/thinking process
+                        PlanModeView(viewModel: viewModel, editorViewModel: editorViewModel)
                         
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 12) {
-                                    ForEach(viewModel.conversation.messages) { message in
-                                        MessageBubble(
-                                            message: message,
-                                            isStreaming: viewModel.isLoading && message.id == viewModel.conversation.messages.last?.id,
-                                            workingDirectory: editorViewModel.rootFolderURL,
-                                            onCopyCode: { code in
-                                                NSPasteboard.general.clearContents()
-                                                NSPasteboard.general.setString(code, forType: .string)
-                                            }
-                                        )
-                                            .id(message.id)
-                                    }
-                                    
-                                    // Show file changes inline in chat
-                                    if !viewModel.currentActions.isEmpty {
-                                        InlineFileChangesView(
-                                            actions: viewModel.currentActions,
-                                            createdFiles: viewModel.createdFiles,
-                                            isLoading: viewModel.isLoading,
-                                            onOpenFile: { url in
-                                                editorViewModel.openFile(at: url)
-                                            },
-                                            onViewDetails: {
-                                                viewMode = .cursor
-                                            }
-                                        )
-                                    }
-                                    
-                                    if viewModel.isLoading && viewModel.currentActions.isEmpty && !viewModel.showThinkingProcess {
-                                        LoadingIndicatorView(onCancel: {
-                                            viewModel.cancelGeneration()
-                                        })
-                                    }
-                                    
-                                    // Scroll to bottom button (appears when user scrolls up)
-                                    if !shouldAutoScroll {
-                                        Button(action: {
-                                            shouldAutoScroll = true
-                                            if let lastMessage = viewModel.conversation.messages.last {
-                                                withAnimation {
-                                                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                                                }
-                                            }
-                                        }) {
-                                            HStack {
-                                                Image(systemName: "arrow.down.circle.fill")
-                                                Text("Scroll to bottom")
-                                            }
-                                            .font(.caption)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 6)
-                                            .background(Color.accentColor)
-                                            .foregroundColor(.white)
-                                            .cornerRadius(16)
-                                        }
-                                        .buttonStyle(PlainButtonStyle())
-                                        .padding(.top, 8)
-                                    }
-                                }
-                                .padding()
-                            }
-                            .scrollDismissesKeyboard(.interactively)
-                            .onChange(of: viewModel.conversation.messages.count) { oldValue, newValue in
-                                // Only auto-scroll on new messages when not loading (to avoid blocking during streaming)
-                                if !viewModel.isLoading && newValue > oldValue, let lastMessage = viewModel.conversation.messages.last {
-                                    lastMessageCount = newValue
-                                    // Small delay to allow user to scroll if they want
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                        withAnimation(.easeOut(duration: 0.2)) {
-                                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                                        }
-                                    }
-                                }
-                            }
-                            // Don't auto-scroll on content changes during streaming - let user scroll freely
-                            // This prevents the scroll view from being locked during code generation
-                        }
+                    case .debug:
+                        // Debug Mode - Debugging assistance
+                        DebugModeView(viewModel: viewModel, editorViewModel: editorViewModel)
                         
-                        Divider()
-                        
-                        // Context badges
-                        if !activeMentions.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack {
-                                    ForEach(activeMentions) { mention in
-                                        MentionBadgeView(mention: mention) {
-                                            activeMentions.removeAll { $0.id == mention.id }
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal)
-                                .padding(.vertical, 4)
-                            }
-                        }
-                        
-                        // Quick context buttons
-                        HStack(spacing: 8) {
-                            Button(action: { addMention(.selection) }) {
-                                Label("Selection", systemImage: "selection.pin.in.out")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(editorViewModel.editorState.selectedText.isEmpty)
-                            
-                            Button(action: { addMention(.file) }) {
-                                Label("File", systemImage: "doc")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(editorViewModel.editorState.activeDocument == nil)
-                            
-                            Button(action: { showFileSelector = true }) {
-                                Label("@", systemImage: "at")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .popover(isPresented: $showMentionPopup, arrowEdge: .top) {
-                                MentionPopupView(isVisible: $showMentionPopup) { type in
-                                    addMention(type)
-                                }
-                            }
-                            
-                            Spacer()
-                            
-                            Toggle("Related", isOn: $editorViewModel.includeRelatedFilesInContext)
-                                .font(.caption)
-                                .toggleStyle(.checkbox)
-                        }
-                        .padding(.horizontal)
-                        .padding(.top, 4)
-                        
-                        // Input area
-                        HStack(alignment: .bottom) {
-                            Button(action: { showMentionPopup = true }) {
-                                Image(systemName: "plus.circle")
-                                    .font(.title3)
-                                    .foregroundColor(.secondary)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .help("Add context")
-                            
-                            TextField("Ask AI... (type @ for mentions)", text: $viewModel.currentInput, axis: .vertical)
-                                .textFieldStyle(.roundedBorder)
-                                .lineLimit(1...5)
-                                .onSubmit {
-                                    sendMessageWithContext()
-                                }
-                                .onChange(of: viewModel.currentInput) { _, newValue in
-                                    // Check for @ trigger
-                                    if newValue.hasSuffix("@") {
-                                        showMentionPopup = true
-                                    }
-                                }
-                        
-                            Button(action: {
-                                if viewModel.isLoading {
-                                    viewModel.cancelGeneration()
-                                } else {
-                                    sendMessageWithContext()
-                                }
-                            }) {
-                                Image(systemName: viewModel.isLoading ? "stop.circle.fill" : "arrow.up.circle.fill")
-                                    .font(.title2)
-                                    .foregroundColor(viewModel.isLoading ? .red : .accentColor)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .disabled(!viewModel.isLoading && viewModel.currentInput.isEmpty && activeMentions.isEmpty)
-                            .help(viewModel.isLoading ? "Stop generation" : "Send message")
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                        .onDrop(of: [.image, .fileURL], isTargeted: .constant(false)) { providers in
-                            Task {
-                                _ = await handleImageDrop(providers: providers)
-                            }
-                            return true
-                        }
-                        
-                        // Attached images preview
-                        if !imageContextService.attachedImages.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(imageContextService.attachedImages) { image in
-                                        ZStack(alignment: .topTrailing) {
-                                            Image(nsImage: image.image)
-                                                .resizable()
-                                                .aspectRatio(contentMode: .fill)
-                                                .frame(width: 60, height: 60)
-                                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                            
-                                            Button(action: {
-                                                imageContextService.removeImage(image.id)
-                                            }) {
-                                                Image(systemName: "xmark.circle.fill")
-                                                    .foregroundColor(.white)
-                                                    .background(Color.black.opacity(0.6))
-                                                    .clipShape(Circle())
-                                                    .font(.system(size: 14))
-                                            }
-                                            .buttonStyle(PlainButtonStyle())
-                                            .offset(x: 4, y: -4)
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                            }
-                            .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-                            .padding(.horizontal)
-                        }
-                        
-                        // Context files indicator
-                        if let contextFiles = getContextFiles(), !contextFiles.isEmpty {
-                            ContextFilesIndicator(files: contextFiles)
-                                .padding(.horizontal)
-                                .padding(.bottom, 4)
-                        }
-                        
-                        if let error = viewModel.errorMessage {
-                            HStack {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .foregroundColor(.red)
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 8)
-                        }
-                        
-                        // Show created files summary (compact)
-                        if !viewModel.createdFiles.isEmpty && !viewModel.isLoading && viewModel.currentActions.isEmpty {
-                            createdFilesSection
-                        }
-                    }
+                    case .ask:
+                        // Ask Mode - Simple chat interface (just conversation, no code generation)
+                        SimpleChatView(viewModel: viewModel, editorViewModel: editorViewModel)
                     }
                 }
             }
@@ -376,11 +126,33 @@ struct AIChatView: View {
         .sheet(isPresented: $showProjectGenerator) {
             ProjectGenerationView(viewModel: viewModel, isPresented: $showProjectGenerator)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SwitchToAgentMode"))) { _ in
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                viewMode = .agent
+            }
+        }
     }
     
     // MARK: - Left Edge Collapse Button
     
-    @State private var isHoveringToggle: Bool = false
+    // MARK: - Mode Selector
+    
+    private func modeButton(_ mode: AIViewMode, icon: String, label: String, shortcut: String? = nil) -> some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                viewMode = mode
+            }
+        }) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: viewMode == mode ? .semibold : .regular))
+                .foregroundColor(viewMode == mode ? .primary : .secondary)
+                .frame(width: 28, height: 28)
+                .background(viewMode == mode ? Color.accentColor.opacity(0.15) : Color.clear)
+                .cornerRadius(6)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .help("\(label) mode\(shortcut.map { " (\($0))" } ?? "")")
+    }
     
     private var leftEdgeCollapseButton: some View {
         Button(action: {

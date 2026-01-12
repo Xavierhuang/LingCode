@@ -75,7 +75,9 @@ class AgentService: ObservableObject {
                 
                 // Update planning step
                 self.updateStep(planningStep.id, status: .completed, result: "Created \(plan.count) step plan")
-                onStepUpdate(self.steps.first { $0.id == planningStep.id }!)
+                if let updatedStep = self.steps.first(where: { $0.id == planningStep.id }) {
+                    onStepUpdate(updatedStep)
+                }
                 
                 // Execute the plan
                 self.executePlan(
@@ -92,7 +94,9 @@ class AgentService: ObservableObject {
             },
             onError: { error in
                 self.updateStep(planningStep.id, status: .failed, error: error.localizedDescription)
-                onStepUpdate(self.steps.first { $0.id == planningStep.id }!)
+                if let updatedStep = self.steps.first(where: { $0.id == planningStep.id }) {
+                    onStepUpdate(updatedStep)
+                }
                 self.isRunning = false
                 onComplete(AgentTaskResult(success: false, error: error.localizedDescription))
             }
@@ -168,7 +172,9 @@ class AgentService: ObservableObject {
             context: context,
             onOutput: { output in
                 self.updateStep(agentStep.id, output: output)
-                onStepUpdate(self.steps.first { $0.id == agentStep.id }!)
+                if let updatedStep = self.steps.first(where: { $0.id == agentStep.id }) {
+                    onStepUpdate(updatedStep)
+                }
             },
             onComplete: { success, newFiles, error in
                 if success {
@@ -176,7 +182,9 @@ class AgentService: ObservableObject {
                 } else {
                     self.updateStep(agentStep.id, status: .failed, error: error)
                 }
-                onStepUpdate(self.steps.first { $0.id == agentStep.id }!)
+                if let updatedStep = self.steps.first(where: { $0.id == agentStep.id }) {
+                    onStepUpdate(updatedStep)
+                }
                 
                 var allCreatedFiles = createdFiles
                 allCreatedFiles.append(contentsOf: newFiles)

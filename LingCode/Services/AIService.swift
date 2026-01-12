@@ -117,6 +117,19 @@ class AIService {
         onResponse: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) {
+        // Check if local mode is enabled and available
+        let localService = LocalOnlyService.shared
+        if localService.isLocalModeEnabled && localService.isLocalModelAvailable() {
+            // Use local model
+            localService.processLocally(
+                prompt: message,
+                context: context,
+                onResponse: onResponse,
+                onError: onError
+            )
+            return
+        }
+        
         // Check cache first
         let performanceService = PerformanceService.shared
         if let cached = performanceService.getCachedResponse(prompt: message, context: context) {
@@ -177,6 +190,20 @@ class AIService {
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
     ) {
+        // Check if local mode is enabled and available
+        let localService = LocalOnlyService.shared
+        if localService.isLocalModeEnabled && localService.isLocalModelAvailable() {
+            // Use local model with streaming
+            localService.streamLocally(
+                prompt: message,
+                context: context,
+                onChunk: onChunk,
+                onComplete: onComplete,
+                onError: onError
+            )
+            return
+        }
+        
         guard let apiKey = apiKey else {
             onError(NSError(domain: "AIService", code: 401, userInfo: [NSLocalizedDescriptionKey: "API key not set"]))
             return

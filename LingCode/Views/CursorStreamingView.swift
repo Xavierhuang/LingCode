@@ -14,6 +14,11 @@ struct CursorStreamingView: View {
     @ObservedObject var viewModel: AIViewModel
     @ObservedObject var editorViewModel: EditorViewModel
     
+    init(viewModel: AIViewModel, editorViewModel: EditorViewModel) {
+        self.viewModel = viewModel
+        self.editorViewModel = editorViewModel
+    }
+    
     @State private var streamingText: String = ""
     @State private var parsedFiles: [StreamingFileInfo] = []
     @State private var expandedFiles: Set<String> = []
@@ -28,6 +33,9 @@ struct CursorStreamingView: View {
     private let contentParser = StreamingContentParser.shared
     private let fileActionHandler = FileActionHandler.shared
     
+    // Debouncing for parsing to reduce CPU usage
+    private let parseDebouncer = ParseDebouncer(debounceInterval: 200_000_000) // 200ms
+    
     var body: some View {
         VStack(spacing: 0) {
             StreamingHeaderView(viewModel: viewModel)
@@ -41,6 +49,11 @@ struct CursorStreamingView: View {
             Rectangle()
                 .fill(DesignSystem.Colors.borderSubtle)
                 .frame(height: 1)
+            
+            // Apply button - shows when generation is complete and there are files to apply
+            if !viewModel.isLoading && !parsedFiles.isEmpty && hasFilesToApply {
+                applyButtonBar
+            }
             
             StreamingInputView(
                 viewModel: viewModel,
@@ -80,12 +93,12 @@ struct CursorStreamingView: View {
         }
         .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
             // Auto-apply when loading completes (generation finished)
-            // Only apply if files are complete and not empty
-            if wasLoading && !isLoading && !parsedFiles.isEmpty {
+            // Only apply if auto-execute is enabled AND files are complete and not empty
+            if wasLoading && !isLoading && viewModel.autoExecuteCode && !parsedFiles.isEmpty {
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
                     // Wait to ensure all streaming content is complete
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second to ensure completion
+                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds to ensure completion
                     
                     // Re-parse to get final content
                     let parser = StreamingContentParser.shared
@@ -96,12 +109,29 @@ struct CursorStreamingView: View {
                         actions: viewModel.currentActions
                     )
                     
-                    // Update parsed files with final content
-                    self.parsedFiles = finalFiles
-                    
-                    // Now apply only complete files (with safety checks)
-                    self.autoApplyAllFiles()
+                    // Only update if we got valid files
+                    if !finalFiles.isEmpty {
+                        // Verify all files have substantial content before applying
+                        let validFiles = finalFiles.filter { file in
+                            let trimmed = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                            return !trimmed.isEmpty && trimmed.count > 20 // Minimum 20 characters
+                        }
+                        
+                        if !validFiles.isEmpty {
+                            print("✅ Auto-applying \(validFiles.count) files (auto-execute enabled)")
+                            self.parsedFiles = validFiles
+                            // Now apply only complete files (with safety checks)
+                            self.autoApplyAllFiles()
+                        } else {
+                            print("⚠️ No valid files to auto-apply - all files are too small or empty")
+                        }
+                    } else {
+                        print("⚠️ Re-parsing returned no files - skipping auto-apply to prevent code deletion")
+                    }
                 }
+            } else if wasLoading && !isLoading && !viewModel.autoExecuteCode {
+                print("ℹ️ Generation complete. Auto-execute is disabled - files will not be automatically applied.")
+                print("   Enable 'Auto Execute' in the menu to automatically apply generated files.")
             }
         }
         .onAppear(perform: handleAppear)
@@ -158,10 +188,12 @@ struct CursorStreamingView: View {
             .onChange(of: parsedFiles.count) { oldCount, newCount in
                 // Only scroll to new file if it's the first one
                 if oldCount == 0 && newCount == 1, let firstFile = parsedFiles.first {
-                    // Auto-open the first file in the editor for preview
-                    openFile(firstFile)
-                    // Gentle scroll to show the new file
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    // Defer state changes to avoid publishing during view updates
+                    Task { @MainActor in
+                        // Auto-open the first file in the editor for preview
+                        self.openFile(firstFile)
+                        // Gentle scroll to show the new file
+                        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3 seconds
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                             proxy.scrollTo(firstFile.id, anchor: .top)
                         }
@@ -170,8 +202,10 @@ struct CursorStreamingView: View {
             }
             .onChange(of: parsedCommands.count) { _, _ in
                 if let lastCommand = parsedCommands.last {
-                    // Debounce scroll to avoid interrupting user
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    // Defer state changes to avoid publishing during view updates
+                    Task { @MainActor in
+                        // Debounce scroll to avoid interrupting user
+                        try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                             proxy.scrollTo(lastCommand.id.uuidString, anchor: .center)
                         }
@@ -518,13 +552,87 @@ struct CursorStreamingView: View {
                     StreamingResponseView(
                         content: streamingText,
                         onContentChange: { newContent in
-                            streamingText = newContent
-                            parseStreamingContent(newContent)
+                            // Update streaming text immediately for display
+                            Task { @MainActor in
+                                self.streamingText = newContent
+                            }
+                            // Debounce parsing to reduce CPU usage
+                            parseDebouncer.debounce {
+                                await MainActor.run {
+                                    self.parseStreamingContent(newContent)
+                                }
+                            }
                         }
                     )
                     .id("streaming")
                 }
             }
+        }
+    }
+    
+    // MARK: - Apply Button Bar
+    
+    private var applyButtonBar: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                Text("\(parsedFiles.count) file\(parsedFiles.count == 1 ? "" : "s")")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                // Undo all - clear parsed files
+                Task { @MainActor in
+                    self.parsedFiles.removeAll()
+                }
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("Undo All")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            Button(action: {
+                // Apply all files
+                autoApplyAllFiles()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Apply All")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.accentColor)
+                .cornerRadius(6)
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+    }
+    
+    private var hasFilesToApply: Bool {
+        parsedFiles.contains { file in
+            !file.isStreaming &&
+            !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            file.content.count > 10
         }
     }
     
@@ -543,16 +651,22 @@ struct CursorStreamingView: View {
     private func handleMessageChange(_ newContent: String?) {
         guard let content = newContent else { return }
         
-        // Update state asynchronously to avoid publishing during view updates
+        // Update streaming text immediately for display (defer to avoid publishing during view updates)
         Task { @MainActor in
             self.streamingText = content
-            self.parseStreamingContent(content)
-            
-            // Re-parse when streaming completes to catch any final commands
-            if !self.viewModel.isLoading {
-                let commands = self.terminalService.extractCommands(from: content)
-                if !commands.isEmpty {
-                    self.parsedCommands = commands
+        }
+        
+        // Debounce parsing to reduce CPU usage - only parse every 200ms
+        parseDebouncer.debounce {
+            await MainActor.run {
+                self.parseStreamingContent(content)
+                
+                // Re-parse when streaming completes to catch any final commands
+                if !self.viewModel.isLoading {
+                    let commands = self.terminalService.extractCommands(from: content)
+                    if !commands.isEmpty {
+                        self.parsedCommands = commands
+                    }
                 }
             }
         }
@@ -560,7 +674,13 @@ struct CursorStreamingView: View {
     
     private func handleActionsChange(_: [AIAction]) {
         if viewModel.isLoading {
-            parseStreamingContent(streamingText)
+            // Debounce parsing to reduce CPU usage
+            let currentText = streamingText
+            parseDebouncer.debounce {
+                await MainActor.run {
+                    self.parseStreamingContent(currentText)
+                }
+            }
         }
     }
     
@@ -580,6 +700,14 @@ struct CursorStreamingView: View {
     // MARK: - Parsing
     
     private func parseStreamingContent(_ content: String) {
+        // Skip parsing if content hasn't changed significantly (reduce CPU usage)
+        let contentHash = content.hashValue
+        if contentHash == parseDebouncer.lastParsedContentHash && viewModel.isLoading {
+            return // Content hasn't changed enough to warrant re-parsing
+        }
+        // Update hash in debouncer (it's a class so we can modify it)
+        parseDebouncer.lastParsedContentHash = contentHash
+        
         // First, extract terminal commands
         let commands = terminalService.extractCommands(from: content)
         
@@ -604,7 +732,11 @@ struct CursorStreamingView: View {
                 }
             }
             
-            self.parsedFiles = newFiles
+            // Only update if files actually changed (avoid unnecessary view updates)
+            if newFiles.count != self.parsedFiles.count || 
+               !newFiles.elementsEqual(self.parsedFiles, by: { $0.id == $1.id && $0.content == $1.content }) {
+                self.parsedFiles = newFiles
+            }
         }
     }
     
@@ -619,11 +751,17 @@ struct CursorStreamingView: View {
     // MARK: - Actions
     
     private func openFile(_ file: StreamingFileInfo) {
-        fileActionHandler.openFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+        // Defer to avoid publishing during view updates
+        Task { @MainActor in
+            fileActionHandler.openFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+        }
     }
     
     private func applyFile(_ file: StreamingFileInfo) {
-        fileActionHandler.applyFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+        // Defer to avoid publishing during view updates
+        Task { @MainActor in
+            fileActionHandler.applyFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+        }
     }
     
     private func autoApplyAllFiles() {
@@ -644,7 +782,7 @@ struct CursorStreamingView: View {
             return
         }
         
-        // Apply files sequentially to avoid state update conflicts
+        // Apply and open files sequentially to avoid state update conflicts
         Task { @MainActor in
             for (index, file) in filesToApply.enumerated() {
                 // Small delay between each file to avoid overwhelming the system
@@ -654,7 +792,8 @@ struct CursorStreamingView: View {
                 
                 // Double-check content is still valid before applying
                 if !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.applyFile(file)
+                    // Use openFile instead of applyFile to both write AND open in editor
+                    self.openFile(file)
                 } else {
                     print("⚠️ Skipping file \(file.path) - content is empty")
                 }

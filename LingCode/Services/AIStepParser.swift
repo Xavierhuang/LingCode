@@ -695,6 +695,22 @@ class AIStepParser {
                lowercased.contains("for me") && (lowercased.contains("run") || lowercased.contains("start") || lowercased.contains("execute"))
     }
     
+    /// Detect if user wants to check/review code
+    func detectCheckRequest(_ prompt: String) -> Bool {
+        let lowercased = prompt.lowercased()
+        return lowercased.contains("check") ||
+               lowercased.contains("review") ||
+               lowercased.contains("analyze") ||
+               lowercased.contains("inspect") ||
+               lowercased.contains("validate") ||
+               lowercased.contains("audit") ||
+               lowercased.contains("look at") ||
+               lowercased.contains("examine") ||
+               lowercased.contains("what's wrong") ||
+               lowercased.contains("any issues") ||
+               lowercased.contains("any problems")
+    }
+    
     /// Enhance prompt for run/execute requests
     func enhancePromptForRun(_ originalPrompt: String, projectURL: URL?) -> String {
         let fileManager = FileManager.default

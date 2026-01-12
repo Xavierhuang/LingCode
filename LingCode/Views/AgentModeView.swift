@@ -15,6 +15,8 @@ struct AgentModeView: View {
     
     @State private var taskInput: String = ""
     @State private var showAgentPanel: Bool = false
+    @State private var activeMentions: [Mention] = []
+    @StateObject private var imageContextService = ImageContextService.shared
     
     var body: some View {
         VStack(spacing: 0) {
@@ -100,21 +102,150 @@ struct AgentModeView: View {
             
             Divider()
             
-            // Input
-            HStack {
-                TextField("Describe your task...", text: $taskInput)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { runTask() }
-                
-                Button(action: runTask) {
-                    Image(systemName: agent.isRunning ? "hourglass" : "play.fill")
-                        .foregroundColor(.purple)
+            // Input with support for @ mentions and images
+            VStack(spacing: 0) {
+                // Context badges
+                if !activeMentions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(activeMentions) { mention in
+                                MentionBadgeView(mention: mention) {
+                                    activeMentions.removeAll { $0.id == mention.id }
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 4)
+                    }
                 }
-                .buttonStyle(.bordered)
-                .disabled(taskInput.isEmpty || agent.isRunning)
+                
+                // Attached images preview
+                if !imageContextService.attachedImages.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(imageContextService.attachedImages) { image in
+                                ZStack(alignment: .topTrailing) {
+                                    Image(nsImage: image.image)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 60, height: 60)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    
+                                    Button(action: {
+                                        imageContextService.removeImage(image.id)
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.white)
+                                            .background(Color.black.opacity(0.6))
+                                            .clipShape(Circle())
+                                            .font(.system(size: 14))
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .offset(x: 4, y: -4)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                    }
+                    .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                    .padding(.horizontal)
+                }
+                
+                // Input field with @ mention support
+                HStack(alignment: .bottom) {
+                    Button(action: { }) {
+                        Image(systemName: "plus.circle")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help("Add context")
+                    
+                    TextField("Describe your task...", text: $taskInput, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...5)
+                        .onSubmit { runTask() }
+                        .onChange(of: taskInput) { _, newValue in
+                            // Check for @ trigger for mentions
+                            if newValue.hasSuffix("@") {
+                                // Could show mention popup here if needed
+                            }
+                        }
+                    
+                    Button(action: runTask) {
+                        Image(systemName: agent.isRunning ? "stop.circle.fill" : "arrow.up.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(agent.isRunning ? .red : .purple)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(taskInput.isEmpty && activeMentions.isEmpty && imageContextService.attachedImages.isEmpty || agent.isRunning)
+                    .help(agent.isRunning ? "Stop" : "Run task")
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .onDrop(of: [.image, .fileURL], isTargeted: .constant(false)) { providers in
+                    Task {
+                        _ = await handleImageDrop(providers: providers)
+                    }
+                    return true
+                }
             }
-            .padding()
         }
+    }
+    
+    private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {
+        var handled = false
+        
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
+                await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, error in
+                        Task { @MainActor in
+                            if let error = error {
+                                print("Error loading file URL: \(error.localizedDescription)")
+                                continuation.resume()
+                                return
+                            }
+                            
+                            if let data = item as? Data,
+                               let url = URL(dataRepresentation: data, relativeTo: nil) {
+                                _ = imageContextService.addFromFile(url)
+                            } else if let url = item as? URL {
+                                _ = imageContextService.addFromFile(url)
+                            }
+                            continuation.resume()
+                        }
+                    }
+                }
+                handled = true
+            } else if provider.hasItemConformingToTypeIdentifier("public.image") {
+                await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: "public.image", options: nil) { item, error in
+                        Task { @MainActor in
+                            if let error = error {
+                                print("Error loading image: \(error.localizedDescription)")
+                                continuation.resume()
+                                return
+                            }
+                            
+                            if let url = item as? URL {
+                                _ = imageContextService.addFromFile(url)
+                            } else if let data = item as? Data,
+                                      let image = NSImage(data: data) {
+                                _ = imageContextService.addImage(image, source: .dragDrop)
+                            } else if let image = item as? NSImage {
+                                _ = imageContextService.addImage(image, source: .dragDrop)
+                            }
+                            continuation.resume()
+                        }
+                    }
+                }
+                handled = true
+            }
+        }
+        
+        return handled
     }
     
     private var exampleTasks: [String] {
@@ -128,15 +259,33 @@ struct AgentModeView: View {
     }
     
     private func runTask() {
-        guard !taskInput.isEmpty else { return }
+        guard !taskInput.isEmpty || !activeMentions.isEmpty || !imageContextService.attachedImages.isEmpty else { return }
         
-        let task = taskInput
+        // Build context from mentions
+        var context = editorViewModel.getContextForAI() ?? ""
+        let mentionContext = MentionParser.shared.buildContextFromMentions(
+            activeMentions,
+            projectURL: editorViewModel.rootFolderURL,
+            selectedText: editorViewModel.editorState.selectedText,
+            terminalOutput: nil
+        )
+        context += mentionContext
+        
+        // Combine task input with context
+        var fullTask = taskInput
+        if !context.isEmpty {
+            fullTask += "\n\nContext:\n\(context)"
+        }
+        
+        let task = fullTask
         taskInput = ""
+        activeMentions.removeAll()
+        imageContextService.clearImages()
         
         agent.runTask(
             task,
             projectURL: editorViewModel.rootFolderURL,
-            context: editorViewModel.getContextForAI(),
+            context: context.isEmpty ? nil : context,
             onStepUpdate: { step in
                 // Steps are updated in agent.steps automatically
             },

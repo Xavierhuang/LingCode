@@ -45,7 +45,19 @@ class FileActionHandler {
                 try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
-                    editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                    // Small delay to ensure file write is complete
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+                    // Always read from disk to ensure we have the latest content
+                    if let diskContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                        editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                        // Force refresh the document content from disk
+                        if let document = editorViewModel.editorState.documents.first(where: { $0.filePath?.path == fileURL.path }) {
+                            document.content = diskContent
+                            document.isModified = false
+                        }
+                    } else {
+                        editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                    }
                 }
             } catch {
                 print("❌ Failed to update file: \(error)")
@@ -59,6 +71,8 @@ class FileActionHandler {
                 print("✅ Created and opened file: \(fileURL.path)")
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
+                    // Small delay to ensure file write is complete
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                     // New files: highlight everything as new (pass empty string as original)
                     editorViewModel.openFile(at: fileURL, originalContent: "")
                     // Refresh file tree to show new file immediately
@@ -69,6 +83,7 @@ class FileActionHandler {
                 // Try to open anyway if it exists now
                 if FileManager.default.fileExists(atPath: fileURL.path) {
                     Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                         editorViewModel.openFile(at: fileURL)
                     }
                 }
@@ -100,19 +115,29 @@ class FileActionHandler {
         if let original = originalContent, !original.isEmpty {
             let originalLines = original.components(separatedBy: .newlines).count
             let newLines = file.content.components(separatedBy: .newlines).count
+            let originalTrimmed = original.trimmingCharacters(in: .whitespacesAndNewlines)
+            let newTrimmed = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // If new content has significantly fewer lines, it's likely incomplete - DON'T APPLY
-            if newLines < originalLines / 2 && originalLines > 10 {
-                print("❌ BLOCKED: New content for \(file.path) has \(newLines) lines vs original \(originalLines) lines. This is likely incomplete and would delete your code!")
-                print("   Original file size: \(original.count) characters")
-                print("   New file size: \(file.content.count) characters")
+            // STRICT: If new content is significantly smaller, BLOCK
+            // Check both line count and character count
+            let lineRatio = Double(newLines) / Double(originalLines)
+            let charRatio = Double(newTrimmed.count) / Double(originalTrimmed.count)
+            
+            // Block if new content is less than 60% of original (more conservative)
+            if (lineRatio < 0.6 || charRatio < 0.6) && originalLines > 5 {
+                print("❌ BLOCKED: New content for \(file.path) is too small compared to original!")
+                print("   Original: \(originalLines) lines, \(originalTrimmed.count) characters")
+                print("   New: \(newLines) lines, \(newTrimmed.count) characters")
+                print("   Line ratio: \(String(format: "%.1f", lineRatio * 100))%, Char ratio: \(String(format: "%.1f", charRatio * 100))%")
                 print("   Skipping apply to protect your existing code.")
                 return
             }
             
-            // Also check if new content is much smaller in character count
-            if file.content.count < original.count / 3 && original.count > 100 {
-                print("❌ BLOCKED: New content for \(file.path) is \(file.content.count) characters vs original \(original.count) characters. This would delete most of your code!")
+            // Also block if new content is suspiciously small (less than 100 chars for files that were > 500 chars)
+            if newTrimmed.count < 100 && originalTrimmed.count > 500 {
+                print("❌ BLOCKED: New content for \(file.path) is suspiciously small!")
+                print("   Original: \(originalTrimmed.count) characters")
+                print("   New: \(newTrimmed.count) characters")
                 print("   Skipping apply to protect your existing code.")
                 return
             }

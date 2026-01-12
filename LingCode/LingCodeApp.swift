@@ -48,6 +48,13 @@ struct LingCodeApp: App {
                     NotificationCenter.default.post(name: NSNotification.Name("ShowCommandPalette"), object: nil)
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
+                
+                Divider()
+                
+                Button("Agent Mode") {
+                    NotificationCenter.default.post(name: NSNotification.Name("SwitchToAgentMode"), object: nil)
+                }
+                .keyboardShortcut("i", modifiers: .command)
             }
             
             // Window menu - keep the default window list AND add our custom items

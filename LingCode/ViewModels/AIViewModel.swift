@@ -51,6 +51,55 @@ class AIViewModel: ObservableObject {
         // Detect if this is a "run it" request
         let isRunRequest = stepParser.detectRunRequest(userMessage)
         
+        // Detect if this is a "check/review" request
+        let isCheckRequest = stepParser.detectCheckRequest(userMessage)
+        
+        // If it's a check request, trigger code review instead of normal generation
+        if isCheckRequest, let editorVM = editorViewModel, let activeDoc = editorVM.editorState.activeDocument {
+            let reviewService = AICodeReviewService.shared
+            isLoading = true
+            
+            reviewService.reviewCode(
+                activeDoc.content,
+                language: activeDoc.language,
+                fileName: activeDoc.filePath?.lastPathComponent ?? "code"
+            ) { [weak self] result in
+                DispatchQueue.main.async {
+                    self?.isLoading = false
+                    switch result {
+                    case .success(let review):
+                        // Format review as a message
+                        var reviewMessage = "## Code Review Results\n\n"
+                        reviewMessage += "**Score:** \(review.score)/100\n\n"
+                        reviewMessage += "**Summary:** \(review.summary)\n\n"
+                        
+                        if !review.issues.isEmpty {
+                            reviewMessage += "**Issues Found:**\n\n"
+                            for issue in review.issues {
+                                reviewMessage += "- **\(issue.severity.rawValue)** [\(issue.category.rawValue)]"
+                                if let line = issue.lineNumber {
+                                    reviewMessage += " (Line \(line))"
+                                }
+                                reviewMessage += ": \(issue.message)\n"
+                                if let suggestion = issue.suggestion {
+                                    reviewMessage += "  💡 Suggestion: \(suggestion)\n"
+                                }
+                                reviewMessage += "\n"
+                            }
+                        }
+                        
+                        // Add review as assistant message
+                        self?.conversation.addMessage(AIMessage(role: .assistant, content: reviewMessage))
+                        return
+                    case .failure(let error):
+                        self?.conversation.addMessage(AIMessage(role: .assistant, content: "Failed to review code: \(error.localizedDescription)"))
+                        return
+                    }
+                }
+            }
+            return
+        }
+        
         // Fast task classification with heuristics
         let classifier = TaskClassifier.shared
         let editorState = editorViewModel?.editorState
@@ -182,9 +231,26 @@ class AIViewModel: ObservableObject {
                     if !parsed.steps.isEmpty {
                         var mergedSteps = self.thinkingSteps
                         for newStep in parsed.steps {
-                            // Only add if it's not already present (avoid duplicates)
-                            if !mergedSteps.contains(where: { $0.id == newStep.id }) {
-                                mergedSteps.append(newStep)
+                            // Check for duplicates by content similarity, not just ID
+                            // A step is a duplicate if it has the same type and very similar content
+                            let isDuplicate = mergedSteps.contains { existingStep in
+                                existingStep.type == newStep.type &&
+                                existingStep.content.trimmingCharacters(in: .whitespacesAndNewlines) == newStep.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
+                            
+                            if !isDuplicate {
+                                // Check if this is an update to an existing step (same type, content is a superset)
+                                if let existingIndex = mergedSteps.firstIndex(where: { existingStep in
+                                    existingStep.type == newStep.type &&
+                                    newStep.content.contains(existingStep.content) &&
+                                    newStep.content.count > existingStep.content.count
+                                }) {
+                                    // Update existing step with new content
+                                    mergedSteps[existingIndex] = newStep
+                                } else {
+                                    // New step, add it
+                                    mergedSteps.append(newStep)
+                                }
                             }
                         }
                         self.thinkingSteps = mergedSteps
@@ -229,9 +295,26 @@ class AIViewModel: ObservableObject {
                 // Merge thinking steps instead of replacing - preserve existing thinking steps
                 var mergedSteps = self.thinkingSteps
                 for newStep in parsed.steps {
-                    // Only add if it's not already present (avoid duplicates)
-                    if !mergedSteps.contains(where: { $0.id == newStep.id }) {
-                        mergedSteps.append(newStep)
+                    // Check for duplicates by content similarity, not just ID
+                    // A step is a duplicate if it has the same type and very similar content
+                    let isDuplicate = mergedSteps.contains { existingStep in
+                        existingStep.type == newStep.type &&
+                        existingStep.content.trimmingCharacters(in: .whitespacesAndNewlines) == newStep.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    
+                    if !isDuplicate {
+                        // Check if this is an update to an existing step (same type, content is a superset)
+                        if let existingIndex = mergedSteps.firstIndex(where: { existingStep in
+                            existingStep.type == newStep.type &&
+                            newStep.content.contains(existingStep.content) &&
+                            newStep.content.count > existingStep.content.count
+                        }) {
+                            // Update existing step with new content
+                            mergedSteps[existingIndex] = newStep
+                        } else {
+                            // New step, add it
+                            mergedSteps.append(newStep)
+                        }
                     }
                 }
                 self.thinkingSteps = mergedSteps
@@ -271,7 +354,34 @@ class AIViewModel: ObservableObject {
                 }
             },
             onError: { error in
-                // Fallback to non-streaming if streaming fails
+                // Check if local mode is enabled - if so, don't fall back to cloud
+                let localService = LocalOnlyService.shared
+                if localService.isLocalModeEnabled {
+                    // Local mode enabled - show error, don't fall back to cloud
+                    DispatchQueue.main.async {
+                        self.isLoading = false
+                        self.isGeneratingProject = false
+                        let errorService = ErrorHandlingService.shared
+                        var errorMsg = errorService.formatError(error)
+                        
+                        // Add helpful message for Ollama connection issues
+                        let nsError = error as NSError
+                        if nsError.domain == "LocalOnlyService" || nsError.domain == NSURLErrorDomain {
+                            if nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 { // NSURLErrorConnectionRefused
+                                errorMsg = "⚠️ Cannot connect to Ollama.\n\nMake sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again\n\nError: \(error.localizedDescription)"
+                            }
+                        }
+                        
+                        self.errorMessage = errorMsg
+                        self.conversation.addMessage(AIMessage(
+                            role: .assistant,
+                            content: "❌ Error: \(errorMsg)"
+                        ))
+                    }
+                    return
+                }
+                
+                // Fallback to non-streaming if streaming fails (only when NOT in local mode)
                 self.aiService.sendMessage(
                     enhancedPrompt,
                     context: fullContext.isEmpty ? nil : fullContext,

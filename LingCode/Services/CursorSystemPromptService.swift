@@ -28,9 +28,11 @@ class CursorSystemPromptService {
         - Do not introduce new dependencies unless instructed.
         - Assume the code must compile and be production-ready.
 
-        WORKFLOW:
-        1. **THINK OUT LOUD** - Explain what you're going to do and which files need changes
-        2. **GENERATE CODE** - For each file that needs to be changed, output the complete file content
+        WORKFLOW (Plan → Do → Check → Act):
+        1. **PLAN** (Think Out Loud) - Explain what you're going to do, which files need changes, and why
+        2. **DO** (Generate Code) - For each file that needs to be changed, output the complete file content
+        3. **CHECK** (Validate) - Verify your changes are correct, complete, and don't break existing functionality
+        4. **ACT** (Apply) - The system will apply your changes automatically after validation
         
         EDITING:
         - When editing files, output the complete file content with your changes.
