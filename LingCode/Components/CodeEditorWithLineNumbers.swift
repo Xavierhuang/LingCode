@@ -19,7 +19,8 @@ class EditorContainerView: NSView {
         self.textView = textView
         self.lineNumbersView = lineNumbersView
         self.scrollView = scrollView
-        super.init(frame: .zero)
+        // Initialize with minimum size to avoid constraint conflicts
+        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
         
         // Add both views as subviews
         addSubview(lineNumbersView)
@@ -28,23 +29,15 @@ class EditorContainerView: NSView {
         // Configure line numbers view
         lineNumbersView.editorScrollView = scrollView
         
-        // Set up constraints
-        lineNumbersView.translatesAutoresizingMaskIntoConstraints = false
-        textView.translatesAutoresizingMaskIntoConstraints = false
+        // Use autoresizing masks instead of constraints to avoid conflicts
+        // This allows manual frame setting without constraint conflicts
+        lineNumbersView.translatesAutoresizingMaskIntoConstraints = true
+        textView.translatesAutoresizingMaskIntoConstraints = true
+        translatesAutoresizingMaskIntoConstraints = true
         
-        NSLayoutConstraint.activate([
-            // Line numbers on the left
-            lineNumbersView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            lineNumbersView.topAnchor.constraint(equalTo: topAnchor),
-            lineNumbersView.widthAnchor.constraint(equalToConstant: gutterWidth),
-            
-            // Text view on the right - don't constrain height, let it grow naturally
-            textView.leadingAnchor.constraint(equalTo: lineNumbersView.trailingAnchor),
-            textView.topAnchor.constraint(equalTo: topAnchor),
-            textView.trailingAnchor.constraint(equalTo: trailingAnchor)
-        ])
-        
-        // Don't constrain bottom - let text view determine its own height
+        // Set autoresizing masks for layout
+        lineNumbersView.autoresizingMask = [.height]
+        textView.autoresizingMask = [.width, .height]
         
         // Observe text changes to update layout
         NotificationCenter.default.addObserver(
@@ -83,55 +76,59 @@ class EditorContainerView: NSView {
         return true
     }
     
+    private var isLayouting = false // Prevent recursive layout calls
+    
     override func layout() {
+        // Prevent infinite layout loops
+        guard !isLayouting else { return }
+        isLayouting = true
+        defer { isLayouting = false }
+        
         super.layout()
         
         // Update line numbers view size based on text view content
-        if let textContainer = textView.textContainer,
-           let layoutManager = textView.layoutManager {
-            // Force layout calculation to get accurate content size
-            layoutManager.ensureLayout(for: textContainer)
-            
-            // Calculate line count from actual text content
-            let text = textView.string
-            let lineCount = max(1, text.components(separatedBy: .newlines).count)
-            lineNumbersView.lineCount = lineCount
-            
-            // Get actual content height from layout manager - this is the true content size
-            let usedRect = layoutManager.usedRect(for: textContainer)
-            var actualContentHeight = usedRect.height
-            
-            // If content is empty or very small, ensure minimum height
-            if actualContentHeight < 100 {
-                actualContentHeight = 100
-            }
-            
-            // Ensure minimum height is at least visible area for proper scrolling
-            let visibleHeight = scrollView.contentView.bounds.height
-            let contentHeight = max(actualContentHeight, visibleHeight)
-            
-            // Get text view's natural width
-            let textViewWidth = max(scrollView.contentView.bounds.width - gutterWidth, usedRect.width)
-            
-            // Update text view size to match content height
-            let textViewFrame = textView.frame
-            if abs(textViewFrame.width - textViewWidth) > 0.5 || abs(textViewFrame.height - contentHeight) > 0.5 {
-                textView.setFrameSize(NSSize(width: textViewWidth, height: contentHeight))
-            }
-            
-            // Make line numbers view height match text view height
-            let lineNumbersFrame = lineNumbersView.frame
-            if abs(lineNumbersFrame.height - contentHeight) > 0.5 {
-                lineNumbersView.setFrameSize(NSSize(width: gutterWidth, height: contentHeight))
-                lineNumbersView.needsDisplay = true
-            }
-            
-            // Update container size to match content - this is critical for scrolling
-            let containerWidth = gutterWidth + textViewWidth
-            if abs(frame.size.width - containerWidth) > 0.5 || abs(frame.size.height - contentHeight) > 0.5 {
-                setFrameSize(NSSize(width: containerWidth, height: contentHeight))
-            }
+        guard let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager else {
+            return
         }
+        
+        // Force layout calculation to get accurate content size
+        layoutManager.ensureLayout(for: textContainer)
+        
+        // Calculate line count from actual text content
+        let text = textView.string
+        let lineCount = max(1, text.components(separatedBy: .newlines).count)
+        lineNumbersView.lineCount = lineCount
+        
+        // Get actual content height from layout manager
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        var actualContentHeight = usedRect.height
+        
+        // If content is empty or very small, ensure minimum height
+        if actualContentHeight < 100 {
+            actualContentHeight = 100
+        }
+        
+        // Ensure minimum height is at least visible area for proper scrolling
+        let visibleHeight = scrollView.contentView.bounds.height
+        let contentHeight = max(actualContentHeight, visibleHeight)
+        
+        // Get text view's natural width
+        let textViewWidth = max(scrollView.contentView.bounds.width - gutterWidth, usedRect.width)
+        
+        // Update frames using autoresizing masks (no constraints)
+        // Position line numbers on the left
+        lineNumbersView.frame = NSRect(x: 0, y: 0, width: gutterWidth, height: contentHeight)
+        
+        // Position text view on the right
+        textView.frame = NSRect(x: gutterWidth, y: 0, width: textViewWidth, height: contentHeight)
+        
+        // Update container size
+        let containerWidth = gutterWidth + textViewWidth
+        frame = NSRect(x: frame.origin.x, y: frame.origin.y, width: containerWidth, height: contentHeight)
+        
+        // Mark for display if needed
+        lineNumbersView.needsDisplay = true
     }
 }
 

@@ -85,30 +85,91 @@ class FileActionHandler {
         let fileURL = projectURL.appendingPathComponent(file.path)
         let directory = fileURL.deletingLastPathComponent()
         
-        // Read original content if file exists (for change highlighting)
+        // Read original content if file exists (for change highlighting and backup)
         let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
         let originalContent = fileExists ? try? String(contentsOf: fileURL, encoding: .utf8) : nil
         
-        // Safety check: Don't apply empty content
-        guard !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        // Enhanced safety checks: Don't apply if content is invalid
+        let trimmedContent = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedContent.isEmpty else {
             print("⚠️ Warning: Skipping apply - file content is empty for \(file.path)")
+            return
+        }
+        
+        // Additional check: If file exists and new content is shorter than original, BLOCK the apply
+        if let original = originalContent, !original.isEmpty {
+            let originalLines = original.components(separatedBy: .newlines).count
+            let newLines = file.content.components(separatedBy: .newlines).count
+            
+            // If new content has significantly fewer lines, it's likely incomplete - DON'T APPLY
+            if newLines < originalLines / 2 && originalLines > 10 {
+                print("❌ BLOCKED: New content for \(file.path) has \(newLines) lines vs original \(originalLines) lines. This is likely incomplete and would delete your code!")
+                print("   Original file size: \(original.count) characters")
+                print("   New file size: \(file.content.count) characters")
+                print("   Skipping apply to protect your existing code.")
+                return
+            }
+            
+            // Also check if new content is much smaller in character count
+            if file.content.count < original.count / 3 && original.count > 100 {
+                print("❌ BLOCKED: New content for \(file.path) is \(file.content.count) characters vs original \(original.count) characters. This would delete most of your code!")
+                print("   Skipping apply to protect your existing code.")
+                return
+            }
+        }
+        
+        // Don't apply if file is still streaming
+        if file.isStreaming {
+            print("⚠️ Warning: Skipping apply - file \(file.path) is still streaming")
             return
         }
         
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            
+            // Write content atomically
             try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
+            
+            // Verify the write was successful by reading back
+            if let writtenContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                if writtenContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    print("❌ Error: File was written but is now empty! Restoring original content.")
+                    // Restore original content if available
+                    if let original = originalContent, !original.isEmpty {
+                        try? original.write(to: fileURL, atomically: true, encoding: .utf8)
+                    }
+                    return
+                }
+            }
             
             // Defer state changes outside of view update cycle to avoid "Publishing changes" warnings
             Task { @MainActor in
-                // Open with change highlighting
+                // Refresh file tree first to ensure file system is updated
+                editorViewModel.refreshFileTree()
+                
+                // Open with change highlighting (this will refresh the editor view)
                 editorViewModel.openFile(at: fileURL, originalContent: originalContent ?? "")
                 
-                // Refresh file tree to show new file immediately
-                editorViewModel.refreshFileTree()
+                // Force a refresh of the editor to show updated content
+                if let document = editorViewModel.editorState.documents.first(where: { $0.filePath?.path == fileURL.path }) {
+                    // Reload content from disk to ensure it's up to date
+                    if let diskContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                        document.content = diskContent
+                        document.isModified = false
+                    }
+                }
             }
         } catch {
-            print("Failed to apply file: \(error)")
+            print("❌ Failed to apply file \(file.path): \(error)")
+            // If write failed and we have original content, try to restore it
+            if let original = originalContent, !original.isEmpty {
+                do {
+                    try original.write(to: fileURL, atomically: true, encoding: .utf8)
+                    print("✅ Restored original content for \(file.path)")
+                } catch {
+                    print("❌ Failed to restore original content: \(error)")
+                }
+            }
         }
     }
     

@@ -14,8 +14,6 @@ struct FileTreeView: NSViewRepresentable {
     let onFileSelect: (URL) -> Void
     
     func makeNSView(context: Context) -> NSScrollView {
-        print("🏗️ FileTreeView: makeNSView called with rootURL: \(rootURL?.path ?? "nil")")
-
         let scrollView = NSScrollView()
         let outlineView = NSOutlineView()
 
@@ -55,11 +53,8 @@ struct FileTreeView: NSViewRepresentable {
         context.coordinator.onFileSelect = onFileSelect
         context.coordinator.rootURL = rootURL
 
-        print("🏗️ FileTreeView: Coordinator rootURL set to: \(context.coordinator.rootURL?.path ?? "nil")")
-
         // Load initial data if rootURL is present
         if rootURL != nil {
-            print("🏗️ FileTreeView: Loading initial data")
             outlineView.reloadData()
             outlineView.expandItem(nil, expandChildren: false)
         }
@@ -69,35 +64,38 @@ struct FileTreeView: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let outlineView = nsView.documentView as? NSOutlineView else {
-            print("⚠️ FileTreeView: updateNSView - outline view is nil")
             return
         }
 
-        print("🔄 FileTreeView: updateNSView called. Current coordinator rootURL: \(context.coordinator.rootURL?.path ?? "nil"), New rootURL: \(rootURL?.path ?? "nil")")
+        // Check if root URL actually changed
+        let currentPath = context.coordinator.rootURL?.path
+        let newPath = rootURL?.path
+        let rootChanged = currentPath != newPath
+        
+        // Check if refresh trigger changed
+        let refreshChanged = context.coordinator.lastRefreshTrigger != refreshTrigger
 
-        // Update root URL if changed
-        let rootChanged = context.coordinator.rootURL?.path != rootURL?.path
-
-        if rootChanged {
-            print("🔄 FileTreeView: Root URL changed from \(context.coordinator.rootURL?.path ?? "nil") to \(rootURL?.path ?? "nil")")
+        // Only update if something actually changed
+        guard rootChanged || refreshChanged else {
+            return // Nothing changed, skip update
         }
 
-        // ALWAYS update the coordinator's rootURL to match the binding
-        context.coordinator.rootURL = rootURL
-
-        // Reload data when root changes or refresh is triggered
-        if rootChanged || context.coordinator.lastRefreshTrigger != refreshTrigger {
+        // Update coordinator's rootURL only if it changed
+        if rootChanged {
+            context.coordinator.rootURL = rootURL
+        }
+        
+        // Update refresh trigger
+        if refreshChanged {
             context.coordinator.lastRefreshTrigger = refreshTrigger
-            print("🔄 FileTreeView: Reloading outline view data, rootURL is: \(context.coordinator.rootURL?.path ?? "nil")")
-            
-            // Reload file items from disk when refresh is triggered
-            if rootURL != nil {
+        }
+
+        // Defer reload to avoid publishing changes during view update
+        Task { @MainActor in
+            // Reload file items from disk when refresh is triggered or root changed
+            if rootURL != nil && (rootChanged || refreshChanged) {
                 context.coordinator.reloadFileItems()
-            }
-            
-            outlineView.reloadData()
-            
-            if rootURL != nil {
+                outlineView.reloadData()
                 outlineView.expandItem(nil, expandChildren: false)
             }
         }
@@ -231,9 +229,10 @@ struct FileTreeView: NSViewRepresentable {
                   let fileItem = sender.item(atRow: clickedRow) as? FileItem else { return }
             
             if !fileItem.isDirectory {
-                // Open file on single click
-                print("Single click on file: \(fileItem.url.path)")
-                onFileSelect?(fileItem.url)
+                // Defer file selection to avoid publishing during view updates
+                DispatchQueue.main.async { [weak self] in
+                    self?.onFileSelect?(fileItem.url)
+                }
             }
         }
         
@@ -250,21 +249,22 @@ struct FileTreeView: NSViewRepresentable {
                     sender.expandItem(fileItem)
                 }
             } else {
-                // Open file on double click
-                print("Double click on file: \(fileItem.url.path)")
-                onFileSelect?(fileItem.url)
+                // Defer file selection to avoid publishing during view updates
+                DispatchQueue.main.async { [weak self] in
+                    self?.onFileSelect?(fileItem.url)
+                }
             }
         }
         
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
             if item == nil {
                 guard let rootURL = rootURL else {
-                    print("⚠️ FileTreeView: numberOfChildrenOfItem called with nil rootURL")
                     return 0
                 }
-                print("📂 FileTreeView: Loading items from root: \(rootURL.path)")
-                fileItems = loadFileItems(at: rootURL)
-                print("📂 FileTreeView: Loaded \(fileItems.count) items")
+                // Only reload if fileItems is empty or root changed
+                if fileItems.isEmpty || fileItems.first?.url.deletingLastPathComponent() != rootURL {
+                    fileItems = loadFileItems(at: rootURL)
+                }
                 return fileItems.count
             }
 
@@ -365,7 +365,6 @@ struct FileTreeView: NSViewRepresentable {
         func reloadFileItems() {
             guard let rootURL = rootURL else { return }
             fileItems = loadFileItems(at: rootURL)
-            print("🔄 FileTreeView: Reloaded \(fileItems.count) file items from: \(rootURL.path)")
         }
         
         @objc private func openFile(_ sender: NSMenuItem) {
@@ -551,18 +550,13 @@ struct FileTreeView: NSViewRepresentable {
         private func loadFileItems(at url: URL) -> [FileItem] {
             var items: [FileItem] = []
 
-            print("🔍 FileTreeView: Attempting to load contents of: \(url.path)")
-
             guard let contents = try? FileManager.default.contentsOfDirectory(
                 at: url,
                 includingPropertiesForKeys: [.isDirectoryKey, .isHiddenKey],
                 options: [.skipsHiddenFiles]
             ) else {
-                print("❌ FileTreeView: Failed to read directory contents")
                 return items
             }
-
-            print("✅ FileTreeView: Found \(contents.count) items in directory")
 
             let sortedContents = contents.sorted { url1, url2 in
                 let isDir1 = (try? url1.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false

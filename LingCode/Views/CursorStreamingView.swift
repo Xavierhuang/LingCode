@@ -22,6 +22,7 @@ struct CursorStreamingView: View {
     @State private var lastUserRequest: String = ""
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var parsedCommands: [ParsedCommand] = []
+    @State private var isThinkingExpanded: Bool = false // Track if thinking process is expanded
     private let terminalService = TerminalExecutionService.shared
     @State private var activeMentions: [Mention] = []
     private let contentParser = StreamingContentParser.shared
@@ -53,10 +54,16 @@ struct CursorStreamingView: View {
         }
         .background(DesignSystem.Colors.primaryBackground)
         .onChange(of: viewModel.conversation.messages.last?.content) { _, newContent in
-            handleMessageChange(newContent)
+            // Defer state changes to avoid publishing during view updates
+            Task { @MainActor in
+                handleMessageChange(newContent)
+            }
         }
         .onChange(of: viewModel.currentActions) { _, newActions in
-            handleActionsChange(newActions)
+            // Defer state changes to avoid publishing during view updates
+            Task { @MainActor in
+                handleActionsChange(newActions)
+            }
         }
         .onChange(of: viewModel.isGeneratingProject) { wasGenerating, isGenerating in
             // When project generation completes, auto-apply all generated files
@@ -72,11 +79,27 @@ struct CursorStreamingView: View {
             }
         }
         .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
-            // Also auto-apply when loading completes if it was a project generation
-            if wasLoading && !isLoading && viewModel.isGeneratingProject == false && !parsedFiles.isEmpty {
+            // Auto-apply when loading completes (generation finished)
+            // Only apply if files are complete and not empty
+            if wasLoading && !isLoading && !parsedFiles.isEmpty {
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                    // Wait to ensure all streaming content is complete
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second to ensure completion
+                    
+                    // Re-parse to get final content
+                    let parser = StreamingContentParser.shared
+                    let finalFiles = parser.parseContent(
+                        viewModel.conversation.messages.last?.content ?? "",
+                        isLoading: false,
+                        projectURL: editorViewModel.rootFolderURL,
+                        actions: viewModel.currentActions
+                    )
+                    
+                    // Update parsed files with final content
+                    self.parsedFiles = finalFiles
+                    
+                    // Now apply only complete files (with safety checks)
                     self.autoApplyAllFiles()
                 }
             }
@@ -201,6 +224,11 @@ struct CursorStreamingView: View {
     
     private var contentVStack: some View {
         VStack(alignment: .leading, spacing: 6) { // More compact spacing between cards
+            // Show thinking process if enabled and there are thinking steps
+            if viewModel.showThinkingProcess && (!viewModel.thinkingSteps.isEmpty || viewModel.currentPlan != nil) {
+                thinkingProcessCard
+            }
+            
             parsedFilesView
             actionsView
             rawStreamingView
@@ -211,8 +239,14 @@ struct CursorStreamingView: View {
                     parsedFiles: parsedFiles,
                     parsedCommands: parsedCommands,
                     lastUserRequest: lastUserRequest,
-                    lastMessage: viewModel.conversation.messages.last(where: { $0.role == .assistant })?.content
+                    lastMessage: viewModel.conversation.messages.last(where: { $0.role == .assistant })?.content,
+                    currentActions: viewModel.currentActions
                 )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: viewModel.isLoading)
             }
 
             // Graphite recommendation for large changes
@@ -222,6 +256,181 @@ struct CursorStreamingView: View {
                     onCreateStack: createGraphiteStack
                 )
             }
+        }
+    }
+    
+    private var thinkingProcessCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            thinkingHeader
+            if isThinkingExpanded {
+                thinkingExpandedContent
+            }
+        }
+        .background(thinkingCardBackground)
+        .overlay(thinkingCardOverlay)
+        .transition(.asymmetric(
+            insertion: .move(edge: .top).combined(with: .opacity),
+            removal: .opacity
+        ))
+    }
+    
+    private var thinkingHeader: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                isThinkingExpanded.toggle()
+            }
+        }) {
+            HStack {
+                Image(systemName: "brain.head.profile")
+                    .foregroundColor(.purple)
+                    .font(.system(size: 13))
+                
+                Text("Thinking Process")
+                    .font(.system(size: 13, weight: .semibold))
+                
+                if !isThinkingExpanded {
+                    Spacer()
+                    Text(thinkingSummary)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                if viewModel.isLoading {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .padding(.trailing, 4)
+                }
+                
+                Image(systemName: isThinkingExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var thinkingExpandedContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider()
+                .padding(.horizontal, 12)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let plan = viewModel.currentPlan {
+                        planView(plan: plan)
+                    }
+                    
+                    thinkingStepsView
+                    
+                    if thinkingStepsCount > 10 {
+                        Text("... and \(thinkingStepsCount - 10) more thinking steps")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .italic()
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            .frame(maxHeight: 300)
+        }
+    }
+    
+    private func planView(plan: AIPlan) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "list.bullet.rectangle")
+                    .font(.system(size: 11))
+                    .foregroundColor(.blue)
+                Text("Plan")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            
+            ForEach(Array(plan.steps.enumerated()), id: \.offset) { index, step in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("\(index + 1).")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20)
+                    Text(step)
+                        .font(.system(size: 12))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+    
+    private var thinkingStepsView: some View {
+        ForEach(Array(displayThinkingSteps)) { step in
+            thinkingStepRow(step: step)
+        }
+    }
+    
+    private func thinkingStepRow(step: AIThinkingStep) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: step.type == .thinking ? "brain.head.profile" : "list.bullet.rectangle")
+                .font(.system(size: 11))
+                .foregroundColor(step.type == .thinking ? .purple : .blue)
+                .frame(width: 16)
+            
+            Text(step.content)
+                .font(.system(size: 12))
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(step.type == .thinking ? Color.purple.opacity(0.08) : Color.blue.opacity(0.08))
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
+    }
+    
+    private var displayThinkingSteps: [AIThinkingStep] {
+        Array(viewModel.thinkingSteps.filter { $0.type == .thinking || $0.type == .planning }.suffix(10))
+    }
+    
+    private var thinkingStepsCount: Int {
+        viewModel.thinkingSteps.filter { $0.type == .thinking || $0.type == .planning }.count
+    }
+    
+    private var thinkingCardBackground: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+    }
+    
+    private var thinkingCardOverlay: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .stroke(Color.purple.opacity(0.2), lineWidth: 1)
+    }
+    
+    private var thinkingSummary: String {
+        let thinkingSteps = viewModel.thinkingSteps.filter { $0.type == .thinking || $0.type == .planning }
+        
+        if let plan = viewModel.currentPlan, !plan.steps.isEmpty {
+            return "Planning: \(plan.steps.count) step\(plan.steps.count == 1 ? "" : "s")"
+        } else if !thinkingSteps.isEmpty {
+            let lastStep = thinkingSteps.last?.content ?? ""
+            if lastStep.count > 50 {
+                return String(lastStep.prefix(50)) + "..."
+            }
+            return lastStep
+        } else {
+            return "Analyzing..."
         }
     }
     
@@ -302,15 +511,19 @@ struct CursorStreamingView: View {
     
     private var rawStreamingView: some View {
         Group {
-            if viewModel.isLoading && parsedFiles.isEmpty && viewModel.currentActions.isEmpty {
-                StreamingResponseView(
-                    content: streamingText,
-                    onContentChange: { newContent in
-                        streamingText = newContent
-                        parseStreamingContent(newContent)
-                    }
-                )
-                .id("streaming")
+            // Show raw streaming content if loading and no files/actions yet, OR if there's thinking content
+            if viewModel.isLoading && (parsedFiles.isEmpty && viewModel.currentActions.isEmpty || !viewModel.thinkingSteps.isEmpty) {
+                // Only show raw streaming if there's actual content and it's not just thinking steps
+                if !streamingText.isEmpty && parsedFiles.isEmpty {
+                    StreamingResponseView(
+                        content: streamingText,
+                        onContentChange: { newContent in
+                            streamingText = newContent
+                            parseStreamingContent(newContent)
+                        }
+                    )
+                    .id("streaming")
+                }
             }
         }
     }
@@ -328,15 +541,18 @@ struct CursorStreamingView: View {
     }
     
     private func handleMessageChange(_ newContent: String?) {
-        if let content = newContent {
-            streamingText = content
-            parseStreamingContent(content)
+        guard let content = newContent else { return }
+        
+        // Update state asynchronously to avoid publishing during view updates
+        Task { @MainActor in
+            self.streamingText = content
+            self.parseStreamingContent(content)
             
             // Re-parse when streaming completes to catch any final commands
-            if !viewModel.isLoading {
-                let commands = terminalService.extractCommands(from: content)
+            if !self.viewModel.isLoading {
+                let commands = self.terminalService.extractCommands(from: content)
                 if !commands.isEmpty {
-                    parsedCommands = commands
+                    self.parsedCommands = commands
                 }
             }
         }
@@ -349,11 +565,14 @@ struct CursorStreamingView: View {
     }
     
     private func handleAppear() {
-        if let lastMessage = viewModel.conversation.messages.last,
-           lastMessage.role == .assistant {
-            streamingText = lastMessage.content
-            if viewModel.isLoading {
-                parseStreamingContent(lastMessage.content)
+        guard let lastMessage = viewModel.conversation.messages.last,
+              lastMessage.role == .assistant else { return }
+        
+        // Update state asynchronously to avoid publishing during view updates
+        Task { @MainActor in
+            self.streamingText = lastMessage.content
+            if self.viewModel.isLoading {
+                self.parseStreamingContent(lastMessage.content)
             }
         }
     }
@@ -363,9 +582,6 @@ struct CursorStreamingView: View {
     private func parseStreamingContent(_ content: String) {
         // First, extract terminal commands
         let commands = terminalService.extractCommands(from: content)
-        if !commands.isEmpty {
-            parsedCommands = commands
-        }
         
         // Parse files from content
         let newFiles = contentParser.parseContent(
@@ -375,14 +591,21 @@ struct CursorStreamingView: View {
             actions: viewModel.currentActions
         )
         
-        // Auto-expand new files that are streaming
-        for file in newFiles {
-            if file.isStreaming && !expandedFiles.contains(file.id) {
-                expandedFiles.insert(file.id)
+        // Update state asynchronously to avoid publishing during view updates
+        Task { @MainActor in
+            if !commands.isEmpty {
+                self.parsedCommands = commands
             }
+            
+            // Auto-expand new files that are streaming
+            for file in newFiles {
+                if file.isStreaming && !self.expandedFiles.contains(file.id) {
+                    self.expandedFiles.insert(file.id)
+                }
+            }
+            
+            self.parsedFiles = newFiles
         }
-        
-        parsedFiles = newFiles
     }
     
     private func getStreamingContent(for action: AIAction) -> String? {
@@ -405,15 +628,36 @@ struct CursorStreamingView: View {
     
     private func autoApplyAllFiles() {
         // Auto-apply all parsed files when project generation completes
+        // Only apply files that are complete (not streaming) and have valid content
+        let filesToApply = parsedFiles.filter { file in
+            // Only apply if:
+            // 1. Not currently streaming
+            // 2. Content is not empty
+            // 3. Content has meaningful content (not just whitespace)
+            !file.isStreaming &&
+            !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            file.content.count > 10 // Minimum content length to avoid empty files
+        }
+        
+        guard !filesToApply.isEmpty else {
+            print("⚠️ No valid files to auto-apply (all files are streaming or empty)")
+            return
+        }
+        
         // Apply files sequentially to avoid state update conflicts
-        let filesToApply = Array(parsedFiles)
         Task { @MainActor in
             for (index, file) in filesToApply.enumerated() {
                 // Small delay between each file to avoid overwhelming the system
                 if index > 0 {
                     try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s delay between files
                 }
-                self.applyFile(file)
+                
+                // Double-check content is still valid before applying
+                if !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.applyFile(file)
+                } else {
+                    print("⚠️ Skipping file \(file.path) - content is empty")
+                }
             }
             
             // Final refresh after all files are applied to ensure file tree is updated

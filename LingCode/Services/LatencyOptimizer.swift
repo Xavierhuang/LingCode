@@ -76,6 +76,10 @@ class LatencyOptimizer {
     /// Precompute for all files in project
     func precomputeProject(_ projectURL: URL) async {
         // Use non-blocking file enumeration for Swift 6 async compatibility
+        // Collect all file URLs first in a synchronous context, then process async
+        var fileURLs: [URL] = []
+        
+        // Use a synchronous block to collect URLs (avoiding makeIterator in async context)
         let enumerator = FileManager.default.enumerator(
             at: projectURL,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -84,11 +88,11 @@ class LatencyOptimizer {
         
         guard let enumerator = enumerator else { return }
         
-        // Convert to array first to avoid makeIterator in async context
-        var fileURLs: [URL] = []
-        for case let fileURL as URL in enumerator {
-            guard !fileURL.hasDirectoryPath else { continue }
-            fileURLs.append(fileURL)
+        // Collect all file URLs synchronously before async processing
+        // This avoids the makeIterator issue in Swift 6
+        while let item = enumerator.nextObject() as? URL {
+            guard !item.hasDirectoryPath else { continue }
+            fileURLs.append(item)
         }
         
         // Process files asynchronously

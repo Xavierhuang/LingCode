@@ -38,7 +38,6 @@ class CursorContextBuilder {
             contextParts.append("Language: \(activeDocument.language ?? "unknown")")
             
             if let cursorPos = cursorPosition {
-                let lines = activeDocument.content.components(separatedBy: .newlines)
                 let lineNumber = activeDocument.content.prefix(cursorPos).components(separatedBy: .newlines).count
                 contextParts.append("Cursor: Line \(lineNumber), Column \(cursorPos)")
             }
@@ -53,7 +52,7 @@ class CursorContextBuilder {
         }
         
         // 2. File graph (related files)
-        if includeFileGraph, let activeDoc = editorState.activeDocument, let filePath = activeDoc.filePath {
+        if includeFileGraph, let filePath = editorState.activeDocument?.filePath {
             let relatedFiles = getRelatedFiles(for: filePath.path)
             if !relatedFiles.isEmpty {
                 contextParts.append("=== RELATED FILES ===")
@@ -69,28 +68,27 @@ class CursorContextBuilder {
         }
         
         // 3. Diagnostics (errors/warnings)
-        if includeDiagnostics, let activeDoc = editorState.activeDocument {
+        if includeDiagnostics {
             // Note: Diagnostics would come from a diagnostics service
             // For now, we'll skip this but leave the structure
+            // Check if we have an active document (used implicitly via editorState)
+            if editorState.activeDocument != nil {
+                // Diagnostics would be added here in the future
+            }
         }
         
         // 4. Git diff (recent changes)
         if includeGitDiff {
-            if let activeDoc = editorState.activeDocument, let filePath = activeDoc.filePath {
+            if let filePath = editorState.activeDocument?.filePath {
                 // Get diff for current file
                 if let diff = gitService.getDiff(for: filePath) {
                     contextParts.append("=== RECENT CHANGES (Git Diff) ===")
                     contextParts.append(diff)
                     contextParts.append("")
                 }
-            } else if let projectURL = projectURL, let activeDoc = editorState.activeDocument, let filePath = activeDoc.filePath {
-                // Try to get diff for the file
-                if let diff = gitService.getDiff(for: filePath) {
-                    contextParts.append("=== RECENT CHANGES (Git Diff) ===")
-                    contextParts.append(diff)
-                    contextParts.append("")
-                }
             }
+            // Note: projectURL parameter is available for future use (e.g., getting project-wide diff)
+            _ = projectURL
         }
         
         // 5. Open files context

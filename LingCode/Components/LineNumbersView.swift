@@ -138,8 +138,11 @@ class LineNumbersNSView: NSView {
     
     override func layout() {
         super.layout()
-        invalidateIntrinsicContentSize()
-        needsDisplay = true
+        // Don't invalidate intrinsic content size during layout - it causes infinite constraint loops
+        // Only mark for display if needed
+        if needsDisplay {
+            needsDisplay = true
+        }
     }
     
     override func viewDidMoveToSuperview() {

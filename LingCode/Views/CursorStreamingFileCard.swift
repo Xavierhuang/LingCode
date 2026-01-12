@@ -51,7 +51,9 @@ struct CursorStreamingFileCard: View {
     var body: some View {
         VStack(spacing: 0) {
             fileHeader
-            if let validation = validationResult, !validation.isValid {
+            // Only show validation warnings when NOT streaming (generation complete)
+            // Don't show errors during code generation as they're expected
+            if !file.isStreaming, let validation = validationResult, !validation.isValid {
                 validationWarningView(validation)
             }
             expandedContent
@@ -75,10 +77,22 @@ struct CursorStreamingFileCard: View {
             }
         }
         .onAppear {
-            validateFile()
+            // Only validate when not streaming (generation complete)
+            if !file.isStreaming {
+                validateFile()
+            }
         }
         .onChange(of: file.content) { _, _ in
-            validateFile()
+            // Only validate when not streaming (generation complete)
+            if !file.isStreaming {
+                validateFile()
+            }
+        }
+        .onChange(of: file.isStreaming) { wasStreaming, isStreaming in
+            // Validate when streaming completes
+            if wasStreaming && !isStreaming {
+                validateFile()
+            }
         }
     }
     

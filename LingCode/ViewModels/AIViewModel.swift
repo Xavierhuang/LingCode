@@ -18,7 +18,7 @@ class AIViewModel: ObservableObject {
     @Published var currentPlan: AIPlan?
     @Published var currentActions: [AIAction] = []
     @Published var showThinkingProcess: Bool = true
-    @Published var autoExecuteCode: Bool = true
+    @Published var autoExecuteCode: Bool = false // Disabled by default to prevent accidental code deletion
     @Published var createdFiles: [URL] = []
     
     // Project generation
@@ -178,9 +178,16 @@ class AIViewModel: ObservableObject {
                 // Parse steps incrementally as we receive chunks
                 let parsed = self.stepParser.parseResponse(accumulatedResponse)
                 DispatchQueue.main.async {
-                    // Update thinking steps (merge with existing if needed)
+                    // Merge thinking steps instead of replacing - preserve existing thinking steps
                     if !parsed.steps.isEmpty {
-                        self.thinkingSteps = parsed.steps
+                        var mergedSteps = self.thinkingSteps
+                        for newStep in parsed.steps {
+                            // Only add if it's not already present (avoid duplicates)
+                            if !mergedSteps.contains(where: { $0.id == newStep.id }) {
+                                mergedSteps.append(newStep)
+                            }
+                        }
+                        self.thinkingSteps = mergedSteps
                     }
                     if let plan = parsed.plan {
                         self.currentPlan = plan
@@ -218,8 +225,21 @@ class AIViewModel: ObservableObject {
                 
                 // Final parse
                 let parsed = self.stepParser.parseResponse(accumulatedResponse)
-                self.thinkingSteps = parsed.steps
-                self.currentPlan = parsed.plan
+                
+                // Merge thinking steps instead of replacing - preserve existing thinking steps
+                var mergedSteps = self.thinkingSteps
+                for newStep in parsed.steps {
+                    // Only add if it's not already present (avoid duplicates)
+                    if !mergedSteps.contains(where: { $0.id == newStep.id }) {
+                        mergedSteps.append(newStep)
+                    }
+                }
+                self.thinkingSteps = mergedSteps
+                
+                // Update plan and actions
+                if parsed.plan != nil {
+                    self.currentPlan = parsed.plan
+                }
                 self.currentActions = parsed.actions
                 
                 // Update message with full response

@@ -103,7 +103,6 @@ class ApplyCodeService: ObservableObject {
     func applyChange(_ change: CodeChange, requestedScope: String? = nil) -> ApplyChangeResult {
         // Git-aware validation
         if let projectURL = findProjectURL(for: change.filePath) {
-            let fileURL = URL(fileURLWithPath: change.filePath)
             let gitValidation = GitAwareService.shared.validateEdit(
                 Edit(
                     file: change.filePath,

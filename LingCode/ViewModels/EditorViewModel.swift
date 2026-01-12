@@ -157,19 +157,21 @@ class EditorViewModel: ObservableObject {
             guard let docPath = doc.filePath else { return false }
             return docPath.path == standardizedURL.path
         }) {
-            // File already open - update it if we have new content with original for highlighting
-            print("📄 File already open, activating: \(standardizedURL.path)")
-
-            if let original = originalContent {
-                // Read current content from disk
+            // File already open - refresh it with latest content from disk
+            // Defer state changes to avoid publishing during view updates
+            Task { @MainActor in
+                // Always read latest content from disk to ensure it's up to date
                 if let diskContent = try? String(contentsOf: standardizedURL, encoding: .utf8) {
                     existingDocument.content = diskContent
-                    existingDocument.markAsAIGenerated(originalContent: original)
-                    print("🎨 Applied AI change highlighting to open file")
+                    existingDocument.isModified = false
+                    
+                    // Mark as AI-generated if we have original content for highlighting
+                    if let original = originalContent {
+                        existingDocument.markAsAIGenerated(originalContent: original)
+                    }
                 }
+                editorState.setActiveDocument(existingDocument.id)
             }
-
-            editorState.setActiveDocument(existingDocument.id)
             return
         }
 
@@ -192,13 +194,15 @@ class EditorViewModel: ObservableObject {
             // Mark as AI-generated if we have original content for comparison
             if let original = originalContent {
                 document.markAsAIGenerated(originalContent: original)
-                print("🎨 Applied AI change highlighting to new document")
             }
 
-            editorState.addDocument(document)
-            print("✅ Opened file: \(standardizedURL.path)")
+            // Defer state changes to avoid publishing during view updates
+            Task { @MainActor in
+                editorState.addDocument(document)
+                editorState.setActiveDocument(document.id)
+            }
         } catch {
-            print("❌ Failed to open file: \(error.localizedDescription)")
+            // Silently handle errors
         }
     }
     
@@ -257,8 +261,18 @@ class EditorViewModel: ObservableObject {
     // MARK: - File Tree Management
 
     /// Refresh the file tree view
+    private var refreshDebounceTask: Task<Void, Never>?
+    
     func refreshFileTree() {
-        fileTreeRefreshTrigger.toggle()
+        // Cancel any pending refresh
+        refreshDebounceTask?.cancel()
+        
+        // Debounce refresh to avoid excessive updates
+        refreshDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second debounce
+            guard !Task.isCancelled else { return }
+            fileTreeRefreshTrigger.toggle()
+        }
     }
 
     // MARK: - Context for AI
