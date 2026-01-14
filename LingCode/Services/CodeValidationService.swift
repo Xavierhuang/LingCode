@@ -389,15 +389,15 @@ class CodeValidationService {
         
         let criticalIssues = issues.filter { $0.severity == .critical }
         if !criticalIssues.isEmpty {
-            return "❌ Do not apply - critical issues detected"
+            return "This change can't be applied safely yet"
         }
         
         let warnings = issues.filter { $0.severity == .warning }
         if !warnings.isEmpty {
-            return "⚠️ Review required - warnings detected"
+            return "Needs review before applying"
         }
         
-        return "ℹ️ Apply with caution - minor issues detected"
+        return "Apply with caution - minor issues detected"
     }
 }
 

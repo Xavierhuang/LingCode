@@ -127,7 +127,8 @@ struct CodeEditor: NSViewRepresentable {
     
     private func applySyntaxHighlighting(to textView: NSTextView, language: String?) {
         let text = textView.string
-        let highlighted = SyntaxHighlighter.highlight(text, language: language)
+        let theme = ThemeService.shared.currentTheme
+        let highlighted = SyntaxHighlighter.highlight(text, language: language, theme: theme)
 
         let selectedRange = textView.selectedRange()
 

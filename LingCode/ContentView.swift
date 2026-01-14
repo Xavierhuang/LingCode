@@ -10,6 +10,7 @@ import AppKit
 
 struct ContentView: View {
     @StateObject private var viewModel = EditorViewModel()
+    @EnvironmentObject var themeService: ThemeService
     @State private var showSearch: Bool = false
     @State private var showSettings: Bool = false
     @State private var showGoToLine: Bool = false
@@ -31,7 +32,7 @@ struct ContentView: View {
     
     // AI Panel Toggle (Cursor-style)
     @State private var showAIPanel: Bool = true
-    @State private var aiPanelWidth: CGFloat = 320
+    @State private var aiPanelWidth: CGFloat = 400  // Increased from 320 for wider chat view
     
     // Bottom Panel
     @State private var showBottomPanel: Bool = false
@@ -716,7 +717,7 @@ struct ResizableDivider: View {
             
             Rectangle()
                 .fill(Color.clear)
-                .frame(width: isVertical ? 4 : nil, height: isVertical ? nil : 4)
+                .frame(width: isVertical ? 8 : nil, height: isVertical ? nil : 8)
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
@@ -736,14 +737,20 @@ struct ResizableDivider: View {
                             lastTranslation = 0
                         }
                 )
-                .onHover { hovering in
-                    isHovered = hovering
-                    if hovering {
-                        NSCursor.resizeLeftRight.push()
-                    } else {
-                        NSCursor.pop()
-                    }
+        }
+        .onHover { hovering in
+            isHovered = hovering
+            // Use the correct cursor type based on orientation
+            // Direct cursor setting without Task wrapper for immediate response
+            if hovering {
+                if isVertical {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.resizeUpDown.push()
                 }
+            } else {
+                NSCursor.pop()
+            }
         }
         .background(
             Group {
@@ -756,5 +763,7 @@ struct ResizableDivider: View {
                 }
             }
         )
+        // Ensure the entire divider area is interactive
+        .frame(maxWidth: isVertical ? 8 : .infinity, maxHeight: isVertical ? .infinity : 8)
     }
 }

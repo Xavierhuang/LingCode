@@ -19,22 +19,39 @@ struct CursorStreamingView: View {
         self.editorViewModel = editorViewModel
     }
     
-    @State private var streamingText: String = ""
-    @State private var parsedFiles: [StreamingFileInfo] = []
+    @StateObject private var updateCoordinator = StreamingUpdateCoordinator()
     @State private var expandedFiles: Set<String> = []
     @State private var showGraphiteView = false
     @State private var selectedFileForGraphite: StreamingFileInfo?
     @State private var lastUserRequest: String = ""
     @StateObject private var imageContextService = ImageContextService.shared
-    @State private var parsedCommands: [ParsedCommand] = []
     @State private var isThinkingExpanded: Bool = false // Track if thinking process is expanded
     private let terminalService = TerminalExecutionService.shared
     @State private var activeMentions: [Mention] = []
-    private let contentParser = StreamingContentParser.shared
+    @State private var showUndoConfirmation = false
+    @State private var isApplyingFiles = false // Track if files are currently being applied
     private let fileActionHandler = FileActionHandler.shared
     
-    // Debouncing for parsing to reduce CPU usage
-    private let parseDebouncer = ParseDebouncer(debounceInterval: 200_000_000) // 200ms
+    // CPU OPTIMIZATION: Coordinator provides throttled updates and prevents 100% CPU usage
+    // PROBLEM: Without coordinator, every token/character chunk triggers:
+    // - Immediate @Published updates → SwiftUI re-renders
+    // - Parsing on every character → 100% CPU usage
+    // - Multiple onChange handlers → re-entrant update loops
+    // - Auto-scroll on every character → excessive layout calculations
+    // SOLUTION: StreamingUpdateCoordinator throttles updates to ~100ms intervals,
+    // ensures parsing happens at most once per tick, and only updates MainActor
+    // state when parsed output meaningfully changes
+    
+    // Computed properties that observe coordinator's published state
+    private var streamingText: String { updateCoordinator.throttledStreamingText }
+    private var parsedFiles: [StreamingFileInfo] { updateCoordinator.parsedFiles }
+    private var parsedCommands: [ParsedCommand] { updateCoordinator.parsedCommands }
+    
+    // CPU OPTIMIZATION: Single scroll trigger tied to coordinator ticks
+    // PROBLEM: Multiple onChange handlers were triggering scrolls on every character/state change
+    // SOLUTION: Use coordinator's updateTick as single source of truth for scroll triggers
+    // Coordinator only increments tick on throttled updates (~100ms), preventing excessive scrolling
+    private var scrollTrigger: Int { updateCoordinator.updateTick }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +68,9 @@ struct CursorStreamingView: View {
                 .frame(height: 1)
             
             // Apply button - shows when generation is complete and there are files to apply
-            if !viewModel.isLoading && !parsedFiles.isEmpty && hasFilesToApply {
+            // Show button bar if we have files, even if they're still marked as streaming
+            // (they'll be marked as complete when loading finishes)
+            if !viewModel.isLoading && !parsedFiles.isEmpty {
                 applyButtonBar
             }
             
@@ -66,16 +85,27 @@ struct CursorStreamingView: View {
             )
         }
         .background(DesignSystem.Colors.primaryBackground)
+        // CPU OPTIMIZATION: Send raw streaming text to coordinator (no blocking, no throttling here)
+        // Coordinator handles throttling, parsing, and state updates internally
+        // This prevents re-entrant SwiftUI update loops by centralizing all update logic
         .onChange(of: viewModel.conversation.messages.last?.content) { _, newContent in
-            // Defer state changes to avoid publishing during view updates
-            Task { @MainActor in
-                handleMessageChange(newContent)
+            // Send raw streaming text to coordinator at full speed
+            // Coordinator will throttle updates and trigger parsing as needed
+            if let content = newContent {
+                updateCoordinator.updateStreamingText(content)
             }
         }
-        .onChange(of: viewModel.currentActions) { _, newActions in
-            // Defer state changes to avoid publishing during view updates
-            Task { @MainActor in
-                handleActionsChange(newActions)
+        // CPU OPTIMIZATION: Coordinator automatically re-parses when context changes
+        // No need for separate onChange handler - coordinator will detect changes on next tick
+        .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
+            // When loading completes, flush coordinator updates to ensure final state is applied
+            if wasLoading && !isLoading {
+                Task { @MainActor in
+                    updateCoordinator.flushUpdates()
+                    // Re-parse final content after a brief delay to ensure all streaming is complete
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                    handleLoadingComplete()
+                }
             }
         }
         .onChange(of: viewModel.isGeneratingProject) { wasGenerating, isGenerating in
@@ -92,49 +122,29 @@ struct CursorStreamingView: View {
             }
         }
         .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
-            // Auto-apply when loading completes (generation finished)
-            // Only apply if auto-execute is enabled AND files are complete and not empty
-            if wasLoading && !isLoading && viewModel.autoExecuteCode && !parsedFiles.isEmpty {
-                // Defer state changes outside of view update cycle
+            // When loading completes, flush coordinator updates to ensure final state is applied
+            if wasLoading && !isLoading {
                 Task { @MainActor in
-                    // Wait to ensure all streaming content is complete
-                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds to ensure completion
-                    
-                    // Re-parse to get final content
-                    let parser = StreamingContentParser.shared
-                    let finalFiles = parser.parseContent(
-                        viewModel.conversation.messages.last?.content ?? "",
-                        isLoading: false,
-                        projectURL: editorViewModel.rootFolderURL,
-                        actions: viewModel.currentActions
-                    )
-                    
-                    // Only update if we got valid files
-                    if !finalFiles.isEmpty {
-                        // Verify all files have substantial content before applying
-                        let validFiles = finalFiles.filter { file in
-                            let trimmed = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                            return !trimmed.isEmpty && trimmed.count > 20 // Minimum 20 characters
-                        }
-                        
-                        if !validFiles.isEmpty {
-                            print("✅ Auto-applying \(validFiles.count) files (auto-execute enabled)")
-                            self.parsedFiles = validFiles
-                            // Now apply only complete files (with safety checks)
-                            self.autoApplyAllFiles()
-                        } else {
-                            print("⚠️ No valid files to auto-apply - all files are too small or empty")
-                        }
-                    } else {
-                        print("⚠️ Re-parsing returned no files - skipping auto-apply to prevent code deletion")
-                    }
+                    updateCoordinator.flushUpdates()
+                    // Re-parse final content after a brief delay to ensure all streaming is complete
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                    handleLoadingComplete()
                 }
-            } else if wasLoading && !isLoading && !viewModel.autoExecuteCode {
-                print("ℹ️ Generation complete. Auto-execute is disabled - files will not be automatically applied.")
-                print("   Enable 'Auto Execute' in the menu to automatically apply generated files.")
             }
         }
-        .onAppear(perform: handleAppear)
+        .onChange(of: updateCoordinator.parsedFiles) { oldFiles, newFiles in
+            // Auto-expand new files that are streaming
+            for file in newFiles {
+                if file.isStreaming && !expandedFiles.contains(file.id) {
+                    expandedFiles.insert(file.id)
+                }
+            }
+        }
+        .onAppear {
+            // Setup coordinator callbacks on appear
+            setupCoordinator()
+            handleAppear()
+        }
         .sheet(isPresented: $showGraphiteView) {
             if !parsedFiles.isEmpty {
                 GraphiteStackView(
@@ -162,10 +172,10 @@ struct CursorStreamingView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: DesignSystem.Spacing.md) {
-                    // Empty state
-                    if !viewModel.isLoading && parsedFiles.isEmpty && parsedCommands.isEmpty && streamingText.isEmpty {
-                        emptyStateView
-                    } else {
+            // Empty state - only show if truly empty (not just loading finished)
+            if !viewModel.isLoading && parsedFiles.isEmpty && parsedCommands.isEmpty && streamingText.isEmpty && viewModel.conversation.messages.isEmpty {
+                emptyStateView
+            } else {
                         // Terminal commands view
                         if !parsedCommands.isEmpty {
                             TerminalCommandsView(
@@ -183,33 +193,23 @@ struct CursorStreamingView: View {
                 .padding(.vertical, DesignSystem.Spacing.md)
             }
             .scrollDismissesKeyboard(.interactively)
-            // Don't auto-scroll during streaming - let user scroll freely
-            // Only scroll when new files appear (not on every content update)
-            .onChange(of: parsedFiles.count) { oldCount, newCount in
-                // Only scroll to new file if it's the first one
-                if oldCount == 0 && newCount == 1, let firstFile = parsedFiles.first {
-                    // Defer state changes to avoid publishing during view updates
-                    Task { @MainActor in
-                        // Auto-open the first file in the editor for preview
-                        self.openFile(firstFile)
-                        // Gentle scroll to show the new file
-                        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3 seconds
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            proxy.scrollTo(firstFile.id, anchor: .top)
-                        }
-                    }
+            // CPU OPTIMIZATION: Single auto-scroll trigger tied to coordinator ticks
+            // PROBLEM: Multiple onChange handlers were triggering scrolls on every character/state change
+            // SOLUTION: Coordinator's updateTick only increments on throttled updates (~100ms)
+            // This ensures scrolling happens at most once per coordinator tick, preventing excessive scroll operations
+            .onChange(of: scrollTrigger) { _, _ in
+                guard viewModel.isLoading else { return }
+                // Coordinator already throttles updates, so we can scroll immediately
+                // No additional throttle needed - coordinator tick is already throttled
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
+                    proxy.scrollTo("streaming", anchor: .bottom)
                 }
             }
-            .onChange(of: parsedCommands.count) { _, _ in
-                if let lastCommand = parsedCommands.last {
-                    // Defer state changes to avoid publishing during view updates
-                    Task { @MainActor in
-                        // Debounce scroll to avoid interrupting user
-                        try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                            proxy.scrollTo(lastCommand.id.uuidString, anchor: .center)
-                        }
-                    }
+            .onAppear {
+                // Always scroll to bottom on appear (one-time, not throttled)
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                    proxy.scrollTo("streaming", anchor: .bottom)
                 }
             }
         }
@@ -268,19 +268,27 @@ struct CursorStreamingView: View {
             rawStreamingView
 
             // Completion summary - show after AI has responded
+            // COMPLETION GATE: Only show if all conditions are met (checked inside CompletionSummaryView)
+            // Show summary when loading is complete AND we have either:
+            // 1. Parsed files/commands, OR
+            // 2. An assistant message in the conversation, OR
+            // 3. A user request was made (even if no response yet)
             if !viewModel.isLoading && hasResponse {
                 CompletionSummaryView(
                     parsedFiles: parsedFiles,
                     parsedCommands: parsedCommands,
                     lastUserRequest: lastUserRequest,
                     lastMessage: viewModel.conversation.messages.last(where: { $0.role == .assistant })?.content,
-                    currentActions: viewModel.currentActions
+                    currentActions: viewModel.currentActions,
+                    executionOutcome: nil, // TODO: Pass execution outcome when available from inline edits
+                    expansionResult: nil
                 )
                 .transition(.asymmetric(
                     insertion: .move(edge: .bottom).combined(with: .opacity),
                     removal: .opacity
                 ))
                 .animation(.spring(response: 0.4, dampingFraction: 0.8), value: viewModel.isLoading)
+                .id("completion-summary-\(viewModel.conversation.messages.count)") // Force refresh when messages change
             }
 
             // Graphite recommendation for large changes
@@ -509,8 +517,8 @@ struct CursorStreamingView: View {
     
     
     private func rejectFile(_ file: StreamingFileInfo) {
-        // Remove file from parsed files
-        parsedFiles.removeAll { $0.id == file.id }
+        // ARCHITECTURE: Use safe state update method instead of direct mutation
+        updateCoordinator.removeFile(file.id)
     }
     
     private var actionsView: some View {
@@ -552,16 +560,9 @@ struct CursorStreamingView: View {
                     StreamingResponseView(
                         content: streamingText,
                         onContentChange: { newContent in
-                            // Update streaming text immediately for display
-                            Task { @MainActor in
-                                self.streamingText = newContent
-                            }
-                            // Debounce parsing to reduce CPU usage
-                            parseDebouncer.debounce {
-                                await MainActor.run {
-                                    self.parseStreamingContent(newContent)
-                                }
-                            }
+                            // CPU OPTIMIZATION: Send streaming text to coordinator
+                            // Coordinator handles throttling and parsing internally
+                            updateCoordinator.updateStreamingText(newContent)
                         }
                     )
                     .id("streaming")
@@ -586,10 +587,8 @@ struct CursorStreamingView: View {
             Spacer()
             
             Button(action: {
-                // Undo all - clear parsed files
-                Task { @MainActor in
-                    self.parsedFiles.removeAll()
-                }
+                // Show confirmation before clearing files
+                showUndoConfirmation = true
             }) {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.uturn.backward")
@@ -604,24 +603,41 @@ struct CursorStreamingView: View {
                 .cornerRadius(6)
             }
             .buttonStyle(PlainButtonStyle())
+            .alert("Clear All Files?", isPresented: $showUndoConfirmation) {
+                Button("Cancel", role: .cancel) { }
+                Button("Clear", role: .destructive) {
+                    // ARCHITECTURE: Use safe state update method instead of direct mutation
+                    updateCoordinator.clearAllFiles()
+                    print("✅ Cleared all files (user confirmed)")
+                }
+            } message: {
+                Text("This will remove all \(parsedFiles.count) file\(parsedFiles.count == 1 ? "" : "s") from the view. The files will remain on disk if they were already applied.")
+            }
             
             Button(action: {
                 // Apply all files
                 autoApplyAllFiles()
             }) {
                 HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("Apply All")
+                    if isApplyingFiles {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    Text(isApplyingFiles ? "Applying..." : "Apply All")
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(Color.accentColor)
+                .background(isApplyingFiles ? Color.accentColor.opacity(0.7) : Color.accentColor)
                 .cornerRadius(6)
             }
             .buttonStyle(PlainButtonStyle())
+            .disabled(isApplyingFiles)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -629,8 +645,9 @@ struct CursorStreamingView: View {
     }
     
     private var hasFilesToApply: Bool {
+        // Check if we have any files with valid content (even if still marked as streaming)
+        // The re-parse on completion will mark them as complete
         parsedFiles.contains { file in
-            !file.isStreaming &&
             !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             file.content.count > 10
         }
@@ -648,39 +665,37 @@ struct CursorStreamingView: View {
         }
     }
     
-    private func handleMessageChange(_ newContent: String?) {
-        guard let content = newContent else { return }
-        
-        // Update streaming text immediately for display (defer to avoid publishing during view updates)
-        Task { @MainActor in
-            self.streamingText = content
-        }
-        
-        // Debounce parsing to reduce CPU usage - only parse every 200ms
-        parseDebouncer.debounce {
-            await MainActor.run {
-                self.parseStreamingContent(content)
-                
-                // Re-parse when streaming completes to catch any final commands
-                if !self.viewModel.isLoading {
-                    let commands = self.terminalService.extractCommands(from: content)
-                    if !commands.isEmpty {
-                        self.parsedCommands = commands
-                    }
-                }
-            }
-        }
-    }
+    // CPU OPTIMIZATION: Coordinator handles all message changes
+    // No need for handleMessageChange - coordinator receives updates via onChange handler
+    // Coordinator throttles updates and triggers parsing internally
     
-    private func handleActionsChange(_: [AIAction]) {
-        if viewModel.isLoading {
-            // Debounce parsing to reduce CPU usage
-            let currentText = streamingText
-            parseDebouncer.debounce {
-                await MainActor.run {
-                    self.parseStreamingContent(currentText)
-                }
-            }
+    // CPU OPTIMIZATION: Setup coordinator callbacks
+    // Coordinator needs context for parsing and callbacks for file updates
+    private func setupCoordinator() {
+        // ARCHITECTURE: Coordinator needs context including user prompt for intent classification
+        updateCoordinator.getContext = { [viewModel, editorViewModel] in
+            let lastUserMessage = viewModel.conversation.messages.last(where: { $0.role == .user })?.content
+            return (
+                isLoading: viewModel.isLoading,
+                projectURL: editorViewModel.rootFolderURL,
+                actions: viewModel.currentActions,
+                userPrompt: lastUserMessage
+            )
+        }
+        
+        // Handle validation errors
+        // ARCHITECTURE: No [weak self] needed - CursorStreamingView is a struct (value type)
+        // Structs don't have retain cycles, so weak capture is not applicable
+        updateCoordinator.onValidationError = { errorMessage in
+            // Show error to user (could be enhanced with alert/toast)
+            print("⚠️ VALIDATION ERROR: \(errorMessage)")
+            // TODO: Show user-visible error UI
+        }
+        
+        updateCoordinator.onFilesUpdated = { [expandedFiles] files in
+            // Auto-expand new files that are streaming
+            // Note: We can't directly modify expandedFiles here since it's a @State property
+            // The coordinator will trigger a view update, and we'll handle expansion in the view
         }
     }
     
@@ -688,57 +703,46 @@ struct CursorStreamingView: View {
         guard let lastMessage = viewModel.conversation.messages.last,
               lastMessage.role == .assistant else { return }
         
-        // Update state asynchronously to avoid publishing during view updates
+        // Send existing content to coordinator
+        updateCoordinator.updateStreamingText(lastMessage.content)
+    }
+    
+    // Handle loading completion (called after coordinator flushes updates)
+    // ARCHITECTURE: All parsing/validation happens in EditIntentCoordinator
+    // Views only observe state, never mutate it during render
+    private func handleLoadingComplete() {
+        // Final validation is handled by EditIntentCoordinator via StreamingUpdateCoordinator
+        // No direct parsing or state mutation here - coordinator handles it
+        // This ensures state updates happen asynchronously AFTER view updates
+        
+        // Mark existing files as complete if needed
+        // ARCHITECTURE: Use safe state update method
         Task { @MainActor in
-            self.streamingText = lastMessage.content
-            if self.viewModel.isLoading {
-                self.parseStreamingContent(lastMessage.content)
+            if !parsedFiles.isEmpty {
+                let updatedFiles = parsedFiles.map { file in
+                    var updated = file
+                    updated.isStreaming = false
+                    return updated
+                }
+                // ARCHITECTURE: Use safe state update method instead of direct mutation
+                updateCoordinator.updateFiles(updatedFiles)
+                
+                if viewModel.autoExecuteCode {
+                    print("✅ Auto-applying \(updatedFiles.count) files (auto-execute enabled)")
+                    self.autoApplyAllFiles()
+                } else {
+                    print("ℹ️ Auto-execute is disabled. Use 'Apply All' button to apply files.")
+                }
             }
         }
     }
     
     // MARK: - Parsing
     
-    private func parseStreamingContent(_ content: String) {
-        // Skip parsing if content hasn't changed significantly (reduce CPU usage)
-        let contentHash = content.hashValue
-        if contentHash == parseDebouncer.lastParsedContentHash && viewModel.isLoading {
-            return // Content hasn't changed enough to warrant re-parsing
-        }
-        // Update hash in debouncer (it's a class so we can modify it)
-        parseDebouncer.lastParsedContentHash = contentHash
-        
-        // First, extract terminal commands
-        let commands = terminalService.extractCommands(from: content)
-        
-        // Parse files from content
-        let newFiles = contentParser.parseContent(
-            content,
-            isLoading: viewModel.isLoading,
-            projectURL: editorViewModel.rootFolderURL,
-            actions: viewModel.currentActions
-        )
-        
-        // Update state asynchronously to avoid publishing during view updates
-        Task { @MainActor in
-            if !commands.isEmpty {
-                self.parsedCommands = commands
-            }
-            
-            // Auto-expand new files that are streaming
-            for file in newFiles {
-                if file.isStreaming && !self.expandedFiles.contains(file.id) {
-                    self.expandedFiles.insert(file.id)
-                }
-            }
-            
-            // Only update if files actually changed (avoid unnecessary view updates)
-            if newFiles.count != self.parsedFiles.count || 
-               !newFiles.elementsEqual(self.parsedFiles, by: { $0.id == $1.id && $0.content == $1.content }) {
-                self.parsedFiles = newFiles
-            }
-        }
-    }
+    // CPU OPTIMIZATION: Parsing is now handled by StreamingUpdateCoordinator
+    // The coordinator ensures parsing happens at most once per tick (~100ms intervals)
+    // and only updates MainActor state when parsed output meaningfully changes
+    // This prevents 100% CPU usage by ensuring parsing does NOT run on every token
     
     private func getStreamingContent(for action: AIAction) -> String? {
         if let filePath = action.filePath,
@@ -765,25 +769,48 @@ struct CursorStreamingView: View {
     }
     
     private func autoApplyAllFiles() {
-        // Auto-apply all parsed files when project generation completes
-        // Only apply files that are complete (not streaming) and have valid content
+        // Prevent multiple simultaneous apply operations
+        guard !isApplyingFiles else {
+            print("⚠️ Apply operation already in progress")
+            return
+        }
+        
+        // Apply all parsed files that have valid content
+        // IMPROVED: Be more lenient - if generation is complete, apply files with valid content regardless of streaming status
         let filesToApply = parsedFiles.filter { file in
-            // Only apply if:
-            // 1. Not currently streaming
-            // 2. Content is not empty
-            // 3. Content has meaningful content (not just whitespace)
-            !file.isStreaming &&
-            !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            file.content.count > 10 // Minimum content length to avoid empty files
+            // Only apply if content is valid (not empty and has meaningful content)
+            let hasValidContent = !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                                  file.content.count > 10 // Minimum content length to avoid empty files
+            
+            // If generation is complete, apply files with valid content regardless of streaming status
+            if !viewModel.isLoading {
+                return hasValidContent
+            }
+            
+            // If still generating, only apply files that are marked as complete
+            return !file.isStreaming && hasValidContent
         }
         
         guard !filesToApply.isEmpty else {
-            print("⚠️ No valid files to auto-apply (all files are streaming or empty)")
+            let streamingCount = parsedFiles.filter { $0.isStreaming }.count
+            if streamingCount > 0 && viewModel.isLoading {
+                print("⚠️ No valid files to apply - \(streamingCount) file(s) still streaming. Wait for generation to complete.")
+            } else {
+                print("⚠️ No valid files to apply - all files are empty or too small")
+            }
             return
         }
         
         // Apply and open files sequentially to avoid state update conflicts
+        // IMPORTANT: Do NOT remove files from parsedFiles after applying - keep them visible for review
         Task { @MainActor in
+            isApplyingFiles = true
+            
+            defer {
+                isApplyingFiles = false
+            }
+            
+            var appliedCount = 0
             for (index, file) in filesToApply.enumerated() {
                 // Small delay between each file to avoid overwhelming the system
                 if index > 0 {
@@ -794,6 +821,8 @@ struct CursorStreamingView: View {
                 if !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Use openFile instead of applyFile to both write AND open in editor
                     self.openFile(file)
+                    appliedCount += 1
+                    print("✅ Applied and opened file: \(file.path) (\(appliedCount)/\(filesToApply.count))")
                 } else {
                     print("⚠️ Skipping file \(file.path) - content is empty")
                 }
@@ -802,6 +831,10 @@ struct CursorStreamingView: View {
             // Final refresh after all files are applied to ensure file tree is updated
             try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s delay to ensure all writes complete
             self.editorViewModel.refreshFileTree()
+            
+            // Files remain in parsedFiles so they stay visible for review
+            // User can manually remove them with "Undo All" if needed
+            print("✅ All \(appliedCount) file(s) applied successfully. Files remain visible for review.")
         }
     }
     
@@ -878,9 +911,15 @@ struct CursorStreamingView: View {
         // Store user request for completion summary
         lastUserRequest = viewModel.currentInput
         
-        streamingText = ""
-        parsedFiles = []
-        parsedCommands = [] // Clear previous commands
+        // Only clear files when starting a NEW conversation/message
+        // This is expected behavior - each new message starts fresh
+        let previousFileCount = parsedFiles.count
+        if previousFileCount > 0 {
+            print("🔄 Starting new message - clearing \(previousFileCount) previous file(s) from view")
+        }
+        
+        // Reset coordinator state (clears all streaming text, parsed files, and commands)
+        updateCoordinator.reset()
         // Pass user message as query to detect website modifications and include existing files
         var context = editorViewModel.getContextForAI(query: viewModel.currentInput) ?? ""
         
@@ -907,10 +946,16 @@ struct CursorStreamingView: View {
     
     private var hasResponse: Bool {
         // Check if AI has provided any response
-        return !parsedFiles.isEmpty ||
-               !parsedCommands.isEmpty ||
-               !lastUserRequest.isEmpty ||
-               viewModel.conversation.messages.contains(where: { $0.role == .assistant })
+        // Show summary if:
+        // 1. We have parsed files or commands, OR
+        // 2. There's an assistant message in the conversation, OR
+        // 3. There was a user request (even if response is still processing)
+        let hasAssistantMessage = viewModel.conversation.messages.contains(where: { $0.role == .assistant })
+        let hasParsedContent = !parsedFiles.isEmpty || !parsedCommands.isEmpty
+        let hasUserRequest = !lastUserRequest.isEmpty
+        
+        // Show summary if we have any indication of a response or request
+        return hasParsedContent || hasAssistantMessage || (hasUserRequest && !viewModel.isLoading)
     }
 
     private var shouldShowGraphiteRecommendation: Bool {
@@ -931,5 +976,54 @@ struct CursorStreamingView: View {
     
     private func createGraphiteStack() {
         showGraphiteView = true
+    }
+    
+    // MARK: - Error State Views
+    
+    /// Parse failure view - shown when parsing yields zero files or zero edits
+    /// PARSE FAILURE HANDLING: Abort pipeline, do NOT show "Response Complete"
+    private var parseFailureView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 18))
+                
+                Text("Parse Failure")
+                    .font(.system(size: 16, weight: .semibold))
+                
+                Spacer()
+            }
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No files or commands were parsed from the AI response.")
+                    .font(.system(size: 13))
+                    .foregroundColor(.primary)
+                
+                Text("The response may be incomplete or in an unexpected format.")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            
+            Button("Retry") {
+                // Retry the last request
+                if let lastMessage = viewModel.conversation.messages.last(where: { $0.role == .user }) {
+                    viewModel.currentInput = lastMessage.content
+                    viewModel.sendMessage()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.orange.opacity(0.2), lineWidth: 1.5)
+        )
     }
 }

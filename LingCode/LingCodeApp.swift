@@ -12,9 +12,18 @@ import AppKit
 struct LingCodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
+    init() {
+        // Apply saved theme preference on app launch
+        if let saved = UserDefaults.standard.string(forKey: "themePreference"),
+           let preference = ThemeService.ThemePreference(rawValue: saved) {
+            ThemeService.shared.setTheme(preference)
+        }
+    }
+    
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView()
+                .environmentObject(ThemeService.shared)
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
@@ -156,6 +165,17 @@ class WindowManager {
             window.contentViewController = hostingController
             window.title = "LingCode"
             window.center()
+            
+            // Apply theme to new window
+            if let saved = UserDefaults.standard.string(forKey: "themePreference"),
+               let preference = ThemeService.ThemePreference(rawValue: saved) {
+                if preference == .dark {
+                    window.appearance = NSAppearance(named: .darkAqua)
+                } else if preference == .light {
+                    window.appearance = NSAppearance(named: .aqua)
+                }
+            }
+            
             window.makeKeyAndOrderFront(nil)
             
             // Set window restoration identifier to match WindowGroup id

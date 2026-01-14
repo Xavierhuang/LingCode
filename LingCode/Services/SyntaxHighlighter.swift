@@ -31,27 +31,34 @@ struct SyntaxHighlighter {
         }
     }
     
-    static func highlight(_ text: String, language: String?) -> NSAttributedString {
-        guard let languageString = language,
-              let lang = Language(rawValue: languageString.lowercased()) else {
-            return NSAttributedString(string: text)
-        }
+    static func highlight(_ text: String, language: String?, theme: CodeTheme? = nil) -> NSAttributedString {
+        // Use theme colors if provided, otherwise fall back to system colors
+        let theme = theme ?? ThemeService.shared.currentTheme
         
         let attributedString = NSMutableAttributedString(string: text)
         
+        // Set default foreground color for all text (ensures readable text in dark mode)
+        attributedString.addAttribute(.foregroundColor, value: theme.foreground, range: NSRange(location: 0, length: text.utf16.count))
+        
+        guard let languageString = language,
+              let lang = Language(rawValue: languageString.lowercased()) else {
+            // No language specified, return with default foreground color only
+            return attributedString
+        }
+        
         switch lang {
         case .swift:
-            highlightSwift(attributedString)
+            highlightSwift(attributedString, theme: theme)
         case .python:
-            highlightPython(attributedString)
+            highlightPython(attributedString, theme: theme)
         case .javascript:
-            highlightJavaScript(attributedString)
+            highlightJavaScript(attributedString, theme: theme)
         case .html:
-            highlightHTML(attributedString)
+            highlightHTML(attributedString, theme: theme)
         case .css:
-            highlightCSS(attributedString)
+            highlightCSS(attributedString, theme: theme)
         case .json:
-            highlightJSON(attributedString)
+            highlightJSON(attributedString, theme: theme)
         case .plaintext:
             break
         }
@@ -59,117 +66,117 @@ struct SyntaxHighlighter {
         return attributedString
     }
     
-    private static func highlightSwift(_ attributedString: NSMutableAttributedString) {
+    private static func highlightSwift(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
         let keywords = ["class", "struct", "enum", "func", "var", "let", "if", "else", "for", "while", "switch", "case", "default", "return", "import", "private", "public", "internal", "static", "override", "init", "self", "super", "extension", "protocol", "typealias", "associatedtype", "mutating", "weak", "strong", "unowned", "lazy", "final", "open", "fileprivate", "inout", "throws", "rethrows", "async", "await"]
         
         let types = ["String", "Int", "Double", "Float", "Bool", "Array", "Dictionary", "Set", "Optional", "UIView", "UIViewController", "Data", "URL", "Date"]
         
-        // Highlight keywords
+        // Highlight keywords using theme color
         for keyword in keywords {
-            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: .systemPurple)
+            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: theme.keyword)
         }
         
-        // Highlight types
+        // Highlight types using theme color
         for type in types {
-            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: type))\\b", color: .systemBlue)
+            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: type))\\b", color: theme.type)
         }
         
-        // Highlight strings
-        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: .systemRed)
+        // Highlight strings using theme color
+        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: theme.string)
         
-        // Highlight numbers
-        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: .systemGreen)
+        // Highlight numbers using theme color
+        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: theme.number)
         
-        // Highlight comments
-        highlightPattern(attributedString, pattern: "//.*$", color: .systemGray, options: [.anchorsMatchLines])
-        highlightPattern(attributedString, pattern: "/\\*[\\s\\S]*?\\*/", color: .systemGray, options: [.anchorsMatchLines, .dotMatchesLineSeparators])
+        // Highlight comments using theme color
+        highlightPattern(attributedString, pattern: "//.*$", color: theme.comment, options: [.anchorsMatchLines])
+        highlightPattern(attributedString, pattern: "/\\*[\\s\\S]*?\\*/", color: theme.comment, options: [.anchorsMatchLines, .dotMatchesLineSeparators])
     }
     
-    private static func highlightPython(_ attributedString: NSMutableAttributedString) {
+    private static func highlightPython(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
         let keywords = ["def", "class", "if", "elif", "else", "for", "while", "try", "except", "finally", "with", "as", "import", "from", "return", "yield", "lambda", "and", "or", "not", "in", "is", "None", "True", "False", "pass", "break", "continue", "global", "nonlocal", "async", "await"]
         
         let types = ["str", "int", "float", "bool", "list", "dict", "tuple", "set", "frozenset"]
         
-        // Highlight keywords
+        // Highlight keywords using theme color
         for keyword in keywords {
-            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: .systemPurple)
+            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: theme.keyword)
         }
         
-        // Highlight types
+        // Highlight types using theme color
         for type in types {
-            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: type))\\b", color: .systemBlue)
+            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: type))\\b", color: theme.type)
         }
         
-        // Highlight strings
-        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: .systemRed)
-        highlightPattern(attributedString, pattern: "'[^']*'", color: .systemRed)
+        // Highlight strings using theme color
+        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: theme.string)
+        highlightPattern(attributedString, pattern: "'[^']*'", color: theme.string)
         
-        // Highlight numbers
-        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: .systemGreen)
+        // Highlight numbers using theme color
+        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: theme.number)
         
-        // Highlight comments
-        highlightPattern(attributedString, pattern: "#.*$", color: .systemGray, options: [.anchorsMatchLines])
+        // Highlight comments using theme color
+        highlightPattern(attributedString, pattern: "#.*$", color: theme.comment, options: [.anchorsMatchLines])
     }
     
-    private static func highlightJavaScript(_ attributedString: NSMutableAttributedString) {
+    private static func highlightJavaScript(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
         let keywords = ["function", "var", "let", "const", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "try", "catch", "finally", "throw", "new", "this", "typeof", "instanceof", "in", "of", "class", "extends", "super", "static", "async", "await", "import", "export", "from", "default"]
         
-        // Highlight keywords
+        // Highlight keywords using theme color
         for keyword in keywords {
-            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: .systemPurple)
+            highlightPattern(attributedString, pattern: "\\b\(NSRegularExpression.escapedPattern(for: keyword))\\b", color: theme.keyword)
         }
         
-        // Highlight strings
-        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: .systemRed)
-        highlightPattern(attributedString, pattern: "'[^']*'", color: .systemRed)
-        highlightPattern(attributedString, pattern: "`[^`]*`", color: .systemRed)
+        // Highlight strings using theme color
+        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: theme.string)
+        highlightPattern(attributedString, pattern: "'[^']*'", color: theme.string)
+        highlightPattern(attributedString, pattern: "`[^`]*`", color: theme.string)
         
-        // Highlight numbers
-        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: .systemGreen)
+        // Highlight numbers using theme color
+        highlightPattern(attributedString, pattern: "\\b\\d+\\.?\\d*\\b", color: theme.number)
         
-        // Highlight comments
-        highlightPattern(attributedString, pattern: "//.*$", color: .systemGray, options: [.anchorsMatchLines])
-        highlightPattern(attributedString, pattern: "/\\*[\\s\\S]*?\\*/", color: .systemGray, options: [.anchorsMatchLines, .dotMatchesLineSeparators])
+        // Highlight comments using theme color
+        highlightPattern(attributedString, pattern: "//.*$", color: theme.comment, options: [.anchorsMatchLines])
+        highlightPattern(attributedString, pattern: "/\\*[\\s\\S]*?\\*/", color: theme.comment, options: [.anchorsMatchLines, .dotMatchesLineSeparators])
     }
     
-    private static func highlightHTML(_ attributedString: NSMutableAttributedString) {
-        // Highlight tags
-        highlightPattern(attributedString, pattern: "<[^>]+>", color: .systemBlue)
+    private static func highlightHTML(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
+        // Highlight tags using theme type color
+        highlightPattern(attributedString, pattern: "<[^>]+>", color: theme.type)
         
-        // Highlight attributes
-        highlightPattern(attributedString, pattern: "\\w+=\"[^\"]*\"", color: .systemGreen)
+        // Highlight attributes using theme keyword color
+        highlightPattern(attributedString, pattern: "\\w+=\"[^\"]*\"", color: theme.keyword)
         
-        // Highlight strings within tags (attribute values)
-        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: .systemRed)
+        // Highlight strings within tags (attribute values) using theme string color
+        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: theme.string)
     }
     
-    private static func highlightCSS(_ attributedString: NSMutableAttributedString) {
-        // Highlight selectors
-        highlightPattern(attributedString, pattern: "[.#]?\\w+(?=\\s*\\{)", color: .systemBlue)
+    private static func highlightCSS(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
+        // Highlight selectors using theme type color
+        highlightPattern(attributedString, pattern: "[.#]?\\w+(?=\\s*\\{)", color: theme.type)
         
-        // Highlight properties
-        highlightPattern(attributedString, pattern: "\\w+(?=\\s*:)", color: .systemPurple)
+        // Highlight properties using theme keyword color
+        highlightPattern(attributedString, pattern: "\\w+(?=\\s*:)", color: theme.keyword)
         
-        // Highlight values
-        highlightPattern(attributedString, pattern: ":\\s*[^;]+", color: .systemGreen)
+        // Highlight values using theme number color
+        highlightPattern(attributedString, pattern: ":\\s*[^;]+", color: theme.number)
         
-        // Highlight strings
-        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: .systemRed)
-        highlightPattern(attributedString, pattern: "'[^']*'", color: .systemRed)
+        // Highlight strings using theme string color
+        highlightPattern(attributedString, pattern: "\"[^\"]*\"", color: theme.string)
+        highlightPattern(attributedString, pattern: "'[^']*'", color: theme.string)
     }
     
-    private static func highlightJSON(_ attributedString: NSMutableAttributedString) {
-        // Highlight keys
-        highlightPattern(attributedString, pattern: "\"[^\"]+\"(?=\\s*:)", color: .systemBlue)
+    private static func highlightJSON(_ attributedString: NSMutableAttributedString, theme: CodeTheme) {
+        // Highlight keys using theme type color
+        highlightPattern(attributedString, pattern: "\"[^\"]+\"(?=\\s*:)", color: theme.type)
         
-        // Highlight string values
-        highlightPattern(attributedString, pattern: ":\\s*\"[^\"]*\"", color: .systemRed)
+        // Highlight string values using theme string color
+        highlightPattern(attributedString, pattern: ":\\s*\"[^\"]*\"", color: theme.string)
         
-        // Highlight numbers
-        highlightPattern(attributedString, pattern: ":\\s*\\d+\\.?\\d*", color: .systemGreen)
+        // Highlight numbers using theme number color
+        highlightPattern(attributedString, pattern: ":\\s*\\d+\\.?\\d*", color: theme.number)
         
-        // Highlight booleans and null
-        highlightPattern(attributedString, pattern: "\\b(true|false|null)\\b", color: .systemPurple)
+        // Highlight booleans and null using theme keyword color
+        highlightPattern(attributedString, pattern: "\\b(true|false|null)\\b", color: theme.keyword)
     }
     
     private static func highlightPattern(_ attributedString: NSMutableAttributedString, pattern: String, color: NSColor, options: NSRegularExpression.Options = []) {

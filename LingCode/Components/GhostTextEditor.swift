@@ -116,7 +116,8 @@ struct GhostTextEditor: NSViewRepresentable {
     
     private func applySyntaxHighlighting(to textView: NSTextView, language: String?) {
         guard let language = language else { return }
-        let highlighted = SyntaxHighlighter.highlight(textView.string, language: language)
+        let theme = ThemeService.shared.currentTheme
+        let highlighted = SyntaxHighlighter.highlight(textView.string, language: language, theme: theme)
 
         let mutableHighlighted = NSMutableAttributedString(attributedString: highlighted)
 

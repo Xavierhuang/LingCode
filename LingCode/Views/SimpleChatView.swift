@@ -48,8 +48,29 @@ struct SimpleChatView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: viewModel.conversation.messages.count) { oldValue, newValue in
-                    if !viewModel.isLoading && newValue > oldValue, let lastMessage = viewModel.conversation.messages.last {
-                        withAnimation {
+                    if newValue > oldValue, let lastMessage = viewModel.conversation.messages.last {
+                        // Always scroll to bottom when new messages arrive
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.conversation.messages.last?.content) { _, _ in
+                    // Scroll to bottom when message content updates (during streaming)
+                    if viewModel.isLoading, let lastMessage = viewModel.conversation.messages.last {
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+                            withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
+                                proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+                .onAppear {
+                    // Always scroll to bottom on appear
+                    if let lastMessage = viewModel.conversation.messages.last {
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
                             proxy.scrollTo(lastMessage.id, anchor: .bottom)
                         }
                     }

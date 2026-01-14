@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import Combine
 
 struct CodeTheme {
     let name: String
@@ -22,14 +23,59 @@ struct CodeTheme {
     let cursor: NSColor
 }
 
-class ThemeService {
+class ThemeService: ObservableObject {
     static let shared = ThemeService()
     
-    private init() {}
+    @Published var forcedTheme: ThemePreference? = nil
+    
+    enum ThemePreference: String, CaseIterable {
+        case system = "System"
+        case light = "Light"
+        case dark = "Dark"
+    }
+    
+    private init() {
+        // Load saved preference
+        if let saved = UserDefaults.standard.string(forKey: "themePreference"),
+           let preference = ThemePreference(rawValue: saved) {
+            forcedTheme = preference
+        } else {
+            forcedTheme = .system
+        }
+    }
     
     var currentTheme: CodeTheme {
-        let isDark = NSApp.effectiveAppearance.name == .darkAqua
+        let isDark: Bool
+        switch forcedTheme {
+        case .dark:
+            isDark = true
+        case .light:
+            isDark = false
+        case .system, .none:
+            isDark = NSApp.effectiveAppearance.name == .darkAqua
+        }
         return isDark ? darkTheme : lightTheme
+    }
+    
+    func setTheme(_ preference: ThemePreference) {
+        forcedTheme = preference
+        UserDefaults.standard.set(preference.rawValue, forKey: "themePreference")
+        
+        // Apply theme to app appearance - this affects all windows
+        DispatchQueue.main.async {
+            if preference == .dark {
+                NSApp.appearance = NSAppearance(named: .darkAqua)
+            } else if preference == .light {
+                NSApp.appearance = NSAppearance(named: .aqua)
+            } else {
+                NSApp.appearance = nil // Use system default
+            }
+            
+            // Force all windows to update their appearance
+            for window in NSApplication.shared.windows {
+                window.appearance = NSApp.appearance
+            }
+        }
     }
     
     let darkTheme = CodeTheme(

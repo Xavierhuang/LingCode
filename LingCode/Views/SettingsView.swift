@@ -11,6 +11,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var isPresented: Bool
     @ObservedObject private var localService = LocalOnlyService.shared
+    @ObservedObject private var themeService = ThemeService.shared
     @State private var apiKey: String = ""
     @State private var selectedProvider: AIProvider = .openAI
     @State private var selectedAnthropicModel: AnthropicModel = .sonnet45
@@ -219,9 +220,27 @@ struct SettingsView: View {
                 }
                 
                 Section("Theme") {
-                    Text("Theme automatically adapts to system appearance")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Appearance")
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                        
+                        Picker("", selection: Binding(
+                            get: { themeService.forcedTheme ?? .system },
+                            set: { themeService.setTheme($0) }
+                        )) {
+                            ForEach(ThemeService.ThemePreference.allCases, id: \.self) { preference in
+                                Text(preference.rawValue).tag(preference)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: .infinity)
+                        
+                        Text(themeService.forcedTheme == .system ? "Theme follows system appearance" : "Theme is manually set")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
                 }
             }
             .navigationTitle("Settings")
@@ -233,7 +252,7 @@ struct SettingsView: View {
                 }
             }
         }
-        .frame(width: 500, height: 400)
+        .frame(minWidth: 500, minHeight: 400)
         .onAppear {
             if let key = AIService.shared.getAPIKey() {
                 apiKey = key

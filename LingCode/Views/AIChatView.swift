@@ -11,7 +11,6 @@ import UniformTypeIdentifiers
 struct AIChatView: View {
     @ObservedObject var viewModel: AIViewModel
     @ObservedObject var editorViewModel: EditorViewModel
-    @State private var isCollapsed: Bool = false
     @State private var showMentionPopup: Bool = false
     @State private var activeMentions: [Mention] = []
     @State private var showFileSelector: Bool = false
@@ -20,7 +19,6 @@ struct AIChatView: View {
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var shouldAutoScroll: Bool = true  // Track if we should auto-scroll
     @State private var lastMessageCount: Int = 0
-    @State private var isHoveringToggle: Bool = false
     
     enum AIViewMode {
         case agent   // Agent mode - autonomous task execution
@@ -35,12 +33,8 @@ struct AIChatView: View {
     }
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Left-edge collapse button (Cursor-style)
-            leftEdgeCollapseButton
-            
-            if !isCollapsed {
-                VStack(spacing: 0) {
+        // Removed left-edge collapse button - using ContentView's resizable divider instead
+        VStack(spacing: 0) {
                     HStack(spacing: DesignSystem.Spacing.md) {
                         // Icon only (no text to avoid layout issues)
                         Image(systemName: "sparkles")
@@ -121,8 +115,6 @@ struct AIChatView: View {
                         SimpleChatView(viewModel: viewModel, editorViewModel: editorViewModel)
                     }
                 }
-            }
-        }
         .sheet(isPresented: $showProjectGenerator) {
             ProjectGenerationView(viewModel: viewModel, isPresented: $showProjectGenerator)
         }
@@ -132,8 +124,6 @@ struct AIChatView: View {
             }
         }
     }
-    
-    // MARK: - Left Edge Collapse Button
     
     // MARK: - Mode Selector
     
@@ -154,43 +144,7 @@ struct AIChatView: View {
         .help("\(label) mode\(shortcut.map { " (\($0))" } ?? "")")
     }
     
-    private var leftEdgeCollapseButton: some View {
-        Button(action: {
-            withAnimation(.easeOut(duration: 0.2)) {
-                isCollapsed.toggle()
-            }
-        }) {
-            VStack(spacing: 0) {
-                Spacer()
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(isHoveringToggle ? .primary : .secondary)
-                    .frame(width: 20, height: 20)
-                    .padding(.vertical, 8)
-                Spacer()
-            }
-            .frame(width: 12)
-            .frame(maxHeight: .infinity)
-            .background(
-                Group {
-                    if isHoveringToggle {
-                        Color(NSColor.controlAccentColor).opacity(0.2)
-                    } else {
-                        Color(NSColor.separatorColor)
-                            .opacity(isCollapsed ? 0.3 : 0.5)
-                    }
-                }
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PlainButtonStyle())
-        .help(isCollapsed ? "Show AI panel" : "Hide AI panel")
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isHoveringToggle = hovering
-            }
-        }
-    }
+    // Removed leftEdgeCollapseButton - using ContentView's resizable divider instead
     
     // MARK: - Created Files Section
     

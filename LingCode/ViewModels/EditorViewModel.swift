@@ -321,8 +321,53 @@ class EditorViewModel: ObservableObject {
         
         context += rankedContext
         
-        // Check if this is a website modification request
+        // Check if this is a text replacement request (e.g., "change X to Y", "replace X with Y")
         let lowercasedQuery = query?.lowercased() ?? ""
+        let isTextReplacement = (lowercasedQuery.contains("change") || 
+                                 lowercasedQuery.contains("replace") || 
+                                 lowercasedQuery.contains("rename")) &&
+                                (lowercasedQuery.contains("to") || lowercasedQuery.contains("with"))
+        
+        // If text replacement, search all files for the text to replace
+        if isTextReplacement, let projectURL = rootFolderURL, let query = query {
+            // Extract the text to search for (the first word/phrase after "change"/"replace")
+            let words = query.components(separatedBy: .whitespaces)
+            var searchText: String? = nil
+            if let changeIndex = words.firstIndex(where: { $0.lowercased() == "change" || $0.lowercased() == "replace" || $0.lowercased() == "rename" }),
+               changeIndex + 1 < words.count {
+                // Get the text after "change/replace/rename"
+                let remainingWords = Array(words[(changeIndex + 1)...])
+                if let toIndex = remainingWords.firstIndex(where: { $0.lowercased() == "to" || $0.lowercased() == "with" }),
+                   toIndex > 0 {
+                    searchText = remainingWords[0..<toIndex].joined(separator: " ")
+                } else {
+                    // No "to"/"with" found, use first word after change/replace
+                    searchText = remainingWords.first
+                }
+            }
+            
+            if let searchText = searchText, !searchText.isEmpty {
+                // Search all files for this text
+                let matchingFiles = searchForText(searchText, in: projectURL)
+                if !matchingFiles.isEmpty {
+                    context += "--- FILES CONTAINING '\(searchText)' (MODIFY THESE FILES) ---\n"
+                    context += "**IMPORTANT: The text '\(searchText)' appears in the following files. Modify ALL of them, prioritizing HTML files for text content.\n\n"
+                    for (fileURL, occurrences) in matchingFiles {
+                        if let fileContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                            let fileName = fileURL.lastPathComponent
+                            let isHTML = fileName.hasSuffix(".html") || fileName.hasSuffix(".htm")
+                            let priority = isHTML ? "HIGH PRIORITY" : "CHECK IF NEEDED"
+                            context += "\n--- \(fileName) (\(priority) - \(occurrences) occurrence(s)) ---\n"
+                            context += fileContent
+                            context += "\n"
+                        }
+                    }
+                    context += "\n"
+                }
+            }
+        }
+        
+        // Check if this is a website modification request
         let isWebsiteModification = (lowercasedQuery.contains("upgrade") || 
                                      lowercasedQuery.contains("modify") || 
                                      lowercasedQuery.contains("improve") ||
@@ -424,6 +469,51 @@ class EditorViewModel: ObservableObject {
         }
         
         return context.isEmpty ? nil : context
+    }
+    
+    /// Search for text across all files in the project
+    private func searchForText(_ text: String, in projectURL: URL) -> [(URL, Int)] {
+        var matchingFiles: [(URL, Int)] = []
+        let searchTextLower = text.lowercased()
+        
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return matchingFiles
+        }
+        
+        for case let fileURL as URL in enumerator {
+            guard !fileURL.hasDirectoryPath,
+                  let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                continue
+            }
+            
+            // Count occurrences (case-insensitive)
+            let contentLower = content.lowercased()
+            let occurrences = contentLower.components(separatedBy: searchTextLower).count - 1
+            
+            if occurrences > 0 {
+                matchingFiles.append((fileURL, occurrences))
+            }
+        }
+        
+        // Sort by: HTML files first, then by number of occurrences
+        matchingFiles.sort { file1, file2 in
+            let isHTML1 = file1.0.lastPathComponent.hasSuffix(".html") || file1.0.lastPathComponent.hasSuffix(".htm")
+            let isHTML2 = file2.0.lastPathComponent.hasSuffix(".html") || file2.0.lastPathComponent.hasSuffix(".htm")
+            
+            if isHTML1 && !isHTML2 {
+                return true
+            } else if !isHTML1 && isHTML2 {
+                return false
+            } else {
+                return file1.1 > file2.1 // More occurrences first
+            }
+        }
+        
+        return matchingFiles
     }
     
     // MARK: - Language Detection

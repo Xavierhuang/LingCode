@@ -18,8 +18,44 @@ class StreamingContentParser {
         projectURL: URL?,
         actions: [AIAction]
     ) -> [StreamingFileInfo] {
+        // PARSER ROBUSTNESS: Only parse complete blocks when not loading
+        // During streaming (isLoading == true), allow incomplete blocks
+        // After streaming completes (isLoading == false), only accept complete blocks
+        
         var newFiles: [StreamingFileInfo] = []
         var processedPaths = Set<String>()
+        
+        // First, try to parse JSON edit format (for targeted edits)
+        // This allows simple changes without rewriting entire files
+        if let jsonPatches = parseJSONEdits(content: content, projectURL: projectURL) {
+            for patch in jsonPatches {
+                if !processedPaths.contains(patch.filePath) {
+                    processedPaths.insert(patch.filePath)
+                    
+                    // Apply patch to get the new content
+                    let patchGenerator = PatchGeneratorService.shared
+                    if let newContent = try? patchGenerator.applyPatch(patch) {
+                        let (summary, added, removed) = calculateChangeSummary(
+                            filePath: patch.filePath,
+                            newContent: newContent,
+                            projectURL: projectURL
+                        )
+                        
+                        newFiles.append(StreamingFileInfo(
+                            id: patch.filePath,
+                            path: patch.filePath,
+                            name: URL(fileURLWithPath: patch.filePath).lastPathComponent,
+                            language: detectLanguage(from: patch.filePath),
+                            content: newContent,
+                            isStreaming: isLoading,
+                            changeSummary: summary,
+                            addedLines: added,
+                            removedLines: removed
+                        ))
+                    }
+                }
+            }
+        }
         
         // Multiple patterns to catch different formats (including incomplete blocks during streaming)
         let patterns = [
@@ -32,13 +68,18 @@ class StreamingContentParser {
         ]
         
         // Patterns for incomplete blocks (streaming)
+        // MULTI-FILE DETECTION: Enhanced patterns for streaming
         let streamingPatterns = [
             // Pattern 1: `filename.ext`:\n```lang\ncode (incomplete - no closing ```)
             #"`([^`\n]+\.[a-zA-Z0-9]+)`[:\s]*\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#,
             // Pattern 2: **filename.ext**:\n```lang\ncode (incomplete)
             #"\*\*([^*\n]+\.[a-zA-Z0-9]+)\*\*[:\s]*\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#,
             // Pattern 3: ### filename.ext\n```lang\ncode (incomplete)
-            #"###\s+([^\n]+\.[a-zA-Z0-9]+)\s*\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#
+            #"###\s+([^\n]+\.[a-zA-Z0-9]+)\s*\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#,
+            // Pattern 4: filename.ext:\n```lang\ncode (incomplete, no backticks)
+            #"([^\n]+\.[a-zA-Z0-9]+)[:\s]+\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#,
+            // Pattern 5: --- filename.ext ---\n```lang\ncode (incomplete, markdown separator)
+            #"---\s+([^\n]+\.[a-zA-Z0-9]+)\s+---\s*\n```(\w+)?\n([\s\S]*?)(?=\n```|$)"#
         ]
         
         // First, process complete blocks
@@ -62,6 +103,8 @@ class StreamingContentParser {
         }
         
         // Then, process incomplete blocks (for streaming)
+        // PARSER ROBUSTNESS: Only process incomplete blocks during streaming
+        // After streaming completes, only complete blocks are accepted
         if isLoading {
             for pattern in streamingPatterns {
                 if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
@@ -78,7 +121,7 @@ class StreamingContentParser {
                                 processMatch(
                                     match,
                                     in: content,
-                                    isStreaming: true,
+                                    isStreaming: true, // Mark as streaming (incomplete)
                                     isLoading: isLoading,
                                     projectURL: projectURL,
                                     newFiles: &newFiles,
@@ -89,6 +132,10 @@ class StreamingContentParser {
                     }
                 }
             }
+        } else {
+            // PARSER ROBUSTNESS: When not loading, reject any incomplete blocks
+            // Only complete blocks (with closing ```) should be accepted
+            // This prevents partial/truncated content from being treated as valid
         }
         
         // Also check actions for files
@@ -120,6 +167,17 @@ class StreamingContentParser {
         }
         
         return newFiles
+    }
+    
+    /// Parse JSON edit format from content
+    private func parseJSONEdits(content: String, projectURL: URL?) -> [CodePatch]? {
+        let patchGenerator = PatchGeneratorService.shared
+        let patches = patchGenerator.generatePatches(from: content, projectURL: projectURL)
+        
+        // Filter to only JSON-based patches (those with ranges, indicating targeted edits)
+        let jsonPatches = patches.filter { $0.range != nil }
+        
+        return jsonPatches.isEmpty ? nil : jsonPatches
     }
     
     private func processMatch(
@@ -168,6 +226,21 @@ class StreamingContentParser {
             processedPaths.insert(path)
             let fileId = path
             
+            // PARSER ROBUSTNESS: Validate content before creating file info
+            // Reject empty or too-short content
+            let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedCode.isEmpty && trimmedCode.count >= 10 else {
+                print("⚠️ PARSER ROBUSTNESS: Rejecting file \(path) - content too short or empty (length: \(trimmedCode.count))")
+                return
+            }
+            
+            // PARSER ROBUSTNESS: If not loading and block is marked as streaming, reject it
+            // Only complete blocks should be accepted after streaming completes
+            if !isLoading && isStreaming {
+                print("⚠️ PARSER ROBUSTNESS: Rejecting incomplete block for \(path) - streaming marked but not loading")
+                return
+            }
+            
             // Calculate change summary
             let (summary, added, removed) = calculateChangeSummary(
                 filePath: path,
@@ -175,31 +248,39 @@ class StreamingContentParser {
                 projectURL: projectURL
             )
             
+            let fileInfo = StreamingFileInfo(
+                id: fileId,
+                path: path,
+                name: URL(fileURLWithPath: path).lastPathComponent,
+                language: language,
+                content: code,
+                isStreaming: isStreaming || isLoading,
+                changeSummary: summary,
+                addedLines: added,
+                removedLines: removed
+            )
+            
+            // PARSER ROBUSTNESS: Final validation
+            let validation = ParserRobustnessGuard.shared.validateFileContent(
+                fileInfo,
+                isStreaming: isStreaming,
+                isLoading: isLoading
+            )
+            guard validation.isValid else {
+                print("⚠️ PARSER ROBUSTNESS: Rejecting file \(path): \(validation.reason ?? "Invalid")")
+                return
+            }
+            
             // Update existing or create new
+            // PARSER ROBUSTNESS: Prefer complete blocks over streaming blocks
             if let existingIndex = newFiles.firstIndex(where: { $0.id == fileId }) {
-                newFiles[existingIndex] = StreamingFileInfo(
-                    id: fileId,
-                    path: path,
-                    name: URL(fileURLWithPath: path).lastPathComponent,
-                    language: language,
-                    content: code,
-                    isStreaming: isStreaming || isLoading,
-                    changeSummary: summary,
-                    addedLines: added,
-                    removedLines: removed
-                )
+                let existing = newFiles[existingIndex]
+                // Only update if new block is complete or existing is also streaming
+                if !isStreaming || existing.isStreaming {
+                    newFiles[existingIndex] = fileInfo
+                }
             } else {
-                newFiles.append(StreamingFileInfo(
-                    id: fileId,
-                    path: path,
-                    name: URL(fileURLWithPath: path).lastPathComponent,
-                    language: language,
-                    content: code,
-                    isStreaming: isStreaming || isLoading,
-                    changeSummary: summary,
-                    addedLines: added,
-                    removedLines: removed
-                ))
+                newFiles.append(fileInfo)
             }
         }
     }

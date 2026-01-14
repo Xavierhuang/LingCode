@@ -614,11 +614,10 @@ class AIStepParser {
         npm start
         ```
 
-        CRITICAL FILE OUTPUT RULE:
-        **ALWAYS output the COMPLETE file content, never just snippets.**
+        FILE OUTPUT RULES:
         
-        PREFERRED OUTPUT FORMAT (for edits):
-        For code modifications, you can use structured JSON edit format:
+        **For SIMPLE changes** (text replacements, small edits, single function changes):
+        - PREFER using JSON edit format for targeted changes:
         ```json
         {
           "edits": [
@@ -637,22 +636,31 @@ class AIStepParser {
           ]
         }
         ```
+        - This allows minimal, targeted edits without rewriting entire files
+        - Operations: "insert", "replace", "delete"
         
-        Operations: "insert", "replace", "delete"
-        If using JSON format, ensure all edits are valid and within file bounds.
-
-        WHY: The system replaces entire files. Partial snippets will delete the rest of the file!
-
-        When modifying existing files:
-        1. Include ALL original code from the file
-        2. Make your specific changes within the complete file
-        3. Mark changes with comments like "// CHANGED:" or "// ADDED:" for clarity
-        4. The highlighting system will automatically show users what changed
-
-        You can be concise in your EXPLANATION, but code blocks must be complete:
-        - ✅ In explanation: "I modified the calculateTotal function on line 15"
-        - ✅ In code block: [complete file with all original code + your change]
-        - ❌ NEVER: Just the changed function without the rest of the file
+        **For COMPLEX changes** (multiple functions, architectural changes, new features):
+        - Output the COMPLETE file content with all changes
+        - Include ALL original code from the file
+        - Make your specific changes within the complete file
+        - Format: `path/to/file.ext`:\n```language\n[complete file]\n```
+        
+        **DETECTING SIMPLE vs COMPLEX:**
+        - Simple: "change X to Y", "rename variable", "fix typo", "update one function"
+        - Complex: "refactor entire module", "add new feature", "restructure code"
+        
+        **TEXT REPLACEMENT RULES:**
+        - When user asks to "change X to Y" or "replace X with Y":
+          1. Search ALL files for the text "X"
+          2. **PRIORITIZE HTML files** - text content usually appears in HTML, not JavaScript
+          3. Modify ALL files that contain "X", but HTML files should be modified first
+          4. Only modify JavaScript/CSS if the text appears there as well
+          5. Use JSON edit format for targeted replacements in each file
+        
+        **WHEN IN DOUBT:**
+        - For simple text replacements or small edits → Use JSON edit format
+        - For larger changes → Output complete file
+        - The system will apply changes safely either way
 
         Example for ANY change (small or large):
         `path/to/file.ext`:

@@ -13,22 +13,87 @@ struct CompletionSummaryView: View {
     let lastUserRequest: String
     let lastMessage: String?
     let currentActions: [AIAction]?
+    let executionOutcome: ExecutionOutcome?
+    let expansionResult: WorkspaceEditExpansion.ExpansionResult?
+    
+    // Deterministic summary built from parsed results
+    // WHY DERIVED, NOT GENERATED: Summary is built from observable diffs/actions only
+    // No additional AI call - we already have structured data
+    private var summary: CompletionSummary? {
+        CompletionSummaryBuilder.shared.buildSummary(
+            parsedFiles: parsedFiles,
+            parsedCommands: parsedCommands,
+            currentActions: currentActions,
+            executionOutcome: executionOutcome,
+            expansionResult: expansionResult
+        )
+    }
     
     init(
         parsedFiles: [StreamingFileInfo],
         parsedCommands: [ParsedCommand],
         lastUserRequest: String,
         lastMessage: String?,
-        currentActions: [AIAction]? = nil
+        currentActions: [AIAction]? = nil,
+        executionOutcome: ExecutionOutcome? = nil,
+        expansionResult: WorkspaceEditExpansion.ExpansionResult? = nil
     ) {
         self.parsedFiles = parsedFiles
         self.parsedCommands = parsedCommands
         self.lastUserRequest = lastUserRequest
         self.lastMessage = lastMessage
         self.currentActions = currentActions
+        self.executionOutcome = executionOutcome
+        self.expansionResult = expansionResult
     }
     
     var body: some View {
+        // COMPLETION GATE: Only show "Response Complete" if all conditions are met
+        // CORE INVARIANT: IDE must NEVER show "Response Complete" unless:
+        // 1. HTTP 2xx response
+        // 2. Non-empty response body
+        // 3. At least one parsed edit/proposal/command
+        // 4. At least one change applied OR explicitly proposed
+        
+        let hasValidCompletion = hasValidCompletionState()
+        
+        if !hasValidCompletion {
+            // Don't show completion view if conditions aren't met
+            return AnyView(EmptyView())
+        }
+        
+        return AnyView(completionContentView)
+    }
+    
+    /// Check if response meets all completion requirements
+    /// 
+    /// COMPLETION GATE: "Response Complete" may ONLY appear if ALL are true:
+    /// 1. HTTP response was successful (checked by caller via AIResponseState)
+    /// 2. AI response is non-empty (checked by caller)
+    /// 3. At least one file was parsed successfully OR at least one command
+    /// 4. At least one edit is proposed or applied
+    /// 
+    /// PARSE FAILURE HANDLING: If parsing yields zero files or zero edits,
+    /// do NOT show "Response Complete" - show error state instead
+    private func hasValidCompletionState() -> Bool {
+        // Condition 3: At least one parsed edit/proposal/command
+        let hasParsedOutput = !parsedFiles.isEmpty || !parsedCommands.isEmpty || (currentActions?.isEmpty == false)
+        
+        // Condition 4: At least one change applied OR explicitly proposed
+        // (parsedFiles with content changes count as proposals)
+        let hasProposedChanges = !parsedFiles.isEmpty || !parsedCommands.isEmpty
+        
+        // PARSE FAILURE CHECK: If no parsed output, this is a parse failure
+        // Do NOT show "Response Complete" for parse failures
+        guard hasParsedOutput && hasProposedChanges else {
+            return false
+        }
+        
+        // All conditions must be met
+        return true
+    }
+    
+    private var completionContentView: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Success header
             HStack(spacing: 8) {
@@ -44,8 +109,38 @@ struct CompletionSummaryView: View {
             
             Divider()
             
-            // Generated comprehensive summary
-            if let summaryText = generateComprehensiveSummary() {
+            // Deterministic summary (derived from parsed results, not AI-generated)
+            if let summary = summary {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Summary:")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    // Title
+                    Text(summary.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.primary)
+                    
+                    // Bullet points
+                    if !summary.bulletPoints.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { _, point in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("•")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                    Text(point)
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(.bottom, 6)
+            } else if let summaryText = generateComprehensiveSummary() {
+                // Fallback to old summary generation (for backward compatibility)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Summary:")
                         .font(.system(size: 12, weight: .semibold))
@@ -78,6 +173,9 @@ struct CompletionSummaryView: View {
                 detailedFileSummaryView
             } else if !parsedCommands.isEmpty {
                 commandSummaryView
+            } else if let lastMessage = lastMessage, !lastMessage.isEmpty {
+                // Show message preview if no files or commands but we have a response
+                messagePreviewView
             }
             
             // Action summary if available
@@ -98,10 +196,10 @@ struct CompletionSummaryView: View {
     
     private var detailedFileSummaryView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // File count and stats
+            // File count and stats (use summary stats if available, otherwise compute)
             HStack(spacing: 12) {
-                let totalAdded = parsedFiles.reduce(0) { $0 + $1.addedLines }
-                let totalRemoved = parsedFiles.reduce(0) { $0 + $1.removedLines }
+                let totalAdded = summary?.fileStats?.totalAddedLines ?? parsedFiles.reduce(0) { $0 + $1.addedLines }
+                let totalRemoved = summary?.fileStats?.totalRemovedLines ?? parsedFiles.reduce(0) { $0 + $1.removedLines }
                 
                 if totalAdded > 0 {
                     HStack(spacing: 4) {
@@ -313,6 +411,34 @@ struct CompletionSummaryView: View {
     
     private func generateSummaryText() -> String? {
         return generateComprehensiveSummary()
+    }
+    
+    private var messagePreviewView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let lastMessage = lastMessage, !lastMessage.isEmpty {
+                Text("Response:")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                // Show first few lines of response
+                let lines = lastMessage.components(separatedBy: .newlines)
+                let previewLines = Array(lines.prefix(5))
+                let preview = previewLines.joined(separator: "\n")
+                
+                Text(preview)
+                    .font(.system(size: 12))
+                    .foregroundColor(.primary)
+                    .lineLimit(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                
+                if lines.count > 5 {
+                    Text("+ \(lines.count - 5) more line\(lines.count - 5 == 1 ? "" : "s")")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(.top, 2)
+                }
+            }
+        }
     }
 }
 

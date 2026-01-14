@@ -490,15 +490,16 @@ struct CursorStreamingFileCard: View {
     }
     
     private var codeLinesView: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            let lines = file.content.components(separatedBy: .newlines)
-            let lineTypes = calculateLineTypes()
-            
-            ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+        let unifiedDiff = calculateUnifiedDiff()
+        
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(unifiedDiff.enumerated()), id: \.offset) { index, diffLine in
                 codeLineView(
                     index: index,
-                    line: line,
-                    type: index < lineTypes.count ? lineTypes[index] : .added
+                    line: diffLine.content,
+                    type: diffLine.type,
+                    originalLineNumber: diffLine.originalLineNumber,
+                    newLineNumber: diffLine.newLineNumber
                 )
                 .transition(.asymmetric(
                     insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.98)),
@@ -506,6 +507,7 @@ struct CursorStreamingFileCard: View {
                 ))
             }
             if file.isStreaming {
+                let lines = file.content.components(separatedBy: .newlines)
                 streamingCursorView(lineCount: lines.count)
                     .transition(.opacity)
             }
@@ -513,10 +515,20 @@ struct CursorStreamingFileCard: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.85), value: file.content)
     }
     
-    private func calculateLineTypes() -> [DiffLineType] {
+    struct UnifiedDiffLine {
+        let content: String
+        let type: DiffLineType
+        let originalLineNumber: Int?
+        let newLineNumber: Int?
+    }
+    
+    /// Calculate unified diff showing both removed and added lines
+    private func calculateUnifiedDiff() -> [UnifiedDiffLine] {
         guard let projectURL = projectURL else {
             // New file - all lines are additions
-            return file.content.components(separatedBy: .newlines).map { _ in .added }
+            return file.content.components(separatedBy: .newlines).enumerated().map { index, line in
+                UnifiedDiffLine(content: line, type: .added, originalLineNumber: nil, newLineNumber: index + 1)
+            }
         }
         
         let fileURL = projectURL.appendingPathComponent(file.path)
@@ -524,49 +536,126 @@ struct CursorStreamingFileCard: View {
         // If file doesn't exist, all lines are new (green)
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let existingContent = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return file.content.components(separatedBy: .newlines).map { _ in .added }
-        }
-        
-        // Compare existing vs new content
-        let existingLines = existingContent.components(separatedBy: .newlines)
-        let newLines = file.content.components(separatedBy: .newlines)
-        
-        var lineTypes: [DiffLineType] = []
-        
-        // Simple line-by-line comparison
-        let maxLines = max(existingLines.count, newLines.count)
-        for i in 0..<maxLines {
-            let existingLine = i < existingLines.count ? existingLines[i] : nil
-            let newLine = i < newLines.count ? newLines[i] : nil
-            
-            if let existing = existingLine, let new = newLine {
-                if existing == new {
-                    lineTypes.append(.unchanged)
-                } else {
-                    // Line was modified - show as added (green)
-                    lineTypes.append(.added)
-                }
-            } else if newLine != nil {
-                // New line added
-                lineTypes.append(.added)
-            } else if existingLine != nil {
-                // Line removed - but we're showing new content, so skip
-                // (removed lines won't appear in new content)
+            return file.content.components(separatedBy: .newlines).enumerated().map { index, line in
+                UnifiedDiffLine(content: line, type: .added, originalLineNumber: nil, newLineNumber: index + 1)
             }
         }
         
-        // If we have more new lines than we processed, they're all additions
-        while lineTypes.count < newLines.count {
-            lineTypes.append(.added)
+        // Compare existing vs new content using a simple diff algorithm
+        let existingLines = existingContent.components(separatedBy: .newlines)
+        let newLines = file.content.components(separatedBy: .newlines)
+        
+        var unifiedDiff: [UnifiedDiffLine] = []
+        var oldIndex = 0
+        var newIndex = 0
+        
+        // Simple longest common subsequence (LCS) based diff
+        while oldIndex < existingLines.count || newIndex < newLines.count {
+            let oldLine = oldIndex < existingLines.count ? existingLines[oldIndex] : nil
+            let newLine = newIndex < newLines.count ? newLines[newIndex] : nil
+            
+            if let old = oldLine, let new = newLine {
+                if old == new {
+                    // Lines match - unchanged
+                    unifiedDiff.append(UnifiedDiffLine(
+                        content: new,
+                        type: .unchanged,
+                        originalLineNumber: oldIndex + 1,
+                        newLineNumber: newIndex + 1
+                    ))
+                    oldIndex += 1
+                    newIndex += 1
+                } else {
+                    // Lines differ - check if it's a modification or insertion/deletion
+                    // Look ahead to see if next old line matches current new line
+                    if oldIndex + 1 < existingLines.count && existingLines[oldIndex + 1] == new {
+                        // Old line was removed
+                        unifiedDiff.append(UnifiedDiffLine(
+                            content: old,
+                            type: .removed,
+                            originalLineNumber: oldIndex + 1,
+                            newLineNumber: nil
+                        ))
+                        oldIndex += 1
+                    } else if newIndex + 1 < newLines.count && old == newLines[newIndex + 1] {
+                        // New line was added
+                        unifiedDiff.append(UnifiedDiffLine(
+                            content: new,
+                            type: .added,
+                            originalLineNumber: nil,
+                            newLineNumber: newIndex + 1
+                        ))
+                        newIndex += 1
+                    } else {
+                        // Both changed - show removed then added
+                        unifiedDiff.append(UnifiedDiffLine(
+                            content: old,
+                            type: .removed,
+                            originalLineNumber: oldIndex + 1,
+                            newLineNumber: nil
+                        ))
+                        unifiedDiff.append(UnifiedDiffLine(
+                            content: new,
+                            type: .added,
+                            originalLineNumber: nil,
+                            newLineNumber: newIndex + 1
+                        ))
+                        oldIndex += 1
+                        newIndex += 1
+                    }
+                }
+            } else if let old = oldLine {
+                // Line removed
+                unifiedDiff.append(UnifiedDiffLine(
+                    content: old,
+                    type: .removed,
+                    originalLineNumber: oldIndex + 1,
+                    newLineNumber: nil
+                ))
+                oldIndex += 1
+            } else if let new = newLine {
+                // Line added
+                unifiedDiff.append(UnifiedDiffLine(
+                    content: new,
+                    type: .added,
+                    originalLineNumber: nil,
+                    newLineNumber: newIndex + 1
+                ))
+                newIndex += 1
+            }
         }
         
-        return lineTypes
+        return unifiedDiff
     }
     
-    private func codeLineView(index: Int, line: String, type: DiffLineType) -> some View {
+    private func calculateLineTypes() -> [DiffLineType] {
+        // Legacy method - kept for compatibility
+        return calculateUnifiedDiff().map { $0.type }
+    }
+    
+    private func getLineNumberText(type: DiffLineType, index: Int, originalLineNumber: Int?, newLineNumber: Int?) -> String {
+        if type == .removed, let orig = originalLineNumber {
+            return "\(orig)"
+        } else if type == .added, let new = newLineNumber {
+            return "\(new)"
+        } else if type == .unchanged, let orig = originalLineNumber {
+            return "\(orig)"
+        } else {
+            return "\(index + 1)"
+        }
+    }
+    
+    private func codeLineView(index: Int, line: String, type: DiffLineType, originalLineNumber: Int? = nil, newLineNumber: Int? = nil) -> some View {
         HStack(alignment: .top, spacing: 0) {
-            // Line number
-            Text("\(index + 1)")
+            // Line number - show original for removed, new for added, both for unchanged
+            let lineNumberText = getLineNumberText(
+                type: type,
+                index: index,
+                originalLineNumber: originalLineNumber,
+                newLineNumber: newLineNumber
+            )
+            
+            Text(lineNumberText)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.secondary)
                 .frame(width: 40, alignment: .trailing)

@@ -186,6 +186,7 @@ class AIService {
         context: String? = nil,
         images: [AttachedImage] = [],
         maxTokens: Int? = nil,
+        systemPrompt: String? = nil,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -213,9 +214,9 @@ class AIService {
         
         switch provider {
         case .openAI:
-            streamOpenAIMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, onChunk: onChunk, onComplete: onComplete, onError: onError)
+            streamOpenAIMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, systemPrompt: systemPrompt, onChunk: onChunk, onComplete: onComplete, onError: onError)
         case .anthropic:
-            streamAnthropicMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, onChunk: onChunk, onComplete: onComplete, onError: onError)
+            streamAnthropicMessage(message, context: context, images: images, apiKey: apiKey, maxTokens: tokens, systemPrompt: systemPrompt, onChunk: onChunk, onComplete: onComplete, onError: onError)
         }
     }
     
@@ -324,6 +325,7 @@ class AIService {
         images: [AttachedImage],
         apiKey: String,
         maxTokens: Int,
+        systemPrompt: String? = nil,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -359,11 +361,16 @@ class AIService {
             ])
         }
         
+        // Build messages array (system prompt first if provided, then user message)
+        var messages: [[String: Any]] = []
+        if let systemPrompt = systemPrompt {
+            messages.append(["role": "system", "content": systemPrompt])
+        }
+        messages.append(["role": "user", "content": messageContent])
+        
         let body: [String: Any] = [
             "model": "gpt-4o",
-            "messages": [
-                ["role": "user", "content": messageContent]
-            ],
+            "messages": messages,
             "temperature": 0.7,
             "max_tokens": maxTokens,
             "stream": true
@@ -584,6 +591,7 @@ class AIService {
         images: [AttachedImage],
         apiKey: String,
         maxTokens: Int,
+        systemPrompt: String? = nil,
         onChunk: @escaping (String) -> Void,
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
@@ -622,7 +630,7 @@ class AIService {
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("LingCode/1.0", forHTTPHeaderField: "User-Agent")
         
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": anthropicModel.rawValue,
             "max_tokens": maxTokens,
             "stream": true,
@@ -630,6 +638,11 @@ class AIService {
                 ["role": "user", "content": content]
             ]
         ]
+        
+        // Add system prompt if provided (Anthropic API supports system field)
+        if let systemPrompt = systemPrompt {
+            body["system"] = systemPrompt
+        }
         
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -651,6 +664,15 @@ class AIService {
             let onError: (Error) -> Void
             weak var service: AIService?
             var buffer = Data()
+            var receivedData = Data()
+            var httpStatusCode: Int?
+            var hasReceivedChunks = false
+            var firstChunkTime: Date?
+            var lastChunkTime: Date?
+            var timeoutTimer: Timer?
+            
+            // Timeout detection: If no chunks arrive within 30 seconds of HTTP 200, treat as failure
+            let chunkTimeout: TimeInterval = 30.0
             
             init(service: AIService, onChunk: @escaping (String) -> Void, onComplete: @escaping () -> Void, onError: @escaping (Error) -> Void) {
                 self.service = service
@@ -659,12 +681,83 @@ class AIService {
                 self.onError = onError
             }
             
+            // MARK: - HTTP Response Handling (Network Failure Detection)
+            
+            func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+                // NETWORK FAILURE HANDLING: Treat non-2xx responses as HARD FAILURES
+                if let httpResponse = response as? HTTPURLResponse {
+                    httpStatusCode = httpResponse.statusCode
+                    print("🔗 HTTP Status Code: \(httpResponse.statusCode)")
+                    
+                    // Check if status code is NOT 2xx (200-299)
+                    if httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 {
+                        // HARD FAILURE: Do not proceed to parsing or apply phases
+                        let errorMessage: String
+                        if httpResponse.statusCode == 429 {
+                            errorMessage = "AI service temporarily unavailable. Rate limit exceeded. Please retry."
+                        } else if httpResponse.statusCode == 529 || httpResponse.statusCode == 503 {
+                            errorMessage = "AI service temporarily unavailable. Service overloaded. Please retry."
+                        } else {
+                            errorMessage = "AI service temporarily unavailable. HTTP \(httpResponse.statusCode). Please retry."
+                        }
+                        
+                        // Log telemetry
+                        print("❌ NETWORK FAILURE: HTTP \(httpResponse.statusCode) - \(errorMessage)")
+                        
+                        DispatchQueue.main.async {
+                            self.onError(NSError(
+                                domain: "AIService",
+                                code: httpResponse.statusCode,
+                                userInfo: [NSLocalizedDescriptionKey: errorMessage]
+                            ))
+                        }
+                        
+                        // Cancel the task - do not proceed
+                        completionHandler(.cancel)
+                        return
+                    }
+                    
+                    // For 2xx responses, start timeout timer to detect "silent failures"
+                    // If no chunks arrive within timeout period, treat as empty response
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        DispatchQueue.main.async {
+                            self.timeoutTimer = Timer.scheduledTimer(withTimeInterval: self.chunkTimeout, repeats: false) { [weak self] _ in
+                                guard let self = self else { return }
+                                if !self.hasReceivedChunks {
+                                    // TIMEOUT: HTTP 200 but no chunks received
+                                    print("❌ SILENT FAILURE DETECTED: HTTP 200 but no content chunks received within \(self.chunkTimeout)s")
+                                    print("   HTTP Status: \(self.httpStatusCode ?? 0)")
+                                    print("   Response data length: \(self.receivedData.count)")
+                                    print("   Possible causes: Server sent success but failed to generate text, or parsing failed")
+                                    
+                                    self.onError(NSError(
+                                        domain: "AIService",
+                                        code: 204, // No Content
+                                        userInfo: [
+                                            NSLocalizedDescriptionKey: "Connection successful (HTTP 200) but no content was received. This may be a transient server issue. Please retry.",
+                                            "failure_type": "silent_failure",
+                                            "http_status": self.httpStatusCode ?? 0,
+                                            "received_bytes": self.receivedData.count
+                                        ]
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Continue with normal processing for 2xx responses
+                completionHandler(.allow)
+            }
+            
             func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
                 if service?.isCancelled == true {
                     dataTask.cancel()
                     return
                 }
                 
+                // Track received data for empty response detection
+                receivedData.append(data)
                 buffer.append(data)
                 
                 // Parse Server-Sent Events (SSE) format
@@ -700,7 +793,21 @@ class AIService {
                         if let type = json["type"] as? String {
                             if type == "content_block_delta" {
                                 if let delta = json["delta"] as? [String: Any],
-                                   let text = delta["text"] as? String {
+                                   let text = delta["text"] as? String,
+                                   !text.isEmpty {
+                                    // Track chunk timing for timeout detection
+                                    let now = Date()
+                                    if firstChunkTime == nil {
+                                        firstChunkTime = now
+                                        // Cancel timeout timer once we receive first chunk
+                                        DispatchQueue.main.async {
+                                            self.timeoutTimer?.invalidate()
+                                            self.timeoutTimer = nil
+                                        }
+                                    }
+                                    lastChunkTime = now
+                                    
+                                    hasReceivedChunks = true
                                     DispatchQueue.main.async {
                                         self.onChunk(text)
                                     }
@@ -744,6 +851,7 @@ class AIService {
                                type == "content_block_delta",
                                let delta = json["delta"] as? [String: Any],
                                let text = delta["text"] as? String {
+                                hasReceivedChunks = true
                                 DispatchQueue.main.async {
                                     self.onChunk(text)
                                 }
@@ -759,6 +867,75 @@ class AIService {
                         }
                     }
                 } else {
+                    // Cancel timeout timer if still running
+                    DispatchQueue.main.async {
+                        self.timeoutTimer?.invalidate()
+                        self.timeoutTimer = nil
+                    }
+                    
+                    // EMPTY RESPONSE GUARD: Enhanced detection for "silent failures"
+                    // Case 1: HTTP 200 but no chunks received (server sent success but no content)
+                    // Case 2: HTTP 200 with data but no parseable text chunks (malformed SSE)
+                    // Case 3: HTTP 200 with empty response body
+                    if !hasReceivedChunks {
+                        let responseString = String(data: receivedData, encoding: .utf8) ?? ""
+                        let trimmedResponse = responseString.trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        // Determine failure type for better error messages
+                        var failureType = "empty_response"
+                        var errorMessage = "AI service returned an empty response. Please retry."
+                        
+                        if receivedData.count > 0 && trimmedResponse.isEmpty {
+                            // Non-empty data but can't be decoded as UTF-8
+                            failureType = "encoding_error"
+                            errorMessage = "Received response data but couldn't decode it. This may indicate a server encoding issue. Please retry."
+                        } else if receivedData.count > 0 && !trimmedResponse.isEmpty {
+                            // Data received but no parseable chunks (malformed SSE)
+                            failureType = "parse_error"
+                            errorMessage = "Received response but couldn't parse content chunks. The server may have sent malformed data. Please retry."
+                            
+                            // Log raw response for debugging (first 500 chars)
+                            let preview = String(trimmedResponse.prefix(500))
+                            print("   Raw response preview: \(preview)")
+                        } else if receivedData.count == 0 {
+                            // Truly empty response
+                            failureType = "empty_response"
+                            errorMessage = "Connection successful (HTTP 200) but no data was received. This may be a transient server issue. Please retry."
+                        }
+                        
+                        // EMPTY RESPONSE: Abort pipeline immediately
+                        print("❌ EMPTY RESPONSE DETECTED:")
+                        print("   Failure type: \(failureType)")
+                        print("   HTTP Status: \(httpStatusCode ?? 0)")
+                        print("   Response data length: \(receivedData.count)")
+                        print("   Has received chunks: \(hasReceivedChunks)")
+                        if let firstChunk = firstChunkTime {
+                            print("   First chunk time: \(firstChunk)")
+                        }
+                        if let lastChunk = lastChunkTime {
+                            print("   Last chunk time: \(lastChunk)")
+                        }
+                        print("   Possible causes:")
+                        print("   1. Server sent success signal but failed to generate text")
+                        print("   2. IDE's parser failed to read incoming stream")
+                        print("   3. ViewBridge/UI crash interrupted response rendering")
+                        print("   4. Context length/timeout - request too large or took too long")
+                        
+                        DispatchQueue.main.async {
+                            self.onError(NSError(
+                                domain: "AIService",
+                                code: 204, // No Content
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: errorMessage,
+                                    "failure_type": failureType,
+                                    "http_status": self.httpStatusCode ?? 0,
+                                    "received_bytes": self.receivedData.count
+                                ]
+                            ))
+                        }
+                        return
+                    }
+                    
                     // Ensure onComplete is called even if we didn't see [DONE]
                     DispatchQueue.main.async {
                         self.onComplete()

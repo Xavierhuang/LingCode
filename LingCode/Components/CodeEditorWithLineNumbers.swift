@@ -278,7 +278,8 @@ struct CodeEditorWithLineNumbers: NSViewRepresentable {
     
     private func applySyntaxHighlighting(to textView: NSTextView, language: String?) {
         let text = textView.string
-        let highlighted = SyntaxHighlighter.highlight(text, language: language)
+        let theme = ThemeService.shared.currentTheme
+        let highlighted = SyntaxHighlighter.highlight(text, language: language, theme: theme)
 
         let selectedRange = textView.selectedRange()
 
@@ -480,7 +481,8 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
     
     private func applySyntaxHighlighting(to textView: NSTextView, language: String?) {
         guard let language = language else { return }
-        let highlighted = SyntaxHighlighter.highlight(textView.string, language: language)
+        let theme = ThemeService.shared.currentTheme
+        let highlighted = SyntaxHighlighter.highlight(textView.string, language: language, theme: theme)
 
         let mutableHighlighted = NSMutableAttributedString(attributedString: highlighted)
 

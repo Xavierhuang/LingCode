@@ -39,10 +39,88 @@ class FileActionHandler {
         let originalContent = fileExists ? try? String(contentsOf: fileURL, encoding: .utf8) : nil
         
         if fileExists {
-            // File exists - overwrite and open with change highlighting
+            // File exists - apply safety checks before overwriting
             print("📂 Updating existing file: \(fileURL.path)")
+            
+            // Enhanced safety checks: Don't overwrite if content is invalid
+            let trimmedContent = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedContent.isEmpty else {
+                print("⚠️ Warning: Skipping open - file content is empty for \(file.path)")
+                // Just open the existing file without overwriting
+                Task { @MainActor in
+                    editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                }
+                return
+            }
+            
+            // Additional check: If file exists and new content is shorter than original, BLOCK the overwrite
+            if let original = originalContent, !original.isEmpty {
+                let originalLines = original.components(separatedBy: .newlines).count
+                let newLines = file.content.components(separatedBy: .newlines).count
+                let originalTrimmed = original.trimmingCharacters(in: .whitespacesAndNewlines)
+                let newTrimmed = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // STRICT: If new content is significantly smaller, BLOCK
+                // Check both line count and character count
+                let lineRatio = Double(newLines) / Double(originalLines)
+                let charRatio = Double(newTrimmed.count) / Double(originalTrimmed.count)
+                
+                // Block if new content is less than 60% of original (more conservative)
+                if (lineRatio < 0.6 || charRatio < 0.6) && originalLines > 5 {
+                    print("❌ BLOCKED: New content for \(file.path) is too small compared to original!")
+                    print("   Original: \(originalLines) lines, \(originalTrimmed.count) characters")
+                    print("   New: \(newLines) lines, \(newTrimmed.count) characters")
+                    print("   Line ratio: \(String(format: "%.1f", lineRatio * 100))%, Char ratio: \(String(format: "%.1f", charRatio * 100))%")
+                    print("   Skipping overwrite to protect your existing code.")
+                    // Just open the existing file without overwriting
+                    Task { @MainActor in
+                        editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                    }
+                    return
+                }
+                
+                // Also block if new content is suspiciously small (less than 100 chars for files that were > 500 chars)
+                if newTrimmed.count < 100 && originalTrimmed.count > 500 {
+                    print("❌ BLOCKED: New content for \(file.path) is suspiciously small!")
+                    print("   Original: \(originalTrimmed.count) characters")
+                    print("   New: \(newTrimmed.count) characters")
+                    print("   Skipping overwrite to protect your existing code.")
+                    // Just open the existing file without overwriting
+                    Task { @MainActor in
+                        editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                    }
+                    return
+                }
+            }
+            
+            // Don't overwrite if file is still streaming
+            if file.isStreaming {
+                print("⚠️ Warning: Skipping overwrite - file \(file.path) is still streaming")
+                // Just open the existing file without overwriting
+                Task { @MainActor in
+                    editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                }
+                return
+            }
+            
             do {
                 try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
+                
+                // Verify the write was successful by reading back
+                if let writtenContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                    if writtenContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        print("❌ Error: File was written but is now empty! Restoring original content.")
+                        // Restore original content if available
+                        if let original = originalContent, !original.isEmpty {
+                            try? original.write(to: fileURL, atomically: true, encoding: .utf8)
+                            // Open the restored file
+                            Task { @MainActor in
+                                editorViewModel.openFile(at: fileURL, originalContent: originalContent)
+                            }
+                            return
+                        }
+                    }
+                }
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
                     // Small delay to ensure file write is complete

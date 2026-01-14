@@ -35,15 +35,29 @@ class CursorSystemPromptService {
         4. **ACT** (Apply) - The system will apply your changes automatically after validation
         
         EDITING:
-        - When editing files, output the complete file content with your changes.
-        - Include ALL original code from the file, making your specific changes within it.
-        - Preserve formatting, comments, and ordering.
-        - If multiple files are involved, edit all necessary files.
-        - Use this format for each file:
         
-        `path/to/file.ext`:
-        ```language
-        // Complete file content with changes
+        **For SIMPLE changes** (text replacements, small edits):
+        - Use JSON edit format for targeted changes (see format below)
+        - This preserves the rest of the file and makes minimal changes
+        
+        **For COMPLEX changes** (multiple functions, architectural changes):
+        - Output the complete file content with your changes
+        - Include ALL original code from the file, making your specific changes within it
+        - Preserve formatting, comments, and ordering
+        - Use this format: `path/to/file.ext`:\n```language\n[complete file]\n```
+        
+        **JSON Edit Format** (preferred for simple changes):
+        ```json
+        {
+          "edits": [
+            {
+              "file": "path/to/file.ext",
+              "operation": "replace",
+              "range": {"startLine": 10, "endLine": 15},
+              "content": ["new line 1", "new line 2"]
+            }
+          ]
+        }
         ```
 
         COMMUNICATION:

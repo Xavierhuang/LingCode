@@ -19,7 +19,10 @@ class LocalOnlyService: ObservableObject {
     
     private init() {
         loadSettings()
-        detectLocalModels()
+        // Only detect models if local mode is enabled (to avoid connection errors)
+        if isLocalModeEnabled {
+            detectLocalModels()
+        }
     }
     
     /// Check if local model is available
@@ -47,9 +50,12 @@ class LocalOnlyService: ObservableObject {
         detectOllamaModels()
     }
     
-    /// Detect Ollama models
+    /// Detect Ollama models (silently fails if Ollama isn't running)
     private func detectOllamaModels() {
         let ollamaURL = URL(string: "http://localhost:11434/api/tags")!
+        
+        // Capture local mode state to avoid closure capture issues
+        let shouldLogErrors = isLocalModeEnabled
         
         // Use a semaphore to make this synchronous
         let semaphore = DispatchSemaphore(value: 0)
@@ -58,10 +64,25 @@ class LocalOnlyService: ObservableObject {
         let task = URLSession.shared.dataTask(with: ollamaURL) { data, response, error in
             defer { semaphore.signal() }
             
+            // Silently handle connection errors (Ollama not running is expected)
+            if let error = error {
+                // Only log if local mode is enabled (user expects it to work)
+                if shouldLogErrors {
+                    let nsError = error as NSError
+                    if nsError.code != NSURLErrorCannotConnectToHost && nsError.code != -1021 {
+                        print("⚠️ Ollama detection error: \(error.localizedDescription)")
+                    }
+                }
+                return
+            }
+            
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let models = json["models"] as? [[String: Any]] else {
-                print("⚠️ Ollama not detected or not running")
+                // Only log if local mode is enabled
+                if shouldLogErrors {
+                    print("⚠️ Ollama not detected or not running")
+                }
                 return
             }
             
@@ -79,13 +100,17 @@ class LocalOnlyService: ObservableObject {
         
         task.resume()
         
-        // Wait up to 2 seconds for response
-        if semaphore.wait(timeout: .now() + 2) == .timedOut {
-            print("⚠️ Ollama detection timed out")
+        // Wait up to 1 second for response (shorter timeout to avoid delays)
+        if semaphore.wait(timeout: .now() + 1) == .timedOut {
+            // Silently timeout - Ollama probably not running
         } else {
-            availableLocalModels = detectedModels
-            if !detectedModels.isEmpty {
-                print("✅ Detected \(detectedModels.count) Ollama model(s): \(detectedModels.map { $0.name }.joined(separator: ", "))")
+            // Update on main thread to avoid publishing warnings
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.availableLocalModels = detectedModels
+                if !detectedModels.isEmpty {
+                    print("✅ Detected \(detectedModels.count) Ollama model(s): \(detectedModels.map { $0.name }.joined(separator: ", "))")
+                }
             }
         }
     }
