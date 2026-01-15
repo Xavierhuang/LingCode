@@ -2,7 +2,10 @@
 
 A powerful, AI-powered code editor for macOS that rivals and exceeds Cursor's capabilities. Built with SwiftUI and designed for modern software development.
 
+
+
 ## Features
+![PHOTO-2026-01-14-19-29-34](https://github.com/user-attachments/assets/c6bffc2c-652f-43f6-8b0c-341cb7fbcfba)
 
 ### 🤖 AI-Powered Development
 - **Multiple AI Providers**: Support for OpenAI (GPT-4) and Anthropic (Claude Sonnet, Haiku, Opus)
