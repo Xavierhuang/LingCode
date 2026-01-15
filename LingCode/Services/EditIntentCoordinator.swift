@@ -67,12 +67,90 @@ final class EditIntentCoordinator: ObservableObject {
         actions: [AIAction],
         httpStatus: Int? = nil
     ) async -> EditResult {
+        // DEBUG: Dump raw AI response before validation/parsing so we can diagnose "No edits produced"
+        AIResponseDebugLogger.dump(
+            label: "EditIntentCoordinator.raw",
+            text: content
+        )
+
+        // Step 0: Classify intent (PRE-AI)
+        // If this is a simple replace/rename, prefer deterministic workspace expansion over model output.
+        let intent = IntentClassifier.shared.classify(userPrompt)
+        let intentCategory = intent.editIntentCategory
+
+        if let workspaceURL = projectURL {
+            let expansion = WorkspaceEditExpansion.shared.expandEditScope(prompt: userPrompt, workspaceURL: workspaceURL)
+            if expansion.wasExpanded, !expansion.deterministicEdits.isEmpty {
+                let deterministicFiles = WorkspaceEditExpansion.shared.convertToStreamingFileInfo(
+                    edits: expansion.deterministicEdits,
+                    workspaceURL: workspaceURL
+                )
+
+                // Validate scope (same safety rules as AI-generated edits)
+                let executionIntent = EditSafetyCoordinator.shared.classifyExecutionIntent(userPrompt)
+                var validatedFiles: [StreamingFileInfo] = []
+                var validationErrors: [String] = []
+
+                for file in deterministicFiles {
+                    let fileURL = workspaceURL.appendingPathComponent(file.path)
+                    let originalContent = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+
+                    let scopeValidation = EditSafetyCoordinator.shared.validateEditScope(
+                        originalContent: originalContent,
+                        newContent: file.content,
+                        intent: executionIntent
+                    )
+
+                    if scopeValidation.isValid {
+                        validatedFiles.append(file)
+                    } else if let error = scopeValidation.errorMessage {
+                        validationErrors.append("\(file.path): \(error)")
+                    }
+                }
+
+                if !validationErrors.isEmpty {
+                    let result = EditResult(
+                        files: [],
+                        commands: [],
+                        isValid: false,
+                        errorMessage: validationErrors.joined(separator: "\n"),
+                        intentCategory: intentCategory
+                    )
+                    await MainActor.run {
+                        self.currentResult = result
+                    }
+                    return result
+                }
+
+                let result = EditResult(
+                    files: validatedFiles,
+                    commands: [],
+                    isValid: true,
+                    errorMessage: nil,
+                    intentCategory: intentCategory
+                )
+
+                await MainActor.run {
+                    self.currentResult = result
+                }
+
+                print("✅ DETERMINISTIC EXPANSION: Returning \(validatedFiles.count) workspace edits without relying on AI output.")
+                return result
+            }
+        }
+
         // EDIT MODE VALIDATION: Validate response contains ONLY executable edits
         // Distinguish between: no-op (valid), invalid format (error), silent failure (timeout/empty)
         let outputValidation = EditOutputValidator.shared.validateEditOutput(content)
         
+        // Determine content to parse (may be recovered from formatting violations)
+        let contentToParse: String
         switch outputValidation {
         case .silentFailure:
+            AIResponseDebugLogger.dump(
+                label: "EditIntentCoordinator.validation.silentFailure",
+                text: content
+            )
             // Empty response - abort immediately
             let result = EditResult(
                 files: [],
@@ -87,7 +165,11 @@ final class EditIntentCoordinator: ObservableObject {
             return result
             
         case .invalidFormat(let reason):
-            // Non-executable output - fail fast
+            AIResponseDebugLogger.dump(
+                label: "EditIntentCoordinator.validation.invalidFormat",
+                text: content
+            )
+            // True safety/policy violation - hard block
             let result = EditResult(
                 files: [],
                 commands: [],
@@ -100,9 +182,22 @@ final class EditIntentCoordinator: ObservableObject {
             }
             return result
             
+        case .recovered(let recoveredContent):
+            // Formatting violations recovered - parse recovered content
+            contentToParse = recoveredContent
+            AIResponseDebugLogger.dump(
+                label: "EditIntentCoordinator.validation.recovered",
+                text: recoveredContent
+            )
+            
         case .noOp:
+            AIResponseDebugLogger.dump(
+                label: "EditIntentCoordinator.validation.noOp",
+                text: content
+            )
             // Explicit no-op - valid, but no files to parse
             // Return valid result with zero files (distinct from parse failure)
+            // NOTE: This is a valid terminal state - no edits needed
             let result = EditResult(
                 files: [],
                 commands: [],
@@ -116,23 +211,20 @@ final class EditIntentCoordinator: ObservableObject {
             return result
             
         case .valid:
-            // Valid edit output - proceed to parsing
-            break
+            // Valid edit output - proceed to parsing with original content
+            contentToParse = content
         }
         // Mark as parsing
         isParsing = true
         defer { isParsing = false }
         
-        // Step 1: Classify intent (PRE-AI validation)
-        let intent = IntentClassifier.shared.classify(userPrompt)
-        let intentCategory = intent.editIntentCategory
-        
         // Step 2: Parse content (off main thread)
         // PARSER ROBUSTNESS: Parse with isLoading flag to ensure only complete blocks are accepted when done
+        // Use contentToParse (may be recovered content if formatting violations were detected)
         let (parsedFiles, parsedCommands) = await Task.detached(priority: .userInitiated) {
-            let commands = TerminalExecutionService.shared.extractCommands(from: content)
+            let commands = TerminalExecutionService.shared.extractCommands(from: contentToParse)
             let files = StreamingContentParser.shared.parseContent(
-                content,
+                contentToParse,
                 isLoading: isLoading, // Critical: false when streaming completes, ensures only complete blocks
                 projectURL: projectURL,
                 actions: actions
@@ -140,10 +232,13 @@ final class EditIntentCoordinator: ObservableObject {
             
             // LOGGING: Track parsing results for debugging
             print("📊 PARSER RESULTS:")
-            print("   Content length: \(content.count)")
+            print("   Content length: \(contentToParse.count)")
             print("   Files parsed: \(files.count)")
             print("   Commands parsed: \(commands.count)")
             print("   Is loading: \(isLoading)")
+            if case .recovered = outputValidation {
+                print("   ⚠️ RECOVERED: Content was recovered from formatting violations")
+            }
             if !files.isEmpty {
                 print("   Files: \(files.map { "\($0.name) (\($0.isStreaming ? "streaming" : "complete"))" }.joined(separator: ", "))")
             }
@@ -164,6 +259,10 @@ final class EditIntentCoordinator: ObservableObject {
         // PARSE VALIDATION: Distinguish between no-op (valid) and parse failure (error)
         // If output validation passed but no files parsed, it's a parse failure
         guard hasParsedOutput && hasProposedChanges else {
+            AIResponseDebugLogger.dump(
+                label: "EditIntentCoordinator.parseFailure.contentToParse",
+                text: contentToParse
+            )
             // PARSE FAILURE: Output was validated as valid edit format, but parsing failed
             // This is distinct from no-op (which is handled above) and invalid format (also handled above)
             let errorMessage = parsedFiles.isEmpty && parsedCommands.isEmpty

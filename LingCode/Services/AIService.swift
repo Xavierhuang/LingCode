@@ -54,6 +54,11 @@ class AIService {
     private var currentSession: URLSession?
     private var currentDelegate: AnyObject? // Retain delegate
     private var isCancelled: Bool = false
+
+    /// Last HTTP status code observed for the most recent request (streaming or non-streaming).
+    /// Used by completion gates to avoid treating successful requests as HTTP 0/unknown.
+    /// Updated on the main queue.
+    private(set) var lastHTTPStatusCode: Int?
     
     private init() {
         loadAPIKey()
@@ -209,8 +214,28 @@ class AIService {
             onError(NSError(domain: "AIService", code: 401, userInfo: [NSLocalizedDescriptionKey: "API key not set"]))
             return
         }
+
+        // Reset status for this request
+        DispatchQueue.main.async {
+            self.lastHTTPStatusCode = nil
+        }
         
         let tokens = maxTokens ?? 4096 // Default to 4096, but allow override for project generation
+
+#if DEBUG
+        // DEBUG: Log exactly what we are requesting (prompt + system prompt).
+        // This does not change behavior and helps diagnose "No edits produced" and parsing issues.
+        let fullPromptForLogging: String = {
+            if let context = context {
+                return "Context:\n\(context)\n\nQuestion: \(message)"
+            }
+            return message
+        }()
+        AIResponseDebugLogger.dump(label: "AIService.request.prompt", text: fullPromptForLogging)
+        if let systemPrompt = systemPrompt {
+            AIResponseDebugLogger.dump(label: "AIService.request.systemPrompt", text: systemPrompt)
+        }
+#endif
         
         switch provider {
         case .openAI:
@@ -670,6 +695,7 @@ class AIService {
             var firstChunkTime: Date?
             var lastChunkTime: Date?
             var timeoutTimer: Timer?
+            var receivedText: String = ""
             
             // Timeout detection: If no chunks arrive within 30 seconds of HTTP 200, treat as failure
             let chunkTimeout: TimeInterval = 30.0
@@ -688,6 +714,10 @@ class AIService {
                 if let httpResponse = response as? HTTPURLResponse {
                     httpStatusCode = httpResponse.statusCode
                     print("🔗 HTTP Status Code: \(httpResponse.statusCode)")
+                    // Publish status code for completion gating (main queue)
+                    DispatchQueue.main.async { [weak self] in
+                        self?.service?.lastHTTPStatusCode = httpResponse.statusCode
+                    }
                     
                     // Check if status code is NOT 2xx (200-299)
                     if httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 {
@@ -808,6 +838,8 @@ class AIService {
                                     lastChunkTime = now
                                     
                                     hasReceivedChunks = true
+                                    // Accumulate full raw response text for debugging.
+                                    self.receivedText.append(text)
                                     DispatchQueue.main.async {
                                         self.onChunk(text)
                                     }
@@ -942,6 +974,12 @@ class AIService {
                         // Clean up after completion
                         self.service?.cleanupStreaming()
                     }
+
+#if DEBUG
+                    // DEBUG: Dump full raw response text that was streamed.
+                    // Saved to a temp file as well (see console output).
+                    AIResponseDebugLogger.dump(label: "AIService.response.rawText", text: self.receivedText)
+#endif
                 }
             }
         }

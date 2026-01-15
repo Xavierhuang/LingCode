@@ -146,11 +146,10 @@ class AIViewModel: ObservableObject {
         
         conversation.addMessage(AIMessage(role: .user, content: userMessage))
         
-        // Build full context with Cursor-like system prompt FIRST
+        // Build full context (editor context + optional extra context)
+        // IMPORTANT: Do NOT include "plan/think out loud" instructions when we need strict edit output.
         var fullContext = context ?? ""
         
-        // Use Cursor system prompt (this is the PRIMARY prompt)
-        let cursorPromptService = CursorSystemPromptService.shared
         let contextBuilder = CursorContextBuilder.shared
         
         // Build context from editor state (if available)
@@ -167,21 +166,48 @@ class AIViewModel: ObservableObject {
             )
         }
         
-        // Use Cursor system prompt as the base
-        let systemPrompt = cursorPromptService.getEnhancedSystemPrompt(context: editorContext.isEmpty ? nil : editorContext)
+        // Decide whether this request must use strict Edit Mode (no prose, edits only).
+        // This prevents the model from returning "PLAN" / markdown like in the raw dump.
+        let intent = IntentClassifier.shared.classify(userMessage)
+        let shouldUseEditMode: Bool = {
+            switch intent {
+            case .simpleReplace, .rename:
+                return true
+            default:
+                break
+            }
+            // Also use Edit Mode for edit/refactor tasks.
+            return taskType == .inlineEdit || taskType == .refactor
+        }()
         
-        // Use appropriate prompt enhancement (this adds to user message, not system prompt)
-        let enhancedPrompt: String
-        if isProjectRequest {
-            enhancedPrompt = stepParser.enhancePromptForSteps(userMessage)
-        } else if isRunRequest {
-            enhancedPrompt = stepParser.enhancePromptForRun(userMessage, projectURL: projectURL)
-        } else {
-            enhancedPrompt = stepParser.enhancePromptForSteps(userMessage)
+        // System prompt to send via the provider's real system prompt channel (NOT embedded in context).
+        let systemPromptForRequest: String? = {
+            if shouldUseEditMode {
+                return EditModePromptBuilder.shared.buildEditModeSystemPrompt()
+            }
+            return CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: editorContext.isEmpty ? nil : editorContext)
+        }()
+        
+        // User prompt for the request.
+        let messageForRequest: String = {
+            if shouldUseEditMode {
+                return EditModePromptBuilder.shared.buildEditModeUserPrompt(instruction: userMessage)
+            }
+            // Use appropriate prompt enhancement (this adds to user message, not system prompt)
+            if isProjectRequest {
+                return stepParser.enhancePromptForSteps(userMessage)
+            } else if isRunRequest {
+                return stepParser.enhancePromptForRun(userMessage, projectURL: projectURL)
+            } else {
+                return stepParser.enhancePromptForSteps(userMessage)
+            }
+        }()
+        
+        // Context channel: include editor context (file/selection/diagnostics) plus any extra caller context.
+        // For Cursor prompt we already append editorContext into system prompt; for Edit Mode we keep context here.
+        if shouldUseEditMode, !editorContext.isEmpty {
+            fullContext = editorContext + "\n\n" + fullContext
         }
-        
-        // Combine: System prompt first, then context, then enhanced user prompt
-        fullContext = systemPrompt + "\n\n" + fullContext
         
         var assistantResponse = ""
         let assistantMessage = AIMessage(role: .assistant, content: "")
@@ -212,10 +238,11 @@ class AIViewModel: ObservableObject {
         var detectedEdits: [Edit]? = nil
         
         aiService.streamMessage(
-            enhancedPrompt,
+            messageForRequest,
             context: fullContext.isEmpty ? nil : fullContext,
             images: images,
             maxTokens: maxTokens,
+            systemPrompt: systemPromptForRequest,
             onChunk: { chunk in
                 accumulatedResponse += chunk
                 
@@ -383,7 +410,7 @@ class AIViewModel: ObservableObject {
                 
                 // Fallback to non-streaming if streaming fails (only when NOT in local mode)
                 self.aiService.sendMessage(
-                    enhancedPrompt,
+                    messageForRequest,
                     context: fullContext.isEmpty ? nil : fullContext,
                     images: images,
                     onResponse: { response in
@@ -928,7 +955,7 @@ class AIViewModel: ObservableObject {
             // Apply patch to get new content
             let newContent: String
             do {
-                newContent = try patchGenerator.applyPatch(patch)
+                newContent = try patchGenerator.applyPatch(patch, projectURL: projectURL)
                 
                 // Safety check: Don't create changes with empty content (unless it's a delete operation)
                 if newContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && patch.operation != .delete {

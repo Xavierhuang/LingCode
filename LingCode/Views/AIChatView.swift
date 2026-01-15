@@ -15,12 +15,12 @@ struct AIChatView: View {
     @State private var activeMentions: [Mention] = []
     @State private var showFileSelector: Bool = false
     @State private var showProjectGenerator: Bool = false
-    @State private var viewMode: AIViewMode = .agent  // Default to Agent mode
+    @AppStorage("AIChatView.viewMode") private var viewMode: AIViewMode = .agent  // Default to Agent mode
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var shouldAutoScroll: Bool = true  // Track if we should auto-scroll
     @State private var lastMessageCount: Int = 0
     
-    enum AIViewMode {
+    enum AIViewMode: String {
         case agent   // Agent mode - autonomous task execution
         case plan    // Plan mode - show planning/thinking process
         case debug   // Debug mode - debugging assistance

@@ -28,9 +28,14 @@ final class StreamingUpdateCoordinator: ObservableObject {
     // MARK: - Published Properties
     
     /// Throttled streaming text for display (updates at ~80-120ms intervals)
+    /// ARCHITECTURE: This is the displayed buffer, separate from rawStreamingText
+    /// PROBLEM 1 FIX: Separating streaming buffer from displayed buffer preserves user selection
+    /// Streaming updates do NOT reset user selection because we only update when content meaningfully changes
     @Published private(set) var throttledStreamingText: String = ""
     
     /// Parsed files (only updated when parsing produces new/changed results)
+    /// ARCHITECTURE: Only validated, executable output is shown to users
+    /// PROBLEM 2 FIX: Raw streaming text is never displayed - only parsed, validated files are shown
     @Published var parsedFiles: [StreamingFileInfo] = []
     
     /// Parsed commands (only updated when parsing produces new/changed results)
@@ -39,9 +44,15 @@ final class StreamingUpdateCoordinator: ObservableObject {
     /// Tick counter - increments on each throttled update (for scroll triggers)
     @Published private(set) var updateTick: Int = 0
     
+    /// Agent Mode state (explicit state to prevent blank UI)
+    @Published private(set) var agentState: AgentState = .idle
+    
     // MARK: - Private State
     
     /// Raw streaming text (accumulated at full speed, no throttling)
+    /// ARCHITECTURE: Internal buffer - never displayed directly to users
+    /// PROBLEM 2 FIX: Raw streams are buffered internally but never rendered
+    /// This prevents users from seeing internal reasoning, thinking, or raw tokens
     private var rawStreamingText: String = ""
     
     /// Last throttled update time
@@ -61,6 +72,11 @@ final class StreamingUpdateCoordinator: ObservableObject {
     
     /// Pending parse task (cancelled if new text arrives)
     private var pendingParseTask: Task<Void, Never>?
+
+    /// Force a parse on the next throttled update (used when streaming completes).
+    /// Fixes a hang where `lastParsedContentHash` is already up-to-date from streaming, so
+    /// transitioning to `.validating` would not trigger parsing, leaving UI stuck on "Validating...".
+    private var forceParseOnNextUpdate: Bool = false
     
     // MARK: - Dependencies
     
@@ -93,15 +109,36 @@ final class StreamingUpdateCoordinator: ObservableObject {
         // Update raw text immediately (no throttling here - we want to capture all text)
         rawStreamingText = text
         
+        // AGENT STATE: Set to streaming while receiving chunks
+        Task { @MainActor in
+            await Task.yield()
+            // IMPORTANT: A new request must always leave terminal states (.empty/.blocked/.ready)
+            // and re-enter the streaming pipeline. Otherwise, parsing may never run again.
+            agentState = .streaming
+        }
+        
         // Schedule throttled update if needed
         scheduleThrottledUpdate()
     }
     
     /// Force immediate update (e.g., when streaming completes)
-    func flushUpdates() {
+    func flushUpdates(forceParse: Bool = false) {
         updateTimer?.invalidate()
         updateTimer = nil
-        performThrottledUpdate()
+
+        // Force at least one parse pass after streaming completes.
+        // This guarantees `.validating` is transient and always resolves to a terminal state.
+        forceParseOnNextUpdate = true
+
+        // AGENT STATE: Transition to validating when streaming completes.
+        // Defer to avoid "Publishing changes from within view updates".
+        Task { @MainActor in
+            await Task.yield()
+            // IMPORTANT: Validation must run regardless of the previous state.
+            // If we only transition from .streaming, a prior terminal state can prevent validation.
+            self.agentState = .validating
+            self.performThrottledUpdate()
+        }
     }
     
     /// Reset coordinator state (e.g., when starting new conversation)
@@ -117,6 +154,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
         updateTimer?.invalidate()
         updateTimer = nil
         updateTick = 0
+        agentState = .idle
         editIntentCoordinator.reset()
     }
     
@@ -156,7 +194,11 @@ final class StreamingUpdateCoordinator: ObservableObject {
         
         // If enough time has passed, update immediately
         if timeSinceLastUpdate >= throttleInterval {
-            performThrottledUpdate()
+            // Defer to avoid publishing during SwiftUI view updates (e.g. from .onChange).
+            Task { @MainActor in
+                await Task.yield()
+                self.performThrottledUpdate()
+            }
         } else {
             // Schedule update for when throttle interval expires
             scheduleDelayedUpdate()
@@ -199,10 +241,15 @@ final class StreamingUpdateCoordinator: ObservableObject {
         
         // Check if content has changed meaningfully
         let contentHash = rawStreamingText.hashValue
-        guard contentHash != lastParsedContentHash else { return }
+        if !forceParseOnNextUpdate {
+            guard contentHash != lastParsedContentHash else { return }
+        }
         
         // Get context for parsing
         guard let context = getContext?() else { return }
+
+        // Clear force flag only once we know we'll actually schedule a parse.
+        forceParseOnNextUpdate = false
         
         // Cancel any pending parse task
         pendingParseTask?.cancel()
@@ -220,6 +267,24 @@ final class StreamingUpdateCoordinator: ObservableObject {
             let content = rawStreamingText
             let userPrompt = context.userPrompt ?? ""
             
+            // AGENT STATE: Only parse in validating state (after streaming completes)
+            // Do NOT parse during streaming/blocked/empty states
+            // Check agentState on MainActor since we're in a Task
+            let shouldParse = await MainActor.run {
+                agentState == .validating || agentState == .ready(edits: [])
+            }
+            
+            guard shouldParse else {
+                await MainActor.run {
+                    self.isParsing = false
+                    // SAFETY: If we're not parsing but still in .validating, exit to terminal state
+                    if case .validating = self.agentState {
+                        self.agentState = .empty
+                    }
+                }
+                return
+            }
+            
             // ARCHITECTURE: Use EditIntentCoordinator for all parsing/validation
             // This ensures state mutations happen asynchronously AFTER view updates
             // Note: httpStatus is not available in streaming context, will be checked at completion
@@ -229,21 +294,54 @@ final class StreamingUpdateCoordinator: ObservableObject {
                 isLoading: isLoading,
                 projectURL: projectURL,
                 actions: actions,
-                httpStatus: nil // Will be validated at completion gate
+                httpStatus: await MainActor.run { AIService.shared.lastHTTPStatusCode } // Completion gate requires real HTTP status
             )
             
-            // Update MainActor state asynchronously (AFTER view updates)
+            // AGENT STATE: Update state based on validation result
+            // REQUIREMENT: Validation MUST always resolve to a terminal state
+            // Terminal states: .ready(edits), .empty, .blocked(reason)
             await MainActor.run {
                 self.isParsing = false
                 
-                // Handle validation errors
-                if !editResult.isValid, let errorMessage = editResult.errorMessage {
+                // Handle validation errors - ALWAYS set terminal state
+                if !editResult.isValid {
+                    let errorMessage = editResult.errorMessage ?? "Validation failed"
+                    
                     // SURFACE ERROR: Show validation error to user
                     self.onValidationError?(errorMessage)
+                    
+                    // AGENT STATE: Set blocked or empty based on error type
+                    // This ensures we ALWAYS exit .validating state
+                    if errorMessage.contains("non-executable output") || errorMessage.contains("forbidden") {
+                        self.agentState = .blocked(reason: errorMessage)
+                    } else if errorMessage.contains("empty response") || errorMessage.contains("empty") {
+                        self.agentState = .empty
+                    } else if errorMessage.lowercased().contains("no files") || errorMessage.lowercased().contains("parsed") {
+                        // Parse failure / no-op-like result: show as empty, not "blocked"
+                        self.agentState = .empty
+                    } else {
+                        self.agentState = .blocked(reason: errorMessage)
+                    }
                     
                     // Don't update parsed files if validation failed
                     // This prevents unsafe edits from being shown
                     return
+                }
+                
+                // AGENT STATE: Update based on parse result
+                // REQUIREMENT: Always set terminal state, never leave in .validating
+                if editResult.files.isEmpty {
+                    // No files parsed - terminal state: .empty
+                    self.agentState = .empty
+                } else {
+                    // Files parsed successfully - terminal state: .ready
+                    self.agentState = .ready(edits: editResult.files)
+                }
+                
+                // SAFETY FALLBACK: Ensure we never stay in .validating
+                // If for any reason agentState is still .validating, force to .empty
+                if case .validating = self.agentState {
+                    self.agentState = .empty
                 }
                 
                 // Check if files actually changed before updating state

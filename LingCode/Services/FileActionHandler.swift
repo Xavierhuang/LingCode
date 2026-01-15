@@ -48,6 +48,7 @@ class FileActionHandler {
                 print("⚠️ Warning: Skipping open - file content is empty for \(file.path)")
                 // Just open the existing file without overwriting
                 Task { @MainActor in
+                    await Task.yield()
                     editorViewModel.openFile(at: fileURL, originalContent: originalContent)
                 }
                 return
@@ -74,6 +75,7 @@ class FileActionHandler {
                     print("   Skipping overwrite to protect your existing code.")
                     // Just open the existing file without overwriting
                     Task { @MainActor in
+                        await Task.yield()
                         editorViewModel.openFile(at: fileURL, originalContent: originalContent)
                     }
                     return
@@ -87,6 +89,7 @@ class FileActionHandler {
                     print("   Skipping overwrite to protect your existing code.")
                     // Just open the existing file without overwriting
                     Task { @MainActor in
+                        await Task.yield()
                         editorViewModel.openFile(at: fileURL, originalContent: originalContent)
                     }
                     return
@@ -98,6 +101,7 @@ class FileActionHandler {
                 print("⚠️ Warning: Skipping overwrite - file \(file.path) is still streaming")
                 // Just open the existing file without overwriting
                 Task { @MainActor in
+                    await Task.yield()
                     editorViewModel.openFile(at: fileURL, originalContent: originalContent)
                 }
                 return
@@ -115,6 +119,7 @@ class FileActionHandler {
                             try? original.write(to: fileURL, atomically: true, encoding: .utf8)
                             // Open the restored file
                             Task { @MainActor in
+                                await Task.yield()
                                 editorViewModel.openFile(at: fileURL, originalContent: originalContent)
                             }
                             return
@@ -123,6 +128,7 @@ class FileActionHandler {
                 }
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
+                    await Task.yield()
                     // Small delay to ensure file write is complete
                     try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                     // Always read from disk to ensure we have the latest content
@@ -149,6 +155,7 @@ class FileActionHandler {
                 print("✅ Created and opened file: \(fileURL.path)")
                 // Defer state changes outside of view update cycle
                 Task { @MainActor in
+                    await Task.yield()
                     // Small delay to ensure file write is complete
                     try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                     // New files: highlight everything as new (pass empty string as original)
@@ -161,6 +168,7 @@ class FileActionHandler {
                 // Try to open anyway if it exists now
                 if FileManager.default.fileExists(atPath: fileURL.path) {
                     Task { @MainActor in
+                        await Task.yield()
                         try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
                         editorViewModel.openFile(at: fileURL)
                     }

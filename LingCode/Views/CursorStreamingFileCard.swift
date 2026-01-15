@@ -30,6 +30,11 @@ struct CursorStreamingFileCard: View {
     @State private var shouldAutoScroll = true // Track if we should auto-scroll
     @State private var scrollPosition: CGFloat = 0
     
+    // PROBLEM 1 FIX: Sanitized content (reasoning/markdown removed)
+    // PROBLEM 2 FIX: Frozen content buffer (immutable once streaming completes)
+    @State private var sanitizedContent: String = ""
+    @State private var frozenContent: String? = nil // Immutable buffer for finalized code
+    
     init(
         file: StreamingFileInfo,
         isExpanded: Bool,
@@ -77,20 +82,33 @@ struct CursorStreamingFileCard: View {
             }
         }
         .onAppear {
+            // PROBLEM 1 FIX: Initialize sanitized content on appear
+            sanitizeAndUpdateContent()
+            
+            // PROBLEM 2 FIX: If already not streaming, freeze content immediately
+            if !file.isStreaming && frozenContent == nil {
+                freezeContent()
+            }
+            
             // Only validate when not streaming (generation complete)
             if !file.isStreaming {
                 validateFile()
             }
         }
         .onChange(of: file.content) { _, _ in
+            // PROBLEM 1 FIX: Sanitize content whenever it changes
+            sanitizeAndUpdateContent()
+            
             // Only validate when not streaming (generation complete)
             if !file.isStreaming {
                 validateFile()
             }
         }
         .onChange(of: file.isStreaming) { wasStreaming, isStreaming in
-            // Validate when streaming completes
+            // PROBLEM 2 FIX: Freeze content when streaming completes
             if wasStreaming && !isStreaming {
+                // Streaming completed - freeze content for selection
+                freezeContent()
                 validateFile()
             }
         }
@@ -103,7 +121,7 @@ struct CursorStreamingFileCard: View {
             fileName: file.name,
             operationType: .update,
             originalContent: nil, // Would get from file system
-            newContent: file.content,
+            newContent: frozenContent ?? sanitizedContent, // PROBLEM 1 FIX: Use sanitized content
             lineRange: nil,
             language: file.language
         )
@@ -218,6 +236,7 @@ struct CursorStreamingFileCard: View {
             Text(file.name)
                 .font(.system(size: 13, weight: .medium, design: .default))
                 .foregroundColor(isFileNameHovered ? Color(red: 0.2, green: 0.6, blue: 1.0) : .primary)
+                .textSelection(.enabled) // PROBLEM 1 FIX: Make filename selectable
                 .lineLimit(1)
                 .underline(isFileNameHovered)
         }
@@ -245,6 +264,7 @@ struct CursorStreamingFileCard: View {
             Text(file.path)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(isFilePathHovered ? Color(red: 0.2, green: 0.6, blue: 1.0) : .secondary.opacity(0.6))
+                .textSelection(.enabled) // PROBLEM 1 FIX: Make file path selectable
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
@@ -473,9 +493,10 @@ struct CursorStreamingFileCard: View {
                     shouldAutoScroll = true
                 }
             }
-            .onChange(of: file.content) { _, _ in
-                // Only auto-scroll if user is near bottom or hasn't manually scrolled
-                if shouldAutoScroll {
+            .onChange(of: sanitizedContent) { _, _ in
+                // PROBLEM 2 FIX: Only auto-scroll if content is not frozen (still streaming)
+                // Once frozen, don't auto-scroll to preserve user selection
+                if shouldAutoScroll && frozenContent == nil {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
@@ -490,7 +511,11 @@ struct CursorStreamingFileCard: View {
     }
     
     private var codeLinesView: some View {
-        let unifiedDiff = calculateUnifiedDiff()
+        // PROBLEM 2 FIX: Use frozen content if available, otherwise use sanitized content
+        // Frozen content is immutable and selection-safe
+        let displayContent = frozenContent ?? sanitizedContent
+        
+        let unifiedDiff = calculateUnifiedDiff(from: displayContent)
         
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(unifiedDiff.enumerated()), id: \.offset) { index, diffLine in
@@ -499,7 +524,8 @@ struct CursorStreamingFileCard: View {
                     line: diffLine.content,
                     type: diffLine.type,
                     originalLineNumber: diffLine.originalLineNumber,
-                    newLineNumber: diffLine.newLineNumber
+                    newLineNumber: diffLine.newLineNumber,
+                    isSelectable: frozenContent != nil // PROBLEM 2 FIX: Only selectable when frozen
                 )
                 .transition(.asymmetric(
                     insertion: .opacity.combined(with: .move(edge: .top)).combined(with: .scale(scale: 0.98)),
@@ -507,12 +533,12 @@ struct CursorStreamingFileCard: View {
                 ))
             }
             if file.isStreaming {
-                let lines = file.content.components(separatedBy: .newlines)
+                let lines = displayContent.components(separatedBy: .newlines)
                 streamingCursorView(lineCount: lines.count)
                     .transition(.opacity)
             }
         }
-        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: file.content)
+        .animation(.spring(response: 0.25, dampingFraction: 0.85), value: displayContent)
     }
     
     struct UnifiedDiffLine {
@@ -522,11 +548,28 @@ struct CursorStreamingFileCard: View {
         let newLineNumber: Int?
     }
     
+    // PROBLEM 1 FIX: Sanitize content to remove reasoning/markdown
+    private func sanitizeAndUpdateContent() {
+        let sanitized = ContentSanitizer.shared.sanitizeContent(file.content)
+        sanitizedContent = sanitized
+    }
+    
+    // PROBLEM 2 FIX: Freeze content when streaming completes
+    // Creates immutable buffer for selection-safe rendering
+    private func freezeContent() {
+        // Freeze the current sanitized content
+        frozenContent = sanitizedContent
+    }
+    
     /// Calculate unified diff showing both removed and added lines
-    private func calculateUnifiedDiff() -> [UnifiedDiffLine] {
+    /// PROBLEM 2 FIX: Accepts content parameter to use frozen/sanitized content
+    private func calculateUnifiedDiff(from content: String? = nil) -> [UnifiedDiffLine] {
+        // Use provided content or fall back to sanitized content
+        let sourceContent = content ?? sanitizedContent
+        
         guard let projectURL = projectURL else {
             // New file - all lines are additions
-            return file.content.components(separatedBy: .newlines).enumerated().map { index, line in
+            return sourceContent.components(separatedBy: .newlines).enumerated().map { index, line in
                 UnifiedDiffLine(content: line, type: .added, originalLineNumber: nil, newLineNumber: index + 1)
             }
         }
@@ -536,14 +579,14 @@ struct CursorStreamingFileCard: View {
         // If file doesn't exist, all lines are new (green)
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let existingContent = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            return file.content.components(separatedBy: .newlines).enumerated().map { index, line in
+            return sourceContent.components(separatedBy: .newlines).enumerated().map { index, line in
                 UnifiedDiffLine(content: line, type: .added, originalLineNumber: nil, newLineNumber: index + 1)
             }
         }
         
         // Compare existing vs new content using a simple diff algorithm
         let existingLines = existingContent.components(separatedBy: .newlines)
-        let newLines = file.content.components(separatedBy: .newlines)
+        let newLines = sourceContent.components(separatedBy: .newlines)
         
         var unifiedDiff: [UnifiedDiffLine] = []
         var oldIndex = 0
@@ -630,7 +673,9 @@ struct CursorStreamingFileCard: View {
     
     private func calculateLineTypes() -> [DiffLineType] {
         // Legacy method - kept for compatibility
-        return calculateUnifiedDiff().map { $0.type }
+        // PROBLEM 2 FIX: Use sanitized/frozen content
+        let displayContent = frozenContent ?? sanitizedContent
+        return calculateUnifiedDiff(from: displayContent).map { $0.type }
     }
     
     private func getLineNumberText(type: DiffLineType, index: Int, originalLineNumber: Int?, newLineNumber: Int?) -> String {
@@ -645,7 +690,7 @@ struct CursorStreamingFileCard: View {
         }
     }
     
-    private func codeLineView(index: Int, line: String, type: DiffLineType, originalLineNumber: Int? = nil, newLineNumber: Int? = nil) -> some View {
+    private func codeLineView(index: Int, line: String, type: DiffLineType, originalLineNumber: Int? = nil, newLineNumber: Int? = nil, isSelectable: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 0) {
             // Line number - show original for removed, new for added, both for unchanged
             let lineNumberText = getLineNumberText(
@@ -668,10 +713,21 @@ struct CursorStreamingFileCard: View {
                 .frame(width: 14)
             
             // Code content
-            Text(line.isEmpty ? " " : line)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundColor(textColor(for: type))
-                .textSelection(.enabled)
+            // PROBLEM 2 FIX: Only enable selection when content is frozen (streaming completed)
+            // During streaming, render as non-selectable preview to prevent selection breakage
+            Group {
+                if isSelectable {
+                    Text(line.isEmpty ? " " : line)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(textColor(for: type))
+                        .textSelection(.enabled) // PROBLEM 2 FIX: Selectable when frozen
+                } else {
+                    Text(line.isEmpty ? " " : line)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(textColor(for: type))
+                        .textSelection(.disabled) // PROBLEM 2 FIX: Non-selectable during streaming
+                }
+            }
         }
         .padding(.vertical, 1.5) // More compact vertical padding
         .padding(.horizontal, 12)

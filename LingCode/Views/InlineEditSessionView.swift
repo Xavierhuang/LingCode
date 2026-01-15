@@ -77,14 +77,19 @@ struct InlineEditSessionView: View {
             Divider()
             
             // Content area
+            // ARCHITECTURE: Only show validated, executable output
+            // Do NOT show raw streaming text or internal reasoning
             Group {
                 switch sessionModel.status {
                 case .thinking:
-                    thinkingView
+                    thinkingView // Shows "Analyzing..." - no raw text
                 case .streaming:
-                    streamingView
+                    // ARCHITECTURE: Do not show raw streaming text
+                    // Show thinking view instead (analyzing state)
+                    // Validated output will appear in readyView after parsing
+                    thinkingView
                 case .ready:
-                    readyView
+                    readyView // Shows validated, parsed proposals (selectable)
                 case .applied:
                     appliedView
                 case .continuing:
@@ -110,42 +115,42 @@ struct InlineEditSessionView: View {
     
     // MARK: - Thinking View (Early Feedback)
     
+    // ARCHITECTURE: Hard boundary - internal reasoning is never rendered
+    // Only validated, executable output is shown
+    // Do NOT show raw streaming text, thinking, or planning output
     private var thinkingView: some View {
         VStack(spacing: 16) {
-            // Show provisional intent immediately
-            if !sessionModel.streamingText.isEmpty {
-                // If we have any text (even partial), show it
-                streamingView
-            } else {
-                // Show analyzing state with intent preview
-                VStack(spacing: 12) {
-                    ProgressView()
-                        .scaleEffect(1.2)
-                    
-                    Text("Analyzing your request...")
-                        .font(.headline)
-                    
-                    // Show user intent if available (from first proposal or model)
-                    if let firstProposal = sessionModel.proposedEdits.first, !firstProposal.intent.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Intent:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text(firstProposal.intent)
-                                .font(.subheadline)
-                                .foregroundColor(.primary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.orange.opacity(0.1))
-                                .cornerRadius(8)
-                        }
-                        .padding(.horizontal)
+            // Show analyzing state with intent preview
+            // Do NOT show raw streaming text - only show validated output
+            VStack(spacing: 12) {
+                ProgressView()
+                    .scaleEffect(1.2)
+                
+                Text("Analyzing your request...")
+                    .font(.headline)
+                
+                // Show user intent if available (from first proposal or model)
+                // Only show intent from validated proposals, not from raw streaming
+                if let firstProposal = sessionModel.proposedEdits.first, !firstProposal.intent.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Intent:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(firstProposal.intent)
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                            .textSelection(.enabled) // PROBLEM 1 FIX: Make intent text selectable
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.orange.opacity(0.1))
+                            .cornerRadius(8)
                     }
+                    .padding(.horizontal)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding()
         }
     }
     
@@ -291,16 +296,19 @@ struct InlineEditSessionView: View {
     
     // MARK: - Streaming View
     
+    // ARCHITECTURE: This view is NO LONGER USED
+    // Hard boundary: Raw streaming text is never rendered to users
+    // Only validated, parsed output (proposedEdits) is shown
+    // Streaming text is buffered internally but never displayed directly
+    // This prevents users from seeing:
+    // - Raw streamed tokens
+    // - Internal reasoning
+    // - "Thinking..." text
+    // - "Plan" text
     private var streamingView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(sessionModel.streamingText)
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding()
-        }
-        .frame(maxHeight: 300)
+        // ARCHITECTURE: Do not render raw streaming text
+        // Only show validated output in readyView
+        EmptyView()
     }
     
     // MARK: - Ready View (Diff Preview)
@@ -728,6 +736,7 @@ struct EditProposalCard: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundColor(.primary)
+                            .textSelection(.enabled) // PROBLEM 1 FIX: Make intent text selectable
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.horizontal, 8)
@@ -745,10 +754,12 @@ struct EditProposalCard: View {
                 Text(proposal.fileName)
                     .font(.subheadline)
                     .fontWeight(.medium)
+                    .textSelection(.enabled) // PROBLEM 1 FIX: Make filename selectable
                 Spacer()
                 Text("+\(proposal.statistics.addedLines) -\(proposal.statistics.removedLines)")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .textSelection(.enabled) // PROBLEM 1 FIX: Make stats selectable
             }
             
             // Diff preview (first hunk only for brevity)
@@ -772,6 +783,7 @@ struct EditProposalCard: View {
                             Text(line.content)
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(lineColor(for: line.type))
+                                .textSelection(.enabled) // PROBLEM 1 FIX: Make diff lines selectable
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }

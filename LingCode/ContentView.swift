@@ -25,7 +25,7 @@ struct ContentView: View {
     @State private var showReferences: Bool = false
     
     // Activity Bar
-    @State private var selectedActivity: ActivityItem = .files
+    @State private var selectedActivity: ActivityItem = .ai
     
     // Split Editor
     @State private var splitDirection: SplitDirection = .none

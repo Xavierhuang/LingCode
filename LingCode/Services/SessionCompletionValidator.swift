@@ -48,6 +48,12 @@ final class SessionCompletionValidator {
         guard responseLength > 0 else {
             return (false, "AI service returned an empty response. Session cannot complete. Please retry.")
         }
+
+        // Condition 5 (early): Surface validation errors first.
+        // If scope/safety validation rejected all edits, reporting "no files parsed" is misleading.
+        guard validationErrors.isEmpty else {
+            return (false, "Validation errors detected. Session cannot complete:\n\(validationErrors.joined(separator: "\n"))")
+        }
         
         // Condition 3 & 4: At least one parsed file OR proposed edit exists
         // NOTE: No-op is valid (zero files is OK if explicitly indicated by EditOutputValidator)
@@ -70,11 +76,6 @@ final class SessionCompletionValidator {
         // Condition 4: At least one proposed edit exists (if we have parsed files, we need proposed edits)
         if !parsedFiles.isEmpty && proposedEdits.isEmpty {
             return (false, "No edits were proposed. Session cannot complete. The AI response did not generate any valid edit proposals.")
-        }
-        
-        // Condition 5: Each edit passes scope validation (validationErrors must be empty)
-        guard validationErrors.isEmpty else {
-            return (false, "Validation errors detected. Session cannot complete:\n\(validationErrors.joined(separator: "\n"))")
         }
         
         // Condition 6: No safety rule was violated (implicitly checked above)

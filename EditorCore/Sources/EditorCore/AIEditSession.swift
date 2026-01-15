@@ -69,58 +69,83 @@ public class AIEditSession {
     
     /// Complete streaming and parse edits
     public func completeStreaming() {
+        // IMPORTANT: This method must never block the main thread.
+        // We keep the integration API synchronous, but perform heavy parse+diff work off-main.
+        Task { @MainActor [weak self] in
+            await self?.completeStreamingAsync()
+        }
+    }
+
+    /// Complete streaming and parse edits (async, heavy work off-main).
+    ///
+    /// This is the true implementation. The synchronous `completeStreaming()` wrapper
+    /// exists to preserve the `EditSessionHandle` protocol API.
+    @MainActor
+    public func completeStreamingAsync() async {
+        // Capture required state on the caller thread (typically MainActor via EditSessionHandle).
         guard state == .streaming else {
             return
         }
-        
+
         transition(to: .parsing)
-        
-        // Parse edits from accumulated text
-        let parsedEdits = streamParser.parseStreamingText(accumulatedText, fileSnapshots: fileSnapshots)
-        
-        // Convert to ProposedEdit objects
-        let proposedEdits = parsedEdits.compactMap { parsedEdit -> ProposedEdit? in
-            guard let snapshot = fileSnapshots[parsedEdit.filePath] else {
-                return nil
+
+        let textToParse = accumulatedText
+        let snapshots = fileSnapshots
+
+        // HEAVY WORK: Parse + diff in the background.
+        let work = Task.detached(priority: .userInitiated) { () -> EditSessionState in
+            let parser = StreamParser()
+            let engine = DiffEngine()
+
+            let parsedEdits = parser.parseStreamingText(textToParse, fileSnapshots: snapshots)
+
+            let proposedEdits: [ProposedEdit] = parsedEdits.compactMap { parsedEdit in
+                guard let snapshot = snapshots[parsedEdit.filePath] else {
+                    return nil
+                }
+
+                let proposedContent = Self.applyOperation(
+                    operation: parsedEdit.operation,
+                    originalContent: snapshot.content,
+                    newContent: parsedEdit.content,
+                    range: parsedEdit.range
+                )
+
+                let diff = engine.computeDiff(
+                    oldContent: snapshot.content,
+                    newContent: proposedContent
+                )
+
+                let editType: EditType
+                if snapshot.content.isEmpty && !proposedContent.isEmpty {
+                    editType = .creation
+                } else if !snapshot.content.isEmpty && proposedContent.isEmpty {
+                    editType = .deletion
+                } else {
+                    editType = .modification
+                }
+
+                return ProposedEdit(
+                    filePath: parsedEdit.filePath,
+                    originalContent: snapshot.content,
+                    proposedContent: proposedContent,
+                    diff: diff,
+                    metadata: EditMetadata(editType: editType)
+                )
             }
-            
-            // Apply operation to get proposed content
-            let proposedContent = applyOperation(
-                operation: parsedEdit.operation,
-                originalContent: snapshot.content,
-                newContent: parsedEdit.content,
-                range: parsedEdit.range
-            )
-            
-            // Compute diff
-            let diff = diffEngine.computeDiff(
-                oldContent: snapshot.content,
-                newContent: proposedContent
-            )
-            
-            // Determine edit type
-            let editType: EditType
-            if snapshot.content.isEmpty && !proposedContent.isEmpty {
-                editType = .creation
-            } else if !snapshot.content.isEmpty && proposedContent.isEmpty {
-                editType = .deletion
-            } else {
-                editType = .modification
+
+            if proposedEdits.isEmpty {
+                return .error("No valid edits found in stream")
             }
-            
-            return ProposedEdit(
-                filePath: parsedEdit.filePath,
-                originalContent: snapshot.content,
-                proposedContent: proposedContent,
-                diff: diff,
-                metadata: EditMetadata(editType: editType)
-            )
+
+            return .proposed(proposedEdits)
         }
-        
-        if proposedEdits.isEmpty {
-            transition(to: .error("No valid edits found in stream"))
-        } else {
-            transition(to: .proposed(proposedEdits))
+
+        let resultState = await work.value
+
+        // State transitions should be serialized with other session interactions (which occur on MainActor).
+        await MainActor.run { [weak self] in
+            self?.transition(to: resultState)
         }
     }
     
@@ -336,7 +361,7 @@ public class AIEditSession {
         return snapshots
     }
     
-    private func applyOperation(
+    private static func applyOperation(
         operation: String,
         originalContent: String,
         newContent: String,

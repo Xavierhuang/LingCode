@@ -35,6 +35,17 @@ class PatchGeneratorService {
     static let shared = PatchGeneratorService()
     
     private init() {}
+
+    private func resolveFileURL(for filePath: String, projectURL: URL?) -> URL {
+        if let projectURL {
+            // If filePath is already absolute, honor it.
+            if filePath.hasPrefix("/") {
+                return URL(fileURLWithPath: filePath)
+            }
+            return projectURL.appendingPathComponent(filePath)
+        }
+        return URL(fileURLWithPath: filePath)
+    }
     
     /// Parse AI response and extract structured patches
     func generatePatches(from response: String, projectURL: URL?) -> [CodePatch] {
@@ -141,22 +152,15 @@ class PatchGeneratorService {
             
             let lines = content.components(separatedBy: .newlines)
             
-            let fullPath: String
-            if let projectURL = projectURL {
-                fullPath = (projectURL.path as NSString).appendingPathComponent(filePath)
-            } else {
-                fullPath = filePath
-            }
-            
             // Determine if this is a new file or edit
             let operation: CodePatch.PatchOperation
-            let fileExists = FileManager.default.fileExists(atPath: fullPath)
+            let fileExists = FileManager.default.fileExists(atPath: resolveFileURL(for: filePath, projectURL: projectURL).path)
             operation = fileExists ? .replace : .insert
             
             // For existing files, replace entire file (no range = full replacement)
             // For new files, insert (no range = new file)
             let patch = CodePatch(
-                filePath: fullPath,
+                filePath: filePath,
                 operation: operation,
                 range: nil, // Full file replacement/insertion
                 content: lines,
@@ -170,12 +174,12 @@ class PatchGeneratorService {
     }
     
     /// Apply a patch to a file
-    func applyPatch(_ patch: CodePatch) throws -> String {
-        let fileURL = URL(fileURLWithPath: patch.filePath)
+    func applyPatch(_ patch: CodePatch, projectURL: URL?) throws -> String {
+        let fileURL = resolveFileURL(for: patch.filePath, projectURL: projectURL)
         
         // Read existing content
         let existingContent: String
-        if FileManager.default.fileExists(atPath: patch.filePath) {
+        if FileManager.default.fileExists(atPath: fileURL.path) {
             existingContent = try String(contentsOf: fileURL, encoding: .utf8)
         } else {
             existingContent = ""

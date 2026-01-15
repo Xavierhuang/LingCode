@@ -21,8 +21,6 @@ struct CursorStreamingView: View {
     
     @StateObject private var updateCoordinator = StreamingUpdateCoordinator()
     @State private var expandedFiles: Set<String> = []
-    @State private var showGraphiteView = false
-    @State private var selectedFileForGraphite: StreamingFileInfo?
     @State private var lastUserRequest: String = ""
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var isThinkingExpanded: Bool = false // Track if thinking process is expanded
@@ -121,17 +119,6 @@ struct CursorStreamingView: View {
                 }
             }
         }
-        .onChange(of: viewModel.isLoading) { wasLoading, isLoading in
-            // When loading completes, flush coordinator updates to ensure final state is applied
-            if wasLoading && !isLoading {
-                Task { @MainActor in
-                    updateCoordinator.flushUpdates()
-                    // Re-parse final content after a brief delay to ensure all streaming is complete
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                    handleLoadingComplete()
-                }
-            }
-        }
         .onChange(of: updateCoordinator.parsedFiles) { oldFiles, newFiles in
             // Auto-expand new files that are streaming
             for file in newFiles {
@@ -145,24 +132,6 @@ struct CursorStreamingView: View {
             setupCoordinator()
             handleAppear()
         }
-        .sheet(isPresented: $showGraphiteView) {
-            if !parsedFiles.isEmpty {
-                GraphiteStackView(
-                    changes: parsedFiles.map { file in
-                        CodeChange(
-                            id: UUID(),
-                            filePath: file.path,
-                            fileName: file.name,
-                            operationType: .update,
-                            originalContent: nil,
-                            newContent: file.content,
-                            lineRange: nil,
-                            language: file.language
-                        )
-                    }
-                )
-            }
-        }
     }
     
     // MARK: - View Components
@@ -172,22 +141,9 @@ struct CursorStreamingView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: DesignSystem.Spacing.md) {
-            // Empty state - only show if truly empty (not just loading finished)
-            if !viewModel.isLoading && parsedFiles.isEmpty && parsedCommands.isEmpty && streamingText.isEmpty && viewModel.conversation.messages.isEmpty {
-                emptyStateView
-            } else {
-                        // Terminal commands view
-                        if !parsedCommands.isEmpty {
-                            TerminalCommandsView(
-                                commands: parsedCommands,
-                                workingDirectory: editorViewModel.rootFolderURL,
-                                onRunAll: runAllCommands
-                            )
-                        }
-                        
-                        contentVStack
-                            .id("streaming")
-                    }
+                    // AGENT STATE: Always show a state - never blank
+                    agentStateView
+                        .id("streaming")
                 }
                 .padding(.horizontal, DesignSystem.Spacing.md)
                 .padding(.vertical, DesignSystem.Spacing.md)
@@ -212,6 +168,115 @@ struct CursorStreamingView: View {
                     proxy.scrollTo("streaming", anchor: .bottom)
                 }
             }
+        }
+    }
+    
+    // AGENT STATE: Render based on explicit state - never blank
+    private var agentStateView: some View {
+        Group {
+            switch updateCoordinator.agentState {
+            case .idle:
+                emptyStateView
+                
+            case .streaming:
+                generatingView
+                
+            case .validating:
+                validatingView
+                
+            case .blocked(let reason):
+                blockedView(reason: reason)
+                
+            case .empty:
+                emptyOutputView
+                
+            case .ready(let edits):
+                readyView(edits: edits)
+            }
+        }
+    }
+    
+    private var generatingView: some View {
+        VStack(spacing: DesignSystem.Spacing.lg) {
+            ProgressView()
+                .scaleEffect(1.2)
+            
+            Text("Generating...")
+                .font(DesignSystem.Typography.title3)
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, DesignSystem.Spacing.xxl)
+    }
+    
+    private var validatingView: some View {
+        VStack(spacing: DesignSystem.Spacing.lg) {
+            ProgressView()
+                .scaleEffect(1.2)
+            
+            Text("Validating output...")
+                .font(DesignSystem.Typography.title3)
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, DesignSystem.Spacing.xxl)
+    }
+    
+    private func blockedView(reason: String) -> some View {
+        VStack(spacing: DesignSystem.Spacing.md) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 32))
+                .foregroundColor(.orange)
+            
+            Text("Output blocked by Edit Mode")
+                .font(DesignSystem.Typography.title3)
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+            
+            Text(reason)
+                .font(DesignSystem.Typography.body)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, DesignSystem.Spacing.xxl)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.orange.opacity(0.1))
+        )
+        .padding()
+    }
+    
+    private var emptyOutputView: some View {
+        VStack(spacing: DesignSystem.Spacing.lg) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 32))
+                .foregroundColor(DesignSystem.Colors.textTertiary)
+            
+            Text("No edits produced")
+                .font(DesignSystem.Typography.title3)
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+            
+            Text("The AI response did not contain any file edits.")
+                .font(DesignSystem.Typography.body)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, DesignSystem.Spacing.xxl)
+    }
+    
+    private func readyView(edits: [StreamingFileInfo]) -> some View {
+        VStack(spacing: DesignSystem.Spacing.md) {
+            // Terminal commands view
+            if !parsedCommands.isEmpty {
+                TerminalCommandsView(
+                    commands: parsedCommands,
+                    workingDirectory: editorViewModel.rootFolderURL,
+                    onRunAll: runAllCommands
+                )
+            }
+            
+            contentVStack
         }
     }
     
@@ -258,14 +323,14 @@ struct CursorStreamingView: View {
     
     private var contentVStack: some View {
         VStack(alignment: .leading, spacing: 6) { // More compact spacing between cards
-            // Show thinking process if enabled and there are thinking steps
-            if viewModel.showThinkingProcess && (!viewModel.thinkingSteps.isEmpty || viewModel.currentPlan != nil) {
-                thinkingProcessCard
-            }
+            // ARCHITECTURE: Hard boundary - internal reasoning is never rendered
+            // Only validated, executable output is shown
+            // Do NOT show thinking process, plans, or raw streaming tokens
             
             parsedFilesView
             actionsView
-            rawStreamingView
+            // rawStreamingView REMOVED - do not show raw streams directly to UI
+            // Only show validated, parsed output (parsedFilesView, actionsView)
 
             // Completion summary - show after AI has responded
             // COMPLETION GATE: Only show if all conditions are met (checked inside CompletionSummaryView)
@@ -289,14 +354,6 @@ struct CursorStreamingView: View {
                 ))
                 .animation(.spring(response: 0.4, dampingFraction: 0.8), value: viewModel.isLoading)
                 .id("completion-summary-\(viewModel.conversation.messages.count)") // Force refresh when messages change
-            }
-
-            // Graphite recommendation for large changes
-            if shouldShowGraphiteRecommendation && !viewModel.isLoading {
-                GraphiteRecommendationView(
-                    parsedFiles: parsedFiles,
-                    onCreateStack: createGraphiteStack
-                )
             }
         }
     }
@@ -502,17 +559,6 @@ struct CursorStreamingView: View {
             onApply: { applyFile(file) },
             onReject: { rejectFile(file) }
         )
-        .overlay(
-            // Graphite recommendation for large changes
-            Group {
-                if shouldShowGraphiteRecommendationForFile(file) {
-                    GraphiteRecommendationBadge {
-                        showGraphiteStackViewForFile(file)
-                    }
-                }
-            },
-            alignment: .topTrailing
-        )
     }
     
     
@@ -551,25 +597,15 @@ struct CursorStreamingView: View {
         )
     }
     
-    private var rawStreamingView: some View {
-        Group {
-            // Show raw streaming content if loading and no files/actions yet, OR if there's thinking content
-            if viewModel.isLoading && (parsedFiles.isEmpty && viewModel.currentActions.isEmpty || !viewModel.thinkingSteps.isEmpty) {
-                // Only show raw streaming if there's actual content and it's not just thinking steps
-                if !streamingText.isEmpty && parsedFiles.isEmpty {
-                    StreamingResponseView(
-                        content: streamingText,
-                        onContentChange: { newContent in
-                            // CPU OPTIMIZATION: Send streaming text to coordinator
-                            // Coordinator handles throttling and parsing internally
-                            updateCoordinator.updateStreamingText(newContent)
-                        }
-                    )
-                    .id("streaming")
-                }
-            }
-        }
-    }
+    // ARCHITECTURE: rawStreamingView REMOVED
+    // Hard boundary: Internal reasoning/thinking is never rendered
+    // Only validated, executable output is shown (parsedFilesView, actionsView)
+    // Raw streams are buffered internally but never displayed directly
+    // This prevents users from seeing:
+    // - "Thinking..." text
+    // - "Plan" text
+    // - Internal analysis
+    // - Raw streamed tokens
     
     // MARK: - Apply Button Bar
     
@@ -757,6 +793,7 @@ struct CursorStreamingView: View {
     private func openFile(_ file: StreamingFileInfo) {
         // Defer to avoid publishing during view updates
         Task { @MainActor in
+            await Task.yield()
             fileActionHandler.openFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
         }
     }
@@ -764,6 +801,7 @@ struct CursorStreamingView: View {
     private func applyFile(_ file: StreamingFileInfo) {
         // Defer to avoid publishing during view updates
         Task { @MainActor in
+            await Task.yield()
             fileActionHandler.applyFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
         }
     }
@@ -804,6 +842,7 @@ struct CursorStreamingView: View {
         // Apply and open files sequentially to avoid state update conflicts
         // IMPORTANT: Do NOT remove files from parsedFiles after applying - keep them visible for review
         Task { @MainActor in
+            await Task.yield()
             isApplyingFiles = true
             
             defer {
@@ -820,7 +859,7 @@ struct CursorStreamingView: View {
                 // Double-check content is still valid before applying
                 if !file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Use openFile instead of applyFile to both write AND open in editor
-                    self.openFile(file)
+                    fileActionHandler.openFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
                     appliedCount += 1
                     print("✅ Applied and opened file: \(file.path) (\(appliedCount)/\(filesToApply.count))")
                 } else {
@@ -907,41 +946,46 @@ struct CursorStreamingView: View {
     
     private func sendMessage() {
         guard !viewModel.currentInput.isEmpty else { return }
-        
-        // Store user request for completion summary
-        lastUserRequest = viewModel.currentInput
-        
-        // Only clear files when starting a NEW conversation/message
-        // This is expected behavior - each new message starts fresh
-        let previousFileCount = parsedFiles.count
-        if previousFileCount > 0 {
-            print("🔄 Starting new message - clearing \(previousFileCount) previous file(s) from view")
+
+        // Defer all state mutations to avoid "Publishing changes from within view updates"
+        let userRequest = viewModel.currentInput
+        Task { @MainActor in
+            await Task.yield()
+
+            // Store user request for completion summary
+            lastUserRequest = userRequest
+
+            // Only clear files when starting a NEW conversation/message
+            let previousFileCount = parsedFiles.count
+            if previousFileCount > 0 {
+                print("🔄 Starting new message - clearing \(previousFileCount) previous file(s) from view")
+            }
+
+            // Reset coordinator state (clears all streaming text, parsed files, and commands)
+            updateCoordinator.reset()
+
+            // Pass user message as query to detect website modifications and include existing files
+            var context = editorViewModel.getContextForAI(query: userRequest) ?? ""
+
+            // Build context from mentions
+            let mentionContext = MentionParser.shared.buildContextFromMentions(
+                activeMentions,
+                projectURL: editorViewModel.rootFolderURL,
+                selectedText: editorViewModel.editorState.selectedText,
+                terminalOutput: nil
+            )
+            context += mentionContext
+
+            viewModel.sendMessage(
+                context: context,
+                projectURL: editorViewModel.rootFolderURL,
+                images: imageContextService.attachedImages
+            )
+
+            // Clear images and mentions after sending
+            imageContextService.clearImages()
+            activeMentions.removeAll()
         }
-        
-        // Reset coordinator state (clears all streaming text, parsed files, and commands)
-        updateCoordinator.reset()
-        // Pass user message as query to detect website modifications and include existing files
-        var context = editorViewModel.getContextForAI(query: viewModel.currentInput) ?? ""
-        
-        // Build context from mentions
-        let mentionContext = MentionParser.shared.buildContextFromMentions(
-            activeMentions,
-            projectURL: editorViewModel.rootFolderURL,
-            selectedText: editorViewModel.editorState.selectedText,
-            terminalOutput: nil
-        )
-        context += mentionContext
-        
-        // Send message with images if any
-        viewModel.sendMessage(
-            context: context,
-            projectURL: editorViewModel.rootFolderURL,
-            images: imageContextService.attachedImages
-        )
-        
-        // Clear images and mentions after sending
-        imageContextService.clearImages()
-        activeMentions.removeAll()
     }
     
     private var hasResponse: Bool {
@@ -958,26 +1002,6 @@ struct CursorStreamingView: View {
         return hasParsedContent || hasAssistantMessage || (hasUserRequest && !viewModel.isLoading)
     }
 
-    private var shouldShowGraphiteRecommendation: Bool {
-        let totalFiles = parsedFiles.count
-        let totalLines = parsedFiles.reduce(0) { $0 + $1.addedLines }
-        return totalFiles > 5 || totalLines > 200
-    }
-    
-    private func shouldShowGraphiteRecommendationForFile(_ file: StreamingFileInfo) -> Bool {
-        let lineCount = file.content.components(separatedBy: .newlines).count
-        return lineCount > 200 || file.addedLines > 100
-    }
-    
-    private func showGraphiteStackViewForFile(_ file: StreamingFileInfo) {
-        selectedFileForGraphite = file
-        showGraphiteView = true
-    }
-    
-    private func createGraphiteStack() {
-        showGraphiteView = true
-    }
-    
     // MARK: - Error State Views
     
     /// Parse failure view - shown when parsing yields zero files or zero edits
