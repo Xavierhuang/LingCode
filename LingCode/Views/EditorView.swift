@@ -21,6 +21,13 @@ struct EditorView: View {
     @State private var newNameInput = ""
     @State private var cursorOffsetForRename: Int = 0
     
+    // MARK: - Diagnostics & Autocomplete State
+    @ObservedObject private var diagnosticsService = DiagnosticsService.shared
+    @State private var showAutocomplete = false
+    @State private var autocompleteSuggestions: [AutocompleteSuggestion] = []
+    @State private var autocompletePosition: CGPoint = .zero
+    @State private var autocompleteDebounceTask: Task<Void, Never>?
+    
     // EditorCore integration - SINGLE BRIDGE POINT
     // INVARIANT: EditorCoreAdapter is the only way to access EditorCore
     @StateObject private var editorCoreAdapter = EditorCoreAdapter()
@@ -49,11 +56,33 @@ struct EditorView: View {
                         fontName: viewModel.fontName,
                         language: document.language,
                         aiGeneratedRanges: document.aiGeneratedRanges,
+                        diagnostics: viewModel.currentDiagnostics,
                         onTextChange: { text in
                             viewModel.updateDocumentContent(text)
+                            // Update diagnostics with current content (for unsaved changes)
+                            if let fileURL = document.filePath {
+                                // Send didChange to LSP to trigger diagnostics update
+                                Task {
+                                    // Ensure file is open and send didChange notification
+                                    // LSP will send publishDiagnostics when content changes
+                                    // DiagnosticsService will update automatically via callback
+                                    do {
+                                        try await SourceKitLSPClient.shared.ensureFileOpen(fileURL: fileURL, content: text)
+                                    } catch {
+                                        // Silently handle errors (LSP might not be available)
+                                    }
+                                }
+                            }
+                            // Request autocomplete after typing
+                            requestAutocomplete(for: text, at: viewModel.editorState.cursorPosition, in: document)
                         },
                         onSelectionChange: { text, position in
                             viewModel.updateSelection(text, position: position)
+                        },
+                        onAutocompleteRequest: { position in
+                            if let doc = viewModel.editorState.activeDocument {
+                                requestAutocomplete(for: doc.content, at: position, in: doc)
+                            }
                         },
                         onScrollViewCreated: { scrollView in
                             editorScrollView = scrollView
@@ -117,6 +146,18 @@ struct EditorView: View {
                             .background(.regularMaterial)
                             .cornerRadius(12)
                         }
+                    }
+                    
+                    // Autocomplete popup
+                    if showAutocomplete && !autocompleteSuggestions.isEmpty {
+                        AutocompletePopupView(
+                            suggestions: autocompleteSuggestions,
+                            onSelect: { suggestion in
+                                insertAutocompleteSuggestion(suggestion)
+                                showAutocomplete = false
+                            },
+                            position: autocompletePosition
+                        )
                     }
                     
                     // Inline Edit (Cmd+K) overlay - EditorCore integration
@@ -1053,5 +1094,77 @@ struct RenameSymbolSheet: View {
                 isTextFieldFocused = true
             }
         }
+    }
+}
+
+// MARK: - EditorView Autocomplete Extension
+
+extension EditorView {
+    // MARK: - Autocomplete Integration
+    
+    private func requestAutocomplete(for text: String, at position: Int, in document: Document) {
+        // Cancel previous request
+        autocompleteDebounceTask?.cancel()
+        
+        // Debounce autocomplete requests
+        autocompleteDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
+            
+            guard !Task.isCancelled,
+                  let fileURL = document.filePath,
+                  let projectURL = viewModel.rootFolderURL else {
+                return
+            }
+            
+            // Convert character offset to LSP position
+            // Safe, fast O(n) calculation that doesn't create huge arrays
+            let clampedPosition = min(max(0, position), text.count)
+            let prefix = text.prefix(clampedPosition)
+            let line = prefix.filter({ $0 == "\n" }).count
+            let lastNewlineIndex = prefix.lastIndex(of: "\n")
+            let character = lastNewlineIndex.map { prefix.distance(from: $0, to: prefix.endIndex) - 1 } ?? clampedPosition
+            
+            let lspPosition = LSPPosition(line: line, character: character)
+            
+            // Request LSP completions
+            let suggestions = await AutocompleteService.shared.getLSPCompletions(
+                at: lspPosition,
+                in: fileURL,
+                fileContent: text,
+                projectURL: projectURL
+            )
+            
+            guard !Task.isCancelled else { return }
+            
+            await MainActor.run {
+                if !suggestions.isEmpty {
+                    autocompleteSuggestions = suggestions
+                    // Calculate popup position (near cursor)
+                    // This is a simplified calculation - in production, you'd get actual cursor rect
+                    autocompletePosition = CGPoint(x: 200, y: 100) // Placeholder
+                    showAutocomplete = true
+                } else {
+                    showAutocomplete = false
+                }
+            }
+        }
+    }
+    
+    private func insertAutocompleteSuggestion(_ suggestion: AutocompleteSuggestion) {
+        guard let document = viewModel.editorState.activeDocument else { return }
+        
+        let currentText = document.content
+        let position = viewModel.editorState.cursorPosition
+        
+        let beforeCursor = String(currentText.prefix(position))
+        let afterCursor = String(currentText.suffix(currentText.count - position))
+        
+        // Replace the range with the suggestion text
+        let newText = beforeCursor + suggestion.text + afterCursor
+        viewModel.updateDocumentContent(newText)
+        
+        // Update cursor position
+        let newPosition = position + suggestion.text.count
+        viewModel.updateSelection("", position: newPosition)
     }
 }

@@ -114,8 +114,15 @@ class RenameRefactorService {
                     return
                 }
                 
-                // LEVEL 3: Try SourceKit-LSP first (semantic, type-aware)
-                if SourceKitLSPClient.shared.isAvailable {
+                // LEVEL 3: Try LSP first (semantic, type-aware) - supports multiple languages
+                let lspClient: LSPClientProtocol?
+                do {
+                    lspClient = try LanguageServerManager.shared.getServer(for: symbol.file, workspaceURL: projectURL)
+                } catch {
+                    lspClient = nil
+                }
+                
+                if let client = lspClient, client.isAvailable {
                     Task {
                         do {
                             // ✅ CORRECT: Use passed RAM content first, fallback to disk only if nil
@@ -125,7 +132,8 @@ class RenameRefactorService {
                                 for: symbol,
                                 newName: newName,
                                 in: projectURL,
-                                fileContent: actualContent
+                                fileContent: actualContent,
+                                lspClient: client
                             )
                             
                             // Cache and return
@@ -161,15 +169,16 @@ class RenameRefactorService {
         }
     }
     
-    /// LEVEL 3: Build reference index using SourceKit-LSP (semantic, type-aware)
+    /// LEVEL 3: Build reference index using LSP (semantic, type-aware)
     /// Returns both references and the LSP workspace edit (for direct application)
+    /// Supports multiple languages via LanguageServerManager
     private func buildReferenceIndexWithLSP(
         for symbol: ResolvedSymbol,
         newName: String,
         in projectURL: URL,
-        fileContent: String? = nil // Optional: in-memory content for unsaved changes
+        fileContent: String? = nil, // Optional: in-memory content for unsaved changes
+        lspClient: LSPClientProtocol
     ) async throws -> (references: [SymbolReference], workspaceEdit: LSPWorkspaceEdit?) {
-        let lspClient = SourceKitLSPClient.shared
         
         // Convert symbol position to LSP position
         let content = fileContent ?? (try? String(contentsOf: symbol.file, encoding: .utf8)) ?? ""

@@ -8,6 +8,9 @@
 
 import Foundation
 
+// Import shared LSP types
+// LSPCompletionItem and LSPDiagnostic are defined in LanguageServerManager.swift
+
 // MARK: - LSP Protocol Types
 
 public struct LSPPosition: Codable {
@@ -87,7 +90,7 @@ struct LSPError: Codable {
 
 // MARK: - SourceKit-LSP Client
 
-class SourceKitLSPClient {
+class SourceKitLSPClient: LSPClientProtocol, StoppableLSPClient {
     static let shared = SourceKitLSPClient()
     
     private var process: Process?
@@ -95,7 +98,7 @@ class SourceKitLSPClient {
     private var outputPipe: Pipe?
     private var requestIdCounter = 0
     private let requestQueue = DispatchQueue(label: "com.lingcode.lsp", attributes: .concurrent)
-    private var pendingRequests: [Int: (Result<LSPWorkspaceEdit, Error>) -> Void] = [:]
+    private var pendingRequests: [Int: (Result<Any, Error>) -> Void] = [:]
     
     // CRITICAL FIX: Stateful buffer for fragmented messages
     private var messageBuffer = Data()
@@ -104,6 +107,13 @@ class SourceKitLSPClient {
     // Track open files for didOpen/didChange notifications
     private var openFiles: Set<URL> = []
     private let openFilesQueue = DispatchQueue(label: "com.lingcode.lsp.files", attributes: .concurrent)
+    
+    // Diagnostics storage (file URI -> diagnostics)
+    private var diagnostics: [String: [LSPDiagnostic]] = [:]
+    private let diagnosticsQueue = DispatchQueue(label: "com.lingcode.lsp.diagnostics", attributes: .concurrent)
+    
+    // Diagnostics callback
+    var onDiagnosticsUpdate: ((String, [LSPDiagnostic]) -> Void)?
     
     private init() {}
     
@@ -234,7 +244,8 @@ class SourceKitLSPClient {
     
     /// Ensure file is open in LSP (sends didOpen if needed)
     /// CRITICAL: Prevents LSP from using stale disk content
-    private func ensureFileOpen(fileURL: URL, content: String?) async throws {
+    /// Public for EditorView to trigger diagnostics updates
+    func ensureFileOpen(fileURL: URL, content: String?) async throws {
         let isOpen = openFilesQueue.sync {
             return openFiles.contains(fileURL)
         }
@@ -265,7 +276,7 @@ class SourceKitLSPClient {
             ]
         ]
         
-        let requestId = getNextRequestId()
+        // Note: didOpen is a notification, no request ID needed
         let requestData = try createNotificationJSON(method: "textDocument/didOpen", params: params)
         sendLSPMessage(requestData)
     }
@@ -339,7 +350,16 @@ class SourceKitLSPClient {
         var result: Result<LSPWorkspaceEdit, Error>?
         
         pendingRequests[requestId] = { response in
-            result = response
+            switch response {
+            case .success(let value):
+                if let edit = value as? LSPWorkspaceEdit {
+                    result = .success(edit)
+                } else {
+                    result = .failure(SourceKitLSPError.serverError("Unexpected response type"))
+                }
+            case .failure(let error):
+                result = .failure(error)
+            }
             semaphore.signal()
         }
         
@@ -356,6 +376,97 @@ class SourceKitLSPClient {
             return edit
         case .failure(let error):
             throw error
+        }
+    }
+    
+    // MARK: - LSPClientProtocol Conformance
+    
+    /// Get completions at a position
+    func getCompletions(at position: LSPPosition, in fileURL: URL, fileContent: String?) async throws -> [LSPCompletionItem] {
+        guard isAvailable else {
+            throw SourceKitLSPError.notAvailable
+        }
+        
+        // Ensure server is running
+        if process == nil {
+            try startServer(for: fileURL.deletingLastPathComponent())
+        }
+        
+        // Ensure file is open
+        try await ensureFileOpen(fileURL: fileURL, content: fileContent)
+        
+        let fileURI = fileURL.absoluteString
+        let params: [String: Any] = [
+            "textDocument": ["uri": fileURI],
+            "position": ["line": position.line, "character": position.character]
+        ]
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            requestQueue.async {
+                do {
+                    let completions = try self.sendCompletionRequest(params: params)
+                    continuation.resume(returning: completions)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+    
+    /// Send completion request
+    private func sendCompletionRequest(params: [String: Any]) throws -> [LSPCompletionItem] {
+        let requestId = getNextRequestId()
+        
+        let requestDict: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestId,
+            "method": "textDocument/completion",
+            "params": params
+        ]
+        
+        let requestData = try JSONSerialization.data(withJSONObject: requestDict)
+        sendLSPMessage(requestData)
+        
+        // Wait for response
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<[LSPCompletionItem], Error>?
+        
+        pendingRequests[requestId] = { response in
+            switch response {
+            case .success(let value):
+                if let completions = value as? [LSPCompletionItem] {
+                    result = .success(completions)
+                } else {
+                    result = .failure(SourceKitLSPError.serverError("Unexpected response type"))
+                }
+            case .failure(let error):
+                result = .failure(error)
+            }
+            semaphore.signal()
+        }
+        
+        if semaphore.wait(timeout: .now() + 3) == .timedOut {
+            pendingRequests.removeValue(forKey: requestId)
+            throw SourceKitLSPError.timeout
+        }
+        
+        pendingRequests.removeValue(forKey: requestId)
+        
+        switch result! {
+        case .success(let completions):
+            return completions
+        case .failure(let error):
+            throw error
+        }
+    }
+    
+    /// Get diagnostics for a file
+    func getDiagnostics(for fileURL: URL, fileContent: String?) async throws -> [LSPDiagnostic] {
+        let fileURI = fileURL.absoluteString
+        
+        // Return cached diagnostics if available
+        return diagnosticsQueue.sync {
+            return diagnostics[fileURI] ?? []
         }
     }
     
@@ -421,13 +532,38 @@ class SourceKitLSPClient {
     
     /// Process a complete JSON message
     private func processJSONMessage(_ jsonData: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-              let id = json["id"] as? Int else {
+        guard let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return
+        }
+        
+        // Handle notifications (no id field)
+        if json["id"] == nil, let method = json["method"] as? String {
+            handleNotification(method: method, params: json["params"])
+            return
+        }
+        
+        // Handle requests/responses (has id field)
+        guard let id = json["id"] as? Int else {
             return
         }
         
         if let result = json["result"] as? [String: Any] {
-            // Parse WorkspaceEdit
+            // Check if this is a completion response
+            if let items = result["items"] as? [[String: Any]] {
+                let completions = parseCompletionItems(items)
+                requestQueue.async {
+                    self.pendingRequests[id]?(.success(completions))
+                }
+                return
+            }
+            
+            // Check if this is a diagnostics response (textDocument/diagnostic)
+            // Note: Diagnostics come via publishDiagnostics notification, not request response
+            if result["items"] != nil {
+                // Handle diagnostic items if needed (currently handled via notifications)
+            }
+            
+            // Parse WorkspaceEdit (for rename)
             if let changes = result["changes"] as? [String: [[String: Any]]] {
                 var workspaceEdit = LSPWorkspaceEdit(changes: [:])
                 
@@ -468,11 +604,120 @@ class SourceKitLSPClient {
         }
     }
     
+    /// Handle LSP notifications (publishDiagnostics, etc.)
+    private func handleNotification(method: String, params: Any?) {
+        switch method {
+        case "textDocument/publishDiagnostics":
+            if let paramsDict = params as? [String: Any],
+               let uri = paramsDict["uri"] as? String,
+               let diagnosticsArray = paramsDict["diagnostics"] as? [[String: Any]] {
+                let diagnostics = parseDiagnostics(diagnosticsArray)
+                
+                diagnosticsQueue.async(flags: .barrier) {
+                    self.diagnostics[uri] = diagnostics
+                }
+                
+                // Notify callback
+                if let callback = onDiagnosticsUpdate {
+                    callback(uri, diagnostics)
+                }
+            }
+        default:
+            break
+        }
+    }
+    
+    /// Parse diagnostics from LSP response
+    private func parseDiagnostics(_ diagnosticsArray: [[String: Any]]) -> [LSPDiagnostic] {
+        var result: [LSPDiagnostic] = []
+        
+        for diag in diagnosticsArray {
+            guard let range = diag["range"] as? [String: Any],
+                  let message = diag["message"] as? String,
+                  let start = range["start"] as? [String: Any],
+                  let end = range["end"] as? [String: Any],
+                  let startLine = start["line"] as? Int,
+                  let startChar = start["character"] as? Int,
+                  let endLine = end["line"] as? Int,
+                  let endChar = end["character"] as? Int else {
+                continue
+            }
+            
+            let severity = diag["severity"] as? Int ?? 1
+            let code = diag["code"] as? String
+            let source = diag["source"] as? String
+            
+            result.append(LSPDiagnostic(
+                range: LSPRange(
+                    start: LSPPosition(line: startLine, character: startChar),
+                    end: LSPPosition(line: endLine, character: endChar)
+                ),
+                severity: severity,
+                code: code,
+                source: source,
+                message: message
+            ))
+        }
+        
+        return result
+    }
+    
+    /// Parse completion items from LSP response
+    private func parseCompletionItems(_ items: [[String: Any]]) -> [LSPCompletionItem] {
+        var result: [LSPCompletionItem] = []
+        
+        for item in items {
+            guard let label = item["label"] as? String else {
+                continue
+            }
+            
+            let kind = item["kind"] as? Int
+            let detail = item["detail"] as? String
+            let documentation = (item["documentation"] as? [String: Any])?["value"] as? String
+            let insertText = item["insertText"] as? String ?? label
+            
+            var textEdit: LSPTextEdit? = nil
+            if let edit = item["textEdit"] as? [String: Any],
+               let range = edit["range"] as? [String: Any],
+               let newText = edit["newText"] as? String,
+               let start = range["start"] as? [String: Any],
+               let end = range["end"] as? [String: Any],
+               let startLine = start["line"] as? Int,
+               let startChar = start["character"] as? Int,
+               let endLine = end["line"] as? Int,
+               let endChar = end["character"] as? Int {
+                textEdit = LSPTextEdit(
+                    range: LSPRange(
+                        start: LSPPosition(line: startLine, character: startChar),
+                        end: LSPPosition(line: endLine, character: endChar)
+                    ),
+                    newText: newText
+                )
+            }
+            
+            result.append(LSPCompletionItem(
+                label: label,
+                kind: kind,
+                detail: detail,
+                documentation: documentation,
+                insertText: insertText,
+                textEdit: textEdit
+            ))
+        }
+        
+        return result
+    }
+    
     
     /// Get next request ID
     private func getNextRequestId() -> Int {
         requestIdCounter += 1
         return requestIdCounter
+    }
+    
+    /// Stop server (conforms to StoppableLSPClient)
+    func stop() {
+        stopServer()
     }
     
     /// Stop server
@@ -488,6 +733,9 @@ class SourceKitLSPClient {
         }
         openFilesQueue.async(flags: .barrier) {
             self.openFiles.removeAll()
+        }
+        diagnosticsQueue.async(flags: .barrier) {
+            self.diagnostics.removeAll()
         }
     }
     

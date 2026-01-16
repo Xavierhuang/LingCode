@@ -22,6 +22,9 @@ class EditorViewModel: ObservableObject {
     @Published var isRenaming: Bool = false
     @Published var renameErrorMessage: String?
     
+    // MARK: - Diagnostics State
+    @Published var currentDiagnostics: [EditorDiagnostic] = []
+    
     // AI
     let aiViewModel = AIViewModel()
     
@@ -103,6 +106,57 @@ class EditorViewModel: ObservableObject {
                 self?.settingsService.saveAutoExecuteCode(enabled)
             }
             .store(in: &cancellables)
+        
+        // MARK: - Diagnostics Subscription
+        // Update diagnostics when active document changes or diagnostics update
+        setupDiagnosticsSubscription()
+    }
+    
+    // MARK: - Diagnostics Integration
+    
+    /// Setup subscription to diagnostics service to update currentDiagnostics
+    private func setupDiagnosticsSubscription() {
+        let diagnosticsService = DiagnosticsService.shared
+        
+        // Combine active document changes with diagnostics updates
+        Publishers.CombineLatest(
+            editorState.$activeDocumentId,
+            diagnosticsService.$diagnostics
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] activeDocumentId, _ in
+            guard let self = self else { return }
+            
+            // Get active document
+            guard let documentId = activeDocumentId,
+                  let document = self.editorState.documents.first(where: { $0.id == documentId }),
+                  let fileURL = document.filePath else {
+                // No active document or no file path
+                self.currentDiagnostics = []
+                return
+            }
+            
+            // Use DiagnosticsService.getDiagnostics which handles range conversion properly
+            // This ensures ranges are accurate even for unsaved changes (dirty buffer)
+            // Run heavy work off main thread to avoid blocking UI
+            let fileURLCopy = fileURL
+            let contentCopy = document.content
+            Task.detached(priority: .userInitiated) { [weak self] in
+                // Get diagnostics (may do array mapping/validation)
+                // Note: getDiagnostics is @MainActor, so we call it on main actor
+                let diagnostics = await MainActor.run {
+                    return diagnosticsService.getDiagnostics(
+                        for: fileURLCopy,
+                        fileContent: contentCopy
+                    )
+                }
+                // Dispatch result back to main thread
+                await MainActor.run {
+                    self?.currentDiagnostics = diagnostics
+                }
+            }
+        }
+        .store(in: &cancellables)
     }
     
     // MARK: - Settings Loading
@@ -222,6 +276,35 @@ class EditorViewModel: ObservableObject {
         document.isModified = true
         if let index = editorState.documents.firstIndex(where: { $0.id == document.id }) {
             editorState.documents[index] = document
+        }
+        
+        // Refresh diagnostics with updated content to ensure ranges are valid
+        refreshCurrentDiagnostics()
+    }
+    
+    /// Refresh current diagnostics with the latest document content
+    private func refreshCurrentDiagnostics() {
+        guard let document = editorState.activeDocument,
+              let fileURL = document.filePath else {
+            currentDiagnostics = []
+            return
+        }
+        
+        // Run off main thread to avoid blocking UI during typing
+        let fileURLCopy = fileURL
+        let contentCopy = document.content
+        let diagnosticsService = DiagnosticsService.shared
+        Task.detached(priority: .userInitiated) { [weak self] in
+            // Note: getDiagnostics is @MainActor, so we call it on main actor
+            let diagnostics = await MainActor.run {
+                return diagnosticsService.getDiagnostics(
+                    for: fileURLCopy,
+                    fileContent: contentCopy
+                )
+            }
+            await MainActor.run {
+                self?.currentDiagnostics = diagnostics
+            }
         }
     }
     
@@ -612,13 +695,11 @@ class EditorViewModel: ObservableObject {
             }) {
                 // CASE A: File is OPEN. Update the RAM buffer directly.
                 // This updates the UI immediately without needing a reload.
-                var document = editorState.documents[index]
-                let newContent = applyEditToString(document.content, edit: edit)
+                let newContent = applyEditToString(editorState.documents[index].content, edit: edit)
                 
-                document.content = newContent
-                document.isModified = true // Mark as dirty so user can save later
-                
-                editorState.documents[index] = document
+                // Since Document is a class, we can mutate directly
+                editorState.documents[index].content = newContent
+                editorState.documents[index].isModified = true // Mark as dirty so user can save later
                 
             } else {
                 // CASE B: File is CLOSED. Write directly to disk.

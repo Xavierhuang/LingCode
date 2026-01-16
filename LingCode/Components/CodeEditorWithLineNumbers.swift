@@ -348,8 +348,10 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
     var fontName: String = EditorConstants.defaultFontName
     var language: String?
     var aiGeneratedRanges: [NSRange] = []
+    var diagnostics: [EditorDiagnostic] = []
     var onTextChange: ((String) -> Void)?
     var onSelectionChange: ((String, Int) -> Void)?
+    var onAutocompleteRequest: ((Int) -> Void)?
     var onScrollViewCreated: ((NSScrollView) -> Void)?
     
     @Environment(\.colorScheme) var colorScheme
@@ -398,6 +400,14 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
             scrollView: scrollView
         )
         
+        // Create diagnostics overlay - add directly to textView, not containerView
+        // This ensures it stays perfectly synced with text scrolling and typing
+        let diagnosticsOverlay = DiagnosticsOverlayView(frame: textView.bounds)
+        diagnosticsOverlay.textView = textView
+        diagnosticsOverlay.updateDiagnostics(diagnostics)
+        diagnosticsOverlay.autoresizingMask = [.width, .height] // Ensure it resizes with the text view
+        textView.addSubview(diagnosticsOverlay)
+        
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
@@ -407,8 +417,10 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
         context.coordinator.textView = textView
         context.coordinator.lineNumbersView = lineNumbersView
         context.coordinator.containerView = containerView
+        context.coordinator.diagnosticsOverlay = diagnosticsOverlay
         context.coordinator.onTextChange = onTextChange
         context.coordinator.onSelectionChange = onSelectionChange
+        context.coordinator.onAutocompleteRequest = onAutocompleteRequest
         context.coordinator.language = language
         context.coordinator.isModifiedBinding = Binding(
             get: { isModified },
@@ -443,6 +455,9 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let containerView = nsView.documentView as? EditorContainerView,
               let textView = containerView.textView as? GhostTextNSTextView else { return }
+        
+        // Update diagnostics overlay
+        context.coordinator.diagnosticsOverlay?.updateDiagnostics(diagnostics)
         
         if textView.string != text {
             let selectedRange = textView.selectedRange()
@@ -507,8 +522,10 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
         weak var textView: GhostTextNSTextView?
         weak var lineNumbersView: LineNumbersNSView?
         weak var containerView: EditorContainerView?
+        weak var diagnosticsOverlay: DiagnosticsOverlayView?
         var onTextChange: ((String) -> Void)?
         var onSelectionChange: ((String, Int) -> Void)?
+        var onAutocompleteRequest: ((Int) -> Void)?
         var isModifiedBinding: Binding<Bool>?
         var language: String?
         
