@@ -2,43 +2,16 @@
 //  TreeSitterBridge.swift
 //  LingCode
 //
-//  Production-grade Tree-sitter → Swift bridge for AST parsing
+//  Production-grade SwiftSyntax-based AST parser
+//  Replaces regex-based simulation with real AST parsing
 //
 
 import Foundation
 
-// MARK: - Tree-sitter Node Wrapper (Safe Swift Interface)
-
-// Placeholder type for Tree-sitter node (would be actual TSNode from C library)
-struct TSNode {
-    // Placeholder - would be actual Tree-sitter node type
-}
-
-struct TSNodeRef {
-    let node: TSNode
-    
-    var type: String {
-        // Placeholder - would use ts_node_type(node) from C bridge
-        // For now, use regex-based detection
-        return detectNodeType()
-    }
-    
-    var range: Range<Int> {
-        // Placeholder - would use ts_node_start_byte/end_byte
-        // For now, estimate from content
-        return 0..<0
-    }
-    
-    var text: String {
-        // Placeholder - would extract from source
-        return ""
-    }
-    
-    private func detectNodeType() -> String {
-        // Fallback to regex-based detection
-        return "unknown"
-    }
-}
+#if canImport(SwiftSyntax)
+import SwiftSyntax
+import SwiftParser
+#endif
 
 // MARK: - Unified Symbol Model
 
@@ -53,6 +26,7 @@ struct ASTSymbol {
         case enumSymbol
         case structSymbol
         case protocolSymbol
+        case `extension`
     }
     
     let name: String
@@ -60,187 +34,291 @@ struct ASTSymbol {
     let file: URL
     let range: Range<Int>
     let parent: String?
+    let signature: String?
+    let content: String?
 }
 
-// MARK: - Tree-sitter Query Engine
+// MARK: - SwiftSyntax-Based AST Parser
 
-struct TSQuery {
-    let pattern: String
-    let language: String
+class SwiftSyntaxASTParser {
+    static let shared = SwiftSyntaxASTParser()
     
-    func execute(on content: String, fileURL: URL) -> [ASTSymbol] {
-        // Placeholder for Tree-sitter query execution
-        // For now, use regex-based extraction
-        return extractSymbolsRegex(from: content, fileURL: fileURL)
+    private var isSwiftSyntaxAvailable: Bool {
+        #if canImport(SwiftSyntax)
+        return true
+        #else
+        return false
+        #endif
     }
     
-    private func extractSymbolsRegex(from content: String, fileURL: URL) -> [ASTSymbol] {
-        var symbols: [ASTSymbol] = []
-        
-        // Language-specific extraction
-        let ext = fileURL.pathExtension.lowercased()
-        switch ext {
-        case "swift":
-            symbols = extractSwiftSymbols(from: content, fileURL: fileURL)
-        case "js", "jsx":
-            symbols = extractJSSymbols(from: content, fileURL: fileURL)
-        case "ts", "tsx":
-            symbols = extractTSSymbols(from: content, fileURL: fileURL)
-        case "py":
-            symbols = extractPythonSymbols(from: content, fileURL: fileURL)
-        default:
-            break
+    private init() {}
+    
+    /// Parse Swift file and extract AST symbols using SwiftSyntax
+    func parseSwiftFile(_ fileURL: URL) -> [ASTSymbol] {
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            return []
         }
         
-        return symbols
+        if isSwiftSyntaxAvailable {
+            #if canImport(SwiftSyntax)
+            return parseWithSwiftSyntax(content: content, fileURL: fileURL)
+            #else
+            return parseWithRegex(content: content, fileURL: fileURL)
+            #endif
+        } else {
+            return parseWithRegex(content: content, fileURL: fileURL)
+        }
     }
     
-    private func extractSwiftSymbols(from content: String, fileURL: URL) -> [ASTSymbol] {
+    #if canImport(SwiftSyntax)
+    /// Real SwiftSyntax-based parsing (production-grade)
+    private func parseWithSwiftSyntax(content: String, fileURL: URL) -> [ASTSymbol] {
+        let sourceFile = Parser.parse(source: content)
+        let sourceLocationConverter = SourceLocationConverter(file: fileURL.path, tree: sourceFile)
+        let visitor = SymbolExtractorVisitor(fileURL: fileURL, sourceLocationConverter: sourceLocationConverter)
+        visitor.walk(sourceFile)
+        return visitor.symbols
+    }
+    
+    /// SwiftSyntax visitor to extract symbols from AST
+    private nonisolated class SymbolExtractorVisitor: SyntaxVisitor {
         var symbols: [ASTSymbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        var currentClass: String? = nil
+        let fileURL: URL
+        let sourceLocationConverter: SourceLocationConverter
+        var currentParent: String? = nil
+        var parentStack: [String] = []
         
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        init(fileURL: URL, sourceLocationConverter: SourceLocationConverter) {
+            self.fileURL = fileURL
+            self.sourceLocationConverter = sourceLocationConverter
+            super.init(viewMode: .sourceAccurate)
+        }
+        
+        private func getLine(_ position: AbsolutePosition) -> Int {
+            let location = sourceLocationConverter.location(for: position)
+            return location.line ?? 1
+        }
+        
+        override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
             
-            // Class
-            if let name = extractName(from: trimmed, pattern: #"^(public |private |internal |fileprivate |open )?class\s+(\w+)"#) {
-                currentClass = name
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .classSymbol,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
-            }
-            // Function
-            else if let name = extractName(from: trimmed, pattern: #"^(public |private |internal |fileprivate |open )?(static |class )?func\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: currentClass != nil ? .method : .function,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: currentClass
-                ))
-            }
-            // Variable
-            else if let name = extractName(from: trimmed, pattern: #"^(let|var)\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .variable,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: currentClass
-                ))
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func extractJSSymbols(from content: String, fileURL: URL) -> [ASTSymbol] {
-        var symbols: [ASTSymbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            parentStack.append(currentParent ?? "")
+            currentParent = name
             
-            // Function
-            if let name = extractName(from: trimmed, pattern: #"function\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .function,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
-            }
-            // Arrow function
-            else if let name = extractName(from: trimmed, pattern: #"const\s+(\w+)\s*=\s*\([^)]*\)\s*=>"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .function,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
-            }
-            // Class
-            else if let name = extractName(from: trimmed, pattern: #"class\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .classSymbol,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func extractTSSymbols(from content: String, fileURL: URL) -> [ASTSymbol] {
-        // TypeScript uses similar patterns to JavaScript
-        return extractJSSymbols(from: content, fileURL: fileURL)
-    }
-    
-    private func extractPythonSymbols(from content: String, fileURL: URL) -> [ASTSymbol] {
-        var symbols: [ASTSymbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            symbols.append(ASTSymbol(
+                name: name,
+                kind: .classSymbol,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: parentStack.last,
+                signature: signature,
+                content: node.description
+            ))
             
-            // Function
-            if let name = extractName(from: trimmed, pattern: #"def\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .function,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
-            }
-            // Class
-            else if let name = extractName(from: trimmed, pattern: #"class\s+(\w+)"#) {
-                symbols.append(ASTSymbol(
-                    name: name,
-                    kind: .classSymbol,
-                    file: fileURL,
-                    range: getLineRange(index, in: content),
-                    parent: nil
-                ))
+            return .visitChildren
+        }
+        
+        override func visitPost(_ node: ClassDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
             }
         }
         
-        return symbols
-    }
-    
-    private func extractName(from line: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..<line.endIndex, in: line)) else {
-            return nil
+        override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            parentStack.append(currentParent ?? "")
+            currentParent = name
+            
+            symbols.append(ASTSymbol(
+                name: name,
+                kind: .structSymbol,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: parentStack.last,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
         }
         
-        let lastRange = match.range(at: match.numberOfRanges - 1)
-        guard let swiftRange = Range(lastRange, in: line) else { return nil }
-        return String(line[swiftRange])
+        override func visitPost(_ node: StructDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
+            }
+        }
+        
+        override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            parentStack.append(currentParent ?? "")
+            currentParent = name
+            
+            symbols.append(ASTSymbol(
+                name: name,
+                kind: .enumSymbol,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: parentStack.last,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visitPost(_ node: EnumDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
+            }
+        }
+        
+        override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            symbols.append(ASTSymbol(
+                name: name,
+                kind: .protocolSymbol,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: currentParent,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
+            if let extendedType = node.extendedType.as(IdentifierTypeSyntax.self) {
+                let name = extendedType.name.text
+                let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+                let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+                
+                symbols.append(ASTSymbol(
+                    name: name,
+                    kind: .extension,
+                    file: fileURL,
+                    range: startLine..<endLine,
+                    parent: currentParent,
+                    signature: "extension \(name)",
+                    content: node.description
+                ))
+            }
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.signature.description
+            let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
+            
+            symbols.append(ASTSymbol(
+                name: name,
+                kind: (currentParent != nil || isStatic) ? .method : .function,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: currentParent,
+                signature: "func \(name)\(signature)",
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+            for binding in node.bindings {
+                if let pattern = binding.pattern.as(IdentifierPatternSyntax.self) {
+                    let name = pattern.identifier.text
+                    let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+                    let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+                    let isProperty = currentParent != nil
+                    
+                    symbols.append(ASTSymbol(
+                        name: name,
+                        kind: isProperty ? .property : .variable,
+                        file: fileURL,
+                        range: startLine..<endLine,
+                        parent: currentParent,
+                        signature: node.description,
+                        content: node.description
+                    ))
+                }
+            }
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+            let path = node.path.description
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            
+            symbols.append(ASTSymbol(
+                name: path,
+                kind: .import,
+                file: fileURL,
+                range: startLine..<endLine,
+                parent: nil,
+                signature: "import \(path)",
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+    }
+    #endif
+    
+    /// Regex-based fallback (for non-Swift files or when SwiftSyntax unavailable)
+    func parseWithRegex(content: String, fileURL: URL) -> [ASTSymbol] {
+        // Use SwiftSyntaxParser's regex fallback for consistency
+        return SwiftSyntaxParser.shared.extractSymbols(from: content, filePath: fileURL.path)
+            .map { symbol in
+                ASTSymbol(
+                    name: symbol.name,
+                    kind: mapCodeSymbolKind(symbol.kind),
+                    file: fileURL,
+                    range: 0..<0, // Regex can't provide accurate byte ranges
+                    parent: nil,
+                    signature: symbol.signature,
+                    content: symbol.content
+                )
+            }
     }
     
-    private func getLineRange(_ lineIndex: Int, in content: String) -> Range<Int> {
-        let lines = content.components(separatedBy: .newlines)
-        var offset = 0
-        for i in 0..<min(lineIndex, lines.count) {
-            offset += lines[i].count + 1 // +1 for newline
+    private func mapCodeSymbolKind(_ kind: CodeSymbol.Kind) -> ASTSymbol.Kind {
+        switch kind {
+        case .function: return .function
+        case .class: return .classSymbol
+        case .struct: return .structSymbol
+        case .enum: return .enumSymbol
+        case .protocol: return .protocolSymbol
+        case .extension: return .extension
+        case .variable: return .variable
+        case .property: return .property
+        case .method: return .method
+        case .import: return .import
         }
-        let lineLength = lineIndex < lines.count ? lines[lineIndex].count : 0
-        return offset..<(offset + lineLength)
     }
 }
 
-// MARK: - AST Index with Caching
+// MARK: - AST Index with Caching (Updated to use SwiftSyntax)
 
 class ASTIndex {
     static let shared = ASTIndex()
@@ -248,6 +326,7 @@ class ASTIndex {
     private var symbolCache: [URL: [ASTSymbol]] = [:]
     private var parseCache: [URL: (hash: String, symbols: [ASTSymbol])] = [:]
     private let cacheQueue = DispatchQueue(label: "com.lingcode.astindex", attributes: .concurrent)
+    private let parser = SwiftSyntaxASTParser.shared
     
     private init() {}
     
@@ -264,14 +343,19 @@ class ASTIndex {
             }
             
             // Check hash for incremental reparse
-            let hash = content.hashValue.description
+            let hash = String(content.hashValue)
             if let cached = parseCache[fileURL], cached.hash == hash {
                 return cached.symbols
             }
             
-            // Parse with query
-            let query = TSQuery(pattern: "", language: detectLanguage(from: fileURL))
-            let symbols = query.execute(on: content, fileURL: fileURL)
+            // Parse with SwiftSyntax (or regex fallback)
+            let symbols: [ASTSymbol]
+            if fileURL.pathExtension.lowercased() == "swift" {
+                symbols = parser.parseSwiftFile(fileURL)
+            } else {
+                // For non-Swift files, use regex-based extraction
+                symbols = parser.parseWithRegex(content: content, fileURL: fileURL)
+            }
             
             // Cache
             cacheQueue.async(flags: .barrier) {
@@ -283,26 +367,15 @@ class ASTIndex {
         }
     }
     
-    /// Incremental reparse (Tree-sitter supports this)
+    /// Incremental reparse (invalidate and reparse)
     func reparse(fileURL: URL, editRange: Range<Int>, newText: String) {
         cacheQueue.async(flags: .barrier) {
             // Invalidate cache
             self.symbolCache.removeValue(forKey: fileURL)
             self.parseCache.removeValue(forKey: fileURL)
             
-            // Reparse (would use Tree-sitter incremental API)
+            // Reparse
             _ = self.getSymbols(for: fileURL)
-        }
-    }
-    
-    private func detectLanguage(from fileURL: URL) -> String {
-        let ext = fileURL.pathExtension.lowercased()
-        switch ext {
-        case "swift": return "swift"
-        case "js", "jsx": return "javascript"
-        case "ts", "tsx": return "typescript"
-        case "py": return "python"
-        default: return ""
         }
     }
     
@@ -311,6 +384,49 @@ class ASTIndex {
         cacheQueue.async(flags: .barrier) {
             self.symbolCache.removeValue(forKey: fileURL)
             self.parseCache.removeValue(forKey: fileURL)
+        }
+    }
+}
+
+// MARK: - Legacy TSQuery Interface (for backward compatibility)
+
+struct TSQuery {
+    let pattern: String
+    let language: String
+    
+    func execute(on content: String, fileURL: URL) -> [ASTSymbol] {
+        // Use SwiftSyntax parser for Swift files
+        if fileURL.pathExtension.lowercased() == "swift" {
+            return SwiftSyntaxASTParser.shared.parseSwiftFile(fileURL)
+        }
+        
+        // For other languages, use regex fallback
+        return SwiftSyntaxParser.shared.extractSymbols(from: content, filePath: fileURL.path)
+            .map { symbol in
+                ASTSymbol(
+                    name: symbol.name,
+                    kind: mapCodeSymbolKind(symbol.kind),
+                    file: fileURL,
+                    range: 0..<0,
+                    parent: nil,
+                    signature: symbol.signature,
+                    content: symbol.content
+                )
+            }
+    }
+    
+    private func mapCodeSymbolKind(_ kind: CodeSymbol.Kind) -> ASTSymbol.Kind {
+        switch kind {
+        case .function: return .function
+        case .class: return .classSymbol
+        case .struct: return .structSymbol
+        case .enum: return .enumSymbol
+        case .protocol: return .protocolSymbol
+        case .extension: return .extension
+        case .variable: return .variable
+        case .property: return .property
+        case .method: return .method
+        case .import: return .import
         }
     }
 }
