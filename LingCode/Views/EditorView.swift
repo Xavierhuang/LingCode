@@ -393,7 +393,7 @@ struct EditorView: View {
                     let validation = EditOutputValidator.shared.validateEditOutput(responseText)
                     
                     // Switch to MainActor for UI updates
-                    await Task { @MainActor in
+                    await MainActor.run {
                         switch validation {
                         case .silentFailure:
                             let msg = "AI service returned an empty response. Please retry."
@@ -423,7 +423,7 @@ struct EditorView: View {
                             // Valid edit output - proceed to parsing
                             session.completeStreaming()
                         }
-                    }.value
+                    }
                 }
             },
             onError: { error in

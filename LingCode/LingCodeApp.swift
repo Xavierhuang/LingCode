@@ -18,6 +18,9 @@ struct LingCodeApp: App {
            let preference = ThemeService.ThemePreference(rawValue: saved) {
             ThemeService.shared.setTheme(preference)
         }
+        
+        // Check Ollama status on startup
+        LocalOnlyService.shared.checkOllamaStatus()
     }
     
     var body: some Scene {

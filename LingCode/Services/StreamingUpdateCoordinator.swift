@@ -25,6 +25,8 @@ import Combine
 /// - Provides single source of truth for scroll triggers
 @MainActor
 final class StreamingUpdateCoordinator: ObservableObject {
+    static let shared = StreamingUpdateCoordinator()
+    
     // MARK: - Published Properties
     
     /// Throttled streaming text for display (updates at ~80-120ms intervals)
@@ -259,15 +261,15 @@ final class StreamingUpdateCoordinator: ObservableObject {
         lastParsedContentHash = contentHash
         
         // Parse and validate using EditIntentCoordinator (ARCHITECTURE: All parsing/validation outside views)
+        // Capture context values before creating Task to avoid concurrent access
+        let isLoading = context.isLoading
+        let projectURL = context.projectURL
+        let actions = context.actions
+        let userPrompt = context.userPrompt ?? ""
+        let content = rawStreamingText
+        
         pendingParseTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
-            
-            // Capture context values
-            let isLoading = context.isLoading
-            let projectURL = context.projectURL
-            let actions = context.actions
-            let content = rawStreamingText
-            let userPrompt = context.userPrompt ?? ""
             
             // AGENT STATE: Only parse in validating state (after streaming completes)
             // Do NOT parse during streaming/blocked/empty states
@@ -278,7 +280,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
             guard shouldParse else {
                 self.isParsing = false
                 // SAFETY: If we're not parsing but still in .validating, exit to terminal state
-                if case .validating = self.agentState {
+                if case .validating = currentAgentState {
                     self.agentState = .empty
                 }
                 return
@@ -287,7 +289,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
             // ARCHITECTURE: Use EditIntentCoordinator for all parsing/validation
             // This ensures state mutations happen asynchronously AFTER view updates
             // Note: httpStatus is not available in streaming context, will be checked at completion
-            let editResult = await editIntentCoordinator.parseAndValidate(
+            let editResult = await self.editIntentCoordinator.parseAndValidate(
                 content: content,
                 userPrompt: userPrompt,
                 isLoading: isLoading,

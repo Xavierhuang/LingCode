@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import AppKit
 
 /// Service for local-only AI processing
 /// Addresses enterprise privacy and security concerns
@@ -16,9 +17,16 @@ class LocalOnlyService: ObservableObject {
     
     @Published var isLocalModeEnabled: Bool = false
     @Published var availableLocalModels: [LocalModelInfo] = []
+    @Published var isOllamaRunning: Bool = false
+    @Published var isInstallingOllama: Bool = false
+    @Published var isPullingModels: Bool = false
+    @Published var installationProgress: String = ""
+    @Published var modelPullProgress: [String: String] = [:] // model name -> progress message
     
     private init() {
         loadSettings()
+        // Check Ollama status on startup
+        checkOllamaStatus()
         // Only detect models if local mode is enabled (to avoid connection errors)
         if isLocalModeEnabled {
             detectLocalModels()
@@ -48,6 +56,346 @@ class LocalOnlyService: ObservableObject {
         
         // Check for Ollama
         detectOllamaModels()
+    }
+    
+    /// Check if Ollama is running on localhost:11434
+    func checkOllamaStatus() {
+        let url = URL(string: "http://localhost:11434/api/tags")!
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0 // Quick check
+        
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let httpResponse = response as? HTTPURLResponse,
+                   httpResponse.statusCode == 200 {
+                    self.isOllamaRunning = true
+                    // Auto-detect models if Ollama is running
+                    if self.isLocalModeEnabled {
+                        self.detectLocalModels()
+                    }
+                } else {
+                    self.isOllamaRunning = false
+                }
+            }
+        }
+        task.resume()
+    }
+    
+    /// Install Ollama programmatically
+    func installOllama(completion: @escaping (Result<Void, Error>) -> Void) {
+        DispatchQueue.main.async {
+            self.isInstallingOllama = true
+            self.installationProgress = "Checking system..."
+        }
+        
+        // Check if Ollama is already installed
+        checkOllamaStatus()
+        if isOllamaRunning {
+            DispatchQueue.main.async {
+                self.isInstallingOllama = false
+                self.installationProgress = "Ollama is already installed and running"
+            }
+            completion(.success(()))
+            return
+        }
+        
+        // Check if Ollama binary exists
+        let ollamaPath = "/usr/local/bin/ollama"
+        if FileManager.default.fileExists(atPath: ollamaPath) {
+            // Ollama is installed but not running - try to start it
+            DispatchQueue.main.async {
+                self.installationProgress = "Starting Ollama..."
+            }
+            startOllamaService { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.isInstallingOllama = false
+                    switch result {
+                    case .success:
+                        self.installationProgress = "Ollama started successfully"
+                        self.isOllamaRunning = true
+                    case .failure(let error):
+                        self.installationProgress = "Failed to start: \(error.localizedDescription)"
+                    }
+                }
+                completion(result)
+            }
+            return
+        }
+        
+        // Install Ollama using official installer
+        DispatchQueue.main.async {
+            self.installationProgress = "Downloading Ollama installer..."
+        }
+        
+        // For macOS, download and run the official installer
+        // Use the official macOS installer URL
+        DispatchQueue.main.async {
+            self.installationProgress = "Opening Ollama installer..."
+        }
+        
+        // Open the official Ollama download page
+        if let url = URL(string: "https://ollama.com/download/Ollama-darwin.zip") {
+            NSWorkspace.shared.open(url)
+            DispatchQueue.main.async {
+                self.installationProgress = "Please follow the installer instructions. After installation, Ollama will start automatically."
+            }
+            // Check status after a delay to see if installation completed
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                self.checkOllamaStatus()
+                if self.isOllamaRunning {
+                    self.isInstallingOllama = false
+                    self.installationProgress = "Ollama installed and running!"
+                    completion(.success(()))
+                } else {
+                    // Alternative: Try using Homebrew if available
+                    self.tryHomebrewInstall(completion: completion)
+                }
+            }
+            return
+        }
+        
+        // Fallback: Try Homebrew installation
+        tryHomebrewInstall(completion: completion)
+    }
+    
+    /// Try installing via Homebrew (if available)
+    private func tryHomebrewInstall(completion: @escaping (Result<Void, Error>) -> Void) {
+        DispatchQueue.main.async {
+            self.installationProgress = "Trying Homebrew installation..."
+        }
+        
+        // Check if Homebrew is available
+        let checkBrewScript = "which brew"
+        executeShellScript(checkBrewScript) { [weak self] brewResult in
+            guard let self = self else {
+                completion(.failure(NSError(domain: "LocalOnlyService", code: 11, userInfo: [NSLocalizedDescriptionKey: "Service deallocated"])))
+                return
+            }
+            
+            switch brewResult {
+            case .success:
+                // Homebrew is available, use it to install Ollama
+                DispatchQueue.main.async {
+                    self.installationProgress = "Installing via Homebrew..."
+                }
+                let installScript = "brew install ollama"
+                self.executeShellScript(installScript) { installResult in
+                    DispatchQueue.main.async {
+                        switch installResult {
+                        case .success:
+                            self.installationProgress = "Starting Ollama service..."
+                            self.startOllamaService { startResult in
+                                DispatchQueue.main.async {
+                                    self.isInstallingOllama = false
+                                    switch startResult {
+                                    case .success:
+                                        self.installationProgress = "Ollama installed and running!"
+                                    case .failure(let error):
+                                        self.installationProgress = "Installed but failed to start: \(error.localizedDescription)"
+                                    }
+                                }
+                                completion(startResult)
+                            }
+                        case .failure(let error):
+                            self.isInstallingOllama = false
+                            self.installationProgress = "Homebrew installation failed. Please install Ollama manually from https://ollama.com"
+                            completion(.failure(error))
+                        }
+                    }
+                }
+            case .failure:
+                // Homebrew not available, provide manual instructions
+                DispatchQueue.main.async {
+                    self.isInstallingOllama = false
+                    self.installationProgress = "Please install Ollama manually:\n1. Visit https://ollama.com/download\n2. Download and run the installer\n3. Restart LingCode"
+                }
+                completion(.failure(NSError(domain: "LocalOnlyService", code: 12, userInfo: [NSLocalizedDescriptionKey: "Homebrew not available. Please install Ollama manually."])))
+            }
+        }
+    }
+    
+    
+    /// Start Ollama service
+    private func startOllamaService(completion: @escaping (Result<Void, Error>) -> Void) {
+        let script = "ollama serve &"
+        executeShellScript(script) { result in
+            // Wait a moment for service to start
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.checkOllamaStatus()
+                if self.isOllamaRunning {
+                    completion(.success(()))
+                } else {
+                    completion(.failure(NSError(domain: "LocalOnlyService", code: 8, userInfo: [NSLocalizedDescriptionKey: "Failed to start Ollama service"])))
+                }
+            }
+        }
+    }
+    
+    /// Pull models programmatically
+    func pullModels(models: [String] = ["deepseek-coder:6.7b", "qwen2.5-coder:7b", "phi3:mini"], completion: @escaping (Result<Void, Error>) -> Void) {
+        guard isOllamaRunning else {
+            completion(.failure(NSError(domain: "LocalOnlyService", code: 9, userInfo: [NSLocalizedDescriptionKey: "Ollama is not running. Please install and start Ollama first."])))
+            return
+        }
+        
+        DispatchQueue.main.async {
+            self.isPullingModels = true
+            self.modelPullProgress = [:]
+        }
+        
+        // Pull models sequentially
+        pullModelRecursive(models: models, index: 0) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isPullingModels = false
+            }
+            completion(result)
+        }
+    }
+    
+    /// Recursively pull models one by one
+    private func pullModelRecursive(models: [String], index: Int, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard index < models.count else {
+            completion(.success(()))
+            return
+        }
+        
+        let model = models[index]
+        DispatchQueue.main.async {
+            self.modelPullProgress[model] = "Pulling \(model)..."
+        }
+        
+        pullSingleModel(model: model) { [weak self] result in
+            guard let self = self else {
+                completion(.failure(NSError(domain: "LocalOnlyService", code: 10, userInfo: [NSLocalizedDescriptionKey: "Service deallocated"])))
+                return
+            }
+            
+            switch result {
+            case .success:
+                DispatchQueue.main.async {
+                    self.modelPullProgress[model] = "✅ \(model) ready"
+                }
+                // Continue with next model
+                self.pullModelRecursive(models: models, index: index + 1, completion: completion)
+            case .failure(let error):
+                DispatchQueue.main.async {
+                    self.modelPullProgress[model] = "❌ Failed: \(error.localizedDescription)"
+                }
+                // Continue anyway (some models might fail, but others might succeed)
+                self.pullModelRecursive(models: models, index: index + 1, completion: completion)
+            }
+        }
+    }
+    
+    /// Pull a single model using Ollama API
+    private func pullSingleModel(model: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        let url = URL(string: "http://localhost:11434/api/pull")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 600.0 // 10 minutes for large models
+        
+        let body: [String: Any] = [
+            "name": model
+        ]
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        // Use streaming to track progress
+        class PullDelegate: NSObject, URLSessionDataDelegate {
+            var onProgress: (String) -> Void
+            var onComplete: (Result<Void, Error>) -> Void
+            var buffer = Data()
+            
+            init(onProgress: @escaping (String) -> Void, onComplete: @escaping (Result<Void, Error>) -> Void) {
+                self.onProgress = onProgress
+                self.onComplete = onComplete
+            }
+            
+            func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+                buffer.append(data)
+                
+                // Parse progress updates (Ollama sends JSON lines)
+                let string = String(data: buffer, encoding: .utf8) ?? ""
+                let lines = string.components(separatedBy: .newlines)
+                buffer = Data((lines.last ?? "").utf8)
+                
+                for line in lines.dropLast() {
+                    guard !line.isEmpty,
+                          let lineData = line.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                        continue
+                    }
+                    
+                    if let status = json["status"] as? String {
+                        DispatchQueue.main.async {
+                            self.onProgress(status)
+                        }
+                    }
+                    
+                    if let done = json["completed"] as? Int,
+                       let total = json["total"] as? Int {
+                        let percent = Int((Double(done) / Double(total)) * 100)
+                        DispatchQueue.main.async {
+                            self.onProgress("Downloading: \(percent)%")
+                        }
+                    }
+                }
+            }
+            
+            func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+                if let error = error {
+                    self.onComplete(.failure(error))
+                } else {
+                    self.onComplete(.success(()))
+                }
+            }
+        }
+        
+        let delegate = PullDelegate(
+            onProgress: { [weak self] progress in
+                DispatchQueue.main.async {
+                    self?.modelPullProgress[model] = progress
+                }
+            },
+            onComplete: completion
+        )
+        
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let task = session.dataTask(with: request)
+        task.resume()
+        
+        // Retain delegate
+        objc_setAssociatedObject(task, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+    
+    /// Execute shell script
+    private func executeShellScript(_ script: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", script]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus == 0 {
+                completion(.success(()))
+            } else {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
+                completion(.failure(NSError(domain: "LocalOnlyService", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output])))
+            }
+        } catch {
+            completion(.failure(error))
+        }
     }
     
     /// Detect Ollama models (silently fails if Ollama isn't running)

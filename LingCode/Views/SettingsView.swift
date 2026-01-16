@@ -57,18 +57,114 @@ struct SettingsView: View {
                         }
                     ))
                     
+                    // Ollama Status Section
+                    if !localService.isOllamaRunning {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Ollama is not running")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                            
+                            Text("Install Ollama to use local AI models. This allows you to run AI completely offline.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Button(action: {
+                                installOllama()
+                            }) {
+                                HStack {
+                                    if localService.isInstallingOllama {
+                                        ProgressView()
+                                            .scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "arrow.down.circle.fill")
+                                    }
+                                    Text("Install Local AI")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(localService.isInstallingOllama)
+                            
+                            if !localService.installationProgress.isEmpty {
+                                Text(localService.installationProgress)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.top, 2)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    
                     if localService.isLocalModeEnabled {
                         if localService.availableLocalModels.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("No local models detected")
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                                Text("Make sure Ollama is running and you have downloaded models")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                if localService.isOllamaRunning {
+                                    Text("No local models detected")
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                    Text("Download models to use local AI")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    
+                                    Button(action: {
+                                        prepareOfflineMode()
+                                    }) {
+                                        HStack {
+                                            if localService.isPullingModels {
+                                                ProgressView()
+                                                    .scaleEffect(0.7)
+                                            } else {
+                                                Image(systemName: "arrow.down.circle.fill")
+                                            }
+                                            Text("Prepare Offline Mode")
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(localService.isPullingModels)
+                                    
+                                    // Show model pull progress
+                                    if !localService.modelPullProgress.isEmpty {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            ForEach(Array(localService.modelPullProgress.keys.sorted()), id: \.self) { model in
+                                                HStack {
+                                                    if let progress = localService.modelPullProgress[model] {
+                                                        if progress.contains("✅") {
+                                                            Image(systemName: "checkmark.circle.fill")
+                                                                .foregroundColor(.green)
+                                                                .font(.caption)
+                                                        } else if progress.contains("❌") {
+                                                            Image(systemName: "xmark.circle.fill")
+                                                                .foregroundColor(.red)
+                                                                .font(.caption)
+                                                        } else {
+                                                            ProgressView()
+                                                                .scaleEffect(0.6)
+                                                        }
+                                                        Text(progress)
+                                                            .font(.caption2)
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .padding(.top, 4)
+                                    }
+                                } else {
+                                    Text("Ollama is not running")
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                    Text("Please install and start Ollama first")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                
                                 HStack(spacing: 8) {
                                     Button("Refresh") {
                                         localService.refreshAvailableModels()
+                                        localService.checkOllamaStatus()
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
@@ -85,12 +181,13 @@ struct SettingsView: View {
                                             .scaleEffect(0.7)
                                     }
                                 }
+                                .padding(.top, 4)
                                 
                                 if let result = localModelTestResult {
                                     Text(result)
                                         .font(.caption)
                                         .foregroundColor(result.contains("✅") ? .green : .orange)
-                                        .padding(.top, 4)
+                                        .padding(.top, 2)
                                 }
                             }
                             .padding(.vertical, 4)
@@ -279,6 +376,38 @@ struct SettingsView: View {
                     localModelTestResult = "✅ Connection successful!\nModel response: \(response.prefix(100))..."
                 case .failure(let error):
                     localModelTestResult = "❌ \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    private func installOllama() {
+        LocalOnlyService.shared.installOllama { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    // Installation successful, check status
+                    LocalOnlyService.shared.checkOllamaStatus()
+                    if LocalOnlyService.shared.isOllamaRunning {
+                        LocalOnlyService.shared.refreshAvailableModels()
+                    }
+                case .failure(let error):
+                    localModelTestResult = "❌ Installation failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    private func prepareOfflineMode() {
+        LocalOnlyService.shared.pullModels { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    // Models pulled successfully, refresh list
+                    LocalOnlyService.shared.refreshAvailableModels()
+                    localModelTestResult = "✅ Models downloaded successfully!"
+                case .failure(let error):
+                    localModelTestResult = "❌ Failed to download models: \(error.localizedDescription)"
                 }
             }
         }
