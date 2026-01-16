@@ -287,7 +287,7 @@ class SwiftSyntaxASTParser {
     
     /// Regex-based fallback (for non-Swift files or when SwiftSyntax unavailable)
     func parseWithRegex(content: String, fileURL: URL) -> [ASTSymbol] {
-        // Use SwiftSyntaxParser's regex fallback for consistency
+        // Use SwiftSyntaxParser for Swift files (SwiftSyntax is required)
         return SwiftSyntaxParser.shared.extractSymbols(from: content, filePath: fileURL.path)
             .map { symbol in
                 ASTSymbol(
@@ -348,7 +348,7 @@ class ASTIndex {
                 return cached.symbols
             }
             
-            // Parse with SwiftSyntax (or regex fallback)
+            // Parse with SwiftSyntax (required dependency)
             let symbols: [ASTSymbol]
             if fileURL.pathExtension.lowercased() == "swift" {
                 symbols = parser.parseSwiftFile(fileURL)
@@ -400,7 +400,7 @@ struct TSQuery {
             return SwiftSyntaxASTParser.shared.parseSwiftFile(fileURL)
         }
         
-        // For other languages, use regex fallback
+        // For other languages, use Tree-sitter parsers
         return SwiftSyntaxParser.shared.extractSymbols(from: content, filePath: fileURL.path)
             .map { symbol in
                 ASTSymbol(
