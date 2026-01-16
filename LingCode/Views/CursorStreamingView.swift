@@ -42,7 +42,7 @@ struct CursorStreamingView: View {
     
     // Check if changes are large enough to warrant stacking
     private var shouldOfferStacking: Bool {
-        guard let projectURL = editorViewModel.rootFolderURL else { return false }
+        guard editorViewModel.rootFolderURL != nil else { return false }
         let totalFiles = parsedFiles.count
         let totalLines = parsedFiles.reduce(0) { $0 + $1.content.components(separatedBy: .newlines).count }
         
@@ -724,7 +724,7 @@ struct CursorStreamingView: View {
                         Text("Compiles")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.green)
-                    case .failure(let message):
+                    case .failure:
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.red)
                         Text("Build Failed")
@@ -820,7 +820,7 @@ struct CursorStreamingView: View {
             // TODO: Show user-visible error UI
         }
         
-        updateCoordinator.onFilesUpdated = { [expandedFiles] files in
+        updateCoordinator.onFilesUpdated = { files in
             // Auto-expand new files that are streaming
             // Note: We can't directly modify expandedFiles here since it's a @State property
             // The coordinator will trigger a view update, and we'll handle expansion in the view
@@ -1012,9 +1012,10 @@ struct CursorStreamingView: View {
     // MARK: - Graphite Stacking
     
     private func createStackingPlan() {
-        guard let projectURL = editorViewModel.rootFolderURL else { return }
+        guard editorViewModel.rootFolderURL != nil else { return }
         
         // Convert StreamingFileInfo to CodeChange for stacking analysis
+        let projectURL = editorViewModel.rootFolderURL!
         let changes = parsedFiles.map { file -> CodeChange in
             let fileURL = projectURL.appendingPathComponent(file.path)
             let originalContent = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""

@@ -113,7 +113,6 @@ final class ExecutionOutcomeValidator {
         var estimatedLines = 0
         for filePath in affectedFiles {
             guard let content = files[filePath] else { continue }
-            let lines = content.components(separatedBy: .newlines)
             
             // Count matches for each search target
             for target in plan.searchTargets {

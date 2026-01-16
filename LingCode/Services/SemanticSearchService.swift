@@ -120,9 +120,8 @@ class SemanticSearchService: ObservableObject {
             if let embedding = self.embedding {
                 let keywordsText = chunk.keywords.joined(separator: " ")
                 if !keywordsText.isEmpty {
-                    if let dist = try? embedding.distance(between: query, and: keywordsText) {
-                        score += (1.0 - dist) * 15.0
-                    }
+                    let dist = embedding.distance(between: query, and: keywordsText)
+                    score += (1.0 - dist) * 15.0
                 }
             }
             
@@ -171,9 +170,8 @@ class SemanticSearchService: ObservableObject {
             if let embedding = self.embedding {
                 let keywordsText = chunk.keywords.joined(separator: " ")
                 if !keywordsText.isEmpty {
-                    if let dist = try? embedding.distance(between: query, and: keywordsText) {
-                        score += (1.0 - dist) * 15.0
-                    }
+                    let dist = embedding.distance(between: query, and: keywordsText)
+                    score += (1.0 - dist) * 15.0
                 }
             }
             

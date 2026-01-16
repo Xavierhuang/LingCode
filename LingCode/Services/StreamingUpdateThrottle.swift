@@ -68,7 +68,7 @@ final class StreamingUpdateThrottle {
         // Schedule new timer
         let delay = throttleInterval - Date().timeIntervalSince(lastUpdateTime)
         updateTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, delay), repeats: false) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.flushUpdate()
             }
         }

@@ -166,24 +166,17 @@ struct StreamingInputView: View {
                         if newValue.hasSuffix("@") {
                             showMentionPopup = true
                         }
-                        
-                        // Trigger speculative context preparation
-                        SpeculativeContextService.shared.onUserTyping(text: newValue)
-                        
-                        // Prepare context in background if we have editor state
-                        if !newValue.isEmpty && newValue.count > 5 {
-                            let activeFile = editorViewModel.editorState.activeDocument?.filePath
-                            let selectedText = editorViewModel.editorState.selectedText.isEmpty ? nil : editorViewModel.editorState.selectedText
-                            
-                            SpeculativeContextService.shared.prepareContext(
-                                query: newValue,
-                                activeFile: activeFile,
-                                selectedRange: selectedText,
-                                diagnostics: nil,
-                                projectURL: editorViewModel.rootFolderURL
-                            )
-                        }
+                        // Note: Speculative context is now handled by AIViewModel's Combine pipeline
                     }
+                
+                // ⚡️ Speculative context indicator
+                if viewModel.isSpeculating {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.yellow)
+                        .opacity(0.8)
+                        .help("Preparing context...")
+                }
                 
                 // Send/Stop button
                 Button(action: {

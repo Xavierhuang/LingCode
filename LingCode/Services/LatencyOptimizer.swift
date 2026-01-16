@@ -108,7 +108,8 @@ class LatencyOptimizer {
         activeFile: URL?,
         selectedText: String?,
         projectURL: URL?,
-        query: String?
+        query: String?,
+        onComplete: (() -> Void)? = nil
     ) {
         // Cancel previous speculative task
         speculativeContextTask?.cancel()
@@ -125,6 +126,7 @@ class LatencyOptimizer {
             if !Task.isCancelled {
                 await MainActor.run {
                     self.speculativeContext = context
+                    onComplete?() // Notify completion (e.g., to clear isSpeculating flag)
                 }
             }
         }
@@ -136,25 +138,27 @@ class LatencyOptimizer {
         projectURL: URL?,
         query: String?
     ) async -> String {
-        var context = ""
+        // This runs in the background while user is typing!
+        // Use ContextRankingService for comprehensive context (includes semantic search, imports, etc.)
+        // This is equivalent to what CursorContextBuilder does, but runs speculatively
         
-        // Use cached data when available
-        if let activeFile = activeFile {
-            // Check if symbols are cached (for future use)
-            _ = await astCache.getSymbols(for: activeFile)
-            
-            if let content = try? String(contentsOf: activeFile, encoding: .utf8) {
-                context += "--- Active File: \(activeFile.lastPathComponent) ---\n"
-                context += content
-                context += "\n\n"
-            }
-        }
-        
-        if let selectedText = selectedText, !selectedText.isEmpty {
-            context += "--- Selected Code ---\n"
-            context += selectedText
-            context += "\n\n"
-        }
+        // Build context using ContextRankingService (thread-safe, can run in background)
+        // ContextRankingService already includes:
+        // - Active file content
+        // - Selected text
+        // - Semantic search results (if query provided)
+        // - Imported files
+        // - Related files
+        // - Recent files
+        // - Tests and interfaces
+        let context = ContextRankingService.shared.buildContext(
+            activeFile: activeFile,
+            selectedRange: selectedText,
+            diagnostics: nil, // Diagnostics can be fetched if needed, but skip for speed
+            projectURL: projectURL,
+            query: query ?? "",
+            tokenLimit: 8000
+        )
         
         return context
     }

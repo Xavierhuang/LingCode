@@ -2,303 +2,169 @@
 //  AgentModeView.swift
 //  LingCode
 //
-//  Created by Weijia Huang on 11/23/25.
+//  Created for Animated Agent UX
 //
 
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// Agent Mode UI - Autonomous task execution like Cursor
 struct AgentModeView: View {
-    @StateObject private var agent = AgentService.shared
-    @ObservedObject var editorViewModel: EditorViewModel
+    @StateObject private var agentService = AgentService.shared
+    @State private var inputText: String = ""
+    @State private var lastStepCount: Int = 0
+    @Namespace private var bottomID
+    @State private var showApprovalDialog = false
     
-    @State private var taskInput: String = ""
-    @State private var showAgentPanel: Bool = false
-    @State private var activeMentions: [Mention] = []
-    @StateObject private var imageContextService = ImageContextService.shared
+    @ObservedObject var editorViewModel: EditorViewModel
     
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "cpu")
+                Image(systemName: "sparkles")
                     .foregroundColor(.purple)
-                Text("Agent Mode")
+                    .symbolEffect(.bounce, value: agentService.isRunning)
+                Text("Autonomous Agent")
                     .font(.headline)
-                
                 Spacer()
-                
-                if agent.isRunning {
-                    Button(action: { agent.cancel() }) {
-                        HStack {
-                            Image(systemName: "stop.fill")
-                            Text("Stop")
-                        }
-                        .foregroundColor(.red)
+                if agentService.isRunning {
+                    Button("Stop") {
+                        agentService.cancel()
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .tint(.red)
                 }
             }
             .padding()
-            .background(Color.purple.opacity(0.1))
+            .background(Color(NSColor.windowBackgroundColor))
             
             Divider()
             
-            // Steps display
-            if !agent.steps.isEmpty {
+            // Steps List
+            ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(agent.steps) { step in
-                            AgentStepRow(step: step)
-                        }
-                    }
-                    .padding()
-                }
-            } else {
-                // Empty state
-                VStack(spacing: 16) {
-                    Image(systemName: "cpu")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary)
-                    
-                    Text("Agent Mode")
-                        .font(.headline)
-                    
-                    Text("Let AI autonomously complete multi-step tasks.\nIt can generate code, run commands, and search the web.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                    
-                    // Example tasks
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Example tasks:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        ForEach(exampleTasks, id: \.self) { task in
-                            Button(action: { taskInput = task }) {
-                                HStack {
-                                    Image(systemName: "arrow.right.circle")
-                                        .font(.caption)
-                                    Text(task)
-                                        .font(.caption)
-                                        .lineLimit(1)
-                                }
-                                .foregroundColor(.purple)
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        if agentService.steps.isEmpty && !agentService.isRunning {
+                            // Empty state
+                            VStack(spacing: 12) {
+                                Image(systemName: "brain.head.profile")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.secondary)
+                                Text("Start an autonomous task")
+                                    .font(.headline)
+                                    .foregroundColor(.secondary)
+                                Text("The agent will think, act, and observe iteratively")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                            .buttonStyle(PlainButtonStyle())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
+                        } else {
+                            ForEach(agentService.steps) { step in
+                                AgentStepRow(step: step)
+                                    .id(step.id)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                            
+                            // Invisible footer to auto-scroll to
+                            Color.clear
+                                .frame(height: 1)
+                                .id(bottomID)
                         }
                     }
                     .padding()
-                    .background(Color(NSColor.controlBackgroundColor))
-                    .cornerRadius(8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
+                .onChange(of: agentService.steps.count) { oldCount, newCount in
+                    // Auto-scroll when new step is added
+                    if newCount > lastStepCount {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                        lastStepCount = newCount
+                    }
+                }
+                .onChange(of: agentService.steps.last?.output) { oldOutput, newOutput in
+                    // Auto-scroll when output streams in
+                    if let lastStep = agentService.steps.last, lastStep.status == .running {
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                    }
+                }
             }
             
             Divider()
             
-            // Input with support for @ mentions and images
-            VStack(spacing: 0) {
-                // Context badges
-                if !activeMentions.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack {
-                            ForEach(activeMentions) { mention in
-                                MentionBadgeView(mention: mention) {
-                                    activeMentions.removeAll { $0.id == mention.id }
-                                }
-                            }
+            // Input Area
+            HStack(spacing: 8) {
+                TextField("Describe the task...", text: $inputText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(1...3)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(6)
+                    .onSubmit {
+                        if !inputText.isEmpty && !agentService.isRunning {
+                            startTask()
                         }
-                        .padding(.horizontal)
-                        .padding(.vertical, 4)
                     }
-                }
                 
-                // Attached images preview
-                if !imageContextService.attachedImages.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(imageContextService.attachedImages) { image in
-                                ZStack(alignment: .topTrailing) {
-                                    Image(nsImage: image.image)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fill)
-                                        .frame(width: 60, height: 60)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    
-                                    Button(action: {
-                                        imageContextService.removeImage(image.id)
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.white)
-                                            .background(Color.black.opacity(0.6))
-                                            .clipShape(Circle())
-                                            .font(.system(size: 14))
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                    .offset(x: 4, y: -4)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                Button(action: {
+                    if !inputText.isEmpty && !agentService.isRunning {
+                        startTask()
                     }
-                    .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-                    .padding(.horizontal)
+                }) {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(agentService.isRunning || inputText.isEmpty ? .secondary : .accentColor)
                 }
-                
-                // Input field with @ mention support
-                HStack(alignment: .bottom) {
-                    Button(action: { }) {
-                        Image(systemName: "plus.circle")
-                            .font(.title3)
-                            .foregroundColor(.secondary)
+                .buttonStyle(PlainButtonStyle())
+                .disabled(agentService.isRunning || inputText.isEmpty)
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .onChange(of: agentService.pendingApproval) { oldValue, newValue in
+            // Show approval dialog when pendingApproval is set
+            showApprovalDialog = newValue != nil
+        }
+        .sheet(isPresented: $showApprovalDialog) {
+            if let decision = agentService.pendingApproval {
+                AgentApprovalDialog(
+                    decision: decision,
+                    reason: agentService.pendingApprovalReason ?? "This action requires approval",
+                    onApprove: {
+                        agentService.resumeWithApproval(true)
+                        showApprovalDialog = false
+                    },
+                    onDeny: {
+                        agentService.resumeWithApproval(false)
+                        showApprovalDialog = false
                     }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Add context")
-                    
-                    TextField("Describe your task...", text: $taskInput, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...5)
-                        .onSubmit { runTask() }
-                        .onChange(of: taskInput) { _, newValue in
-                            // Check for @ trigger for mentions
-                            if newValue.hasSuffix("@") {
-                                // Could show mention popup here if needed
-                            }
-                        }
-                    
-                    Button(action: runTask) {
-                        Image(systemName: agent.isRunning ? "stop.circle.fill" : "arrow.up.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(agent.isRunning ? .red : .purple)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .disabled(taskInput.isEmpty && activeMentions.isEmpty && imageContextService.attachedImages.isEmpty || agent.isRunning)
-                    .help(agent.isRunning ? "Stop" : "Run task")
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .onDrop(of: [.image, .fileURL], isTargeted: .constant(false)) { providers in
-                    Task {
-                        _ = await handleImageDrop(providers: providers)
-                    }
-                    return true
-                }
+                )
             }
         }
     }
     
-    private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {
-        var handled = false
+    private func startTask() {
+        let taskDescription = inputText
+        inputText = ""
+        lastStepCount = 0
         
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
-                await withCheckedContinuation { continuation in
-                    provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, error in
-                        Task { @MainActor in
-                            if let error = error {
-                                print("Error loading file URL: \(error.localizedDescription)")
-                                continuation.resume()
-                                return
-                            }
-                            
-                            if let data = item as? Data,
-                               let url = URL(dataRepresentation: data, relativeTo: nil) {
-                                _ = imageContextService.addFromFile(url)
-                            } else if let url = item as? URL {
-                                _ = imageContextService.addFromFile(url)
-                            }
-                            continuation.resume()
-                        }
-                    }
-                }
-                handled = true
-            } else if provider.hasItemConformingToTypeIdentifier("public.image") {
-                await withCheckedContinuation { continuation in
-                    provider.loadItem(forTypeIdentifier: "public.image", options: nil) { item, error in
-                        Task { @MainActor in
-                            if let error = error {
-                                print("Error loading image: \(error.localizedDescription)")
-                                continuation.resume()
-                                return
-                            }
-                            
-                            if let url = item as? URL {
-                                _ = imageContextService.addFromFile(url)
-                            } else if let data = item as? Data,
-                                      let image = NSImage(data: data) {
-                                _ = imageContextService.addImage(image, source: .dragDrop)
-                            } else if let image = item as? NSImage {
-                                _ = imageContextService.addImage(image, source: .dragDrop)
-                            }
-                            continuation.resume()
-                        }
-                    }
-                }
-                handled = true
-            }
-        }
-        
-        return handled
-    }
-    
-    private var exampleTasks: [String] {
-        [
-            "Create a simple REST API with Express",
-            "Set up a React project with TypeScript",
-            "Create a Python CLI tool for file renaming",
-            "Initialize a Swift package with tests",
-            "Add authentication to my project"
-        ]
-    }
-    
-    private func runTask() {
-        guard !taskInput.isEmpty || !activeMentions.isEmpty || !imageContextService.attachedImages.isEmpty else { return }
-        
-        // Build context from mentions
-        var context = editorViewModel.getContextForAI() ?? ""
-        let mentionContext = MentionParser.shared.buildContextFromMentions(
-            activeMentions,
+        agentService.runTask(
+            taskDescription,
             projectURL: editorViewModel.rootFolderURL,
-            selectedText: editorViewModel.editorState.selectedText,
-            terminalOutput: nil
-        )
-        context += mentionContext
-        
-        // Combine task input with context
-        var fullTask = taskInput
-        if !context.isEmpty {
-            fullTask += "\n\nContext:\n\(context)"
-        }
-        
-        let task = fullTask
-        taskInput = ""
-        activeMentions.removeAll()
-        imageContextService.clearImages()
-        
-        agent.runTask(
-            task,
-            projectURL: editorViewModel.rootFolderURL,
-            context: context.isEmpty ? nil : context,
+            context: editorViewModel.getContextForAI(),
             onStepUpdate: { step in
-                // Steps are updated in agent.steps automatically
+                // Step updated - view will automatically refresh via @Published
             },
             onComplete: { result in
                 if result.success {
-                    // Notify about created files
-                    if !result.createdFiles.isEmpty {
-                        NotificationCenter.default.post(
-                            name: NSNotification.Name("FilesCreated"),
-                            object: nil,
-                            userInfo: ["files": result.createdFiles]
-                        )
-                    }
+                    print("✅ Agent task completed successfully")
+                } else {
+                    print("❌ Agent task failed: \(result.error ?? "Unknown error")")
                 }
             }
         )
@@ -307,427 +173,216 @@ struct AgentModeView: View {
 
 struct AgentStepRow: View {
     let step: AgentStep
+    @State private var isExpanded: Bool = true
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                // Status icon
-                Image(systemName: statusIcon)
-                    .foregroundColor(statusColor)
-                    .frame(width: 20)
+            // Step Header
+            HStack(alignment: .top, spacing: 12) {
+                StatusIndicator(status: step.status)
                 
-                // Type icon
-                Image(systemName: step.type.icon)
-                    .foregroundColor(.purple)
-                
-                Text(step.type.rawValue)
-                    .font(.headline)
-                
-                Spacer()
-                
-                if step.status == .running {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                }
-            }
-            
-            Text(step.description)
-                .font(.body)
-                .foregroundColor(.secondary)
-            
-            // Output
-            if let output = step.output, !output.isEmpty {
-                ScrollView {
-                    Text(output)
-                        .font(.system(.caption, design: .monospaced))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(step.description)
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 150)
-                .padding(8)
-                .background(Color(NSColor.textBackgroundColor))
-                .cornerRadius(4)
-            }
-            
-            // Result or error
-            if let result = step.result {
-                HStack {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    Text(result)
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
-            }
-            
-            if let error = step.error {
-                HStack {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.red)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-            }
-        }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(8)
-    }
-    
-    private var statusIcon: String {
-        switch step.status {
-        case .pending: return "circle"
-        case .running: return "circle.dotted"
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
-        case .cancelled: return "slash.circle"
-        }
-    }
-    
-    private var statusColor: Color {
-        switch step.status {
-        case .pending: return .gray
-        case .running: return .blue
-        case .completed: return .green
-        case .failed: return .red
-        case .cancelled: return .orange
-        }
-    }
-}
-
-// MARK: - Terminal Execution View
-
-struct TerminalExecutionView: View {
-    @StateObject private var terminal = TerminalExecutionService.shared
-    @State private var commandInput: String = ""
-    let projectURL: URL?
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            // Output
-            ScrollView {
-                Text(terminal.output)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-            }
-            .background(Color(NSColor.textBackgroundColor))
-            
-            Divider()
-            
-            // Input
-            HStack {
-                Text("$")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(.secondary)
-                
-                TextField("Enter command...", text: $commandInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit { runCommand() }
-                
-                if terminal.isExecuting {
-                    Button(action: { terminal.cancel() }) {
-                        Image(systemName: "stop.fill")
+                    
+                    if let thought = step.output, !thought.isEmpty, step.status == .running {
+                        Text(thought)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    
+                    if let error = step.error {
+                        Text(error)
+                            .font(.caption)
                             .foregroundColor(.red)
                     }
-                    .buttonStyle(PlainButtonStyle())
-                } else {
-                    Button(action: runCommand) {
-                        Image(systemName: "return")
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .disabled(commandInput.isEmpty)
-                }
-            }
-            .padding()
-        }
-    }
-    
-    private func runCommand() {
-        guard !commandInput.isEmpty else { return }
-        
-        let command = commandInput
-        commandInput = ""
-        
-        terminal.execute(
-            command,
-            workingDirectory: projectURL,
-            environment: nil,
-            onOutput: { _ in },
-            onError: { _ in },
-            onComplete: { _ in }
-        )
-    }
-}
-
-// MARK: - Apply Changes View
-
-struct ApplyChangesView: View {
-    @StateObject private var applyService = ApplyCodeService.shared
-    @Environment(\.dismiss) private var dismiss
-    
-    let changes: [CodeChange]
-    let onApply: ([URL]) -> Void
-    
-    @State private var selectedChanges: Set<UUID>
-    
-    init(changes: [CodeChange], onApply: @escaping ([URL]) -> Void) {
-        self.changes = changes
-        self.onApply = onApply
-        self._selectedChanges = State(initialValue: Set(changes.map { $0.id }))
-    }
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "doc.badge.plus")
-                    .foregroundColor(.accentColor)
-                Text("Apply Changes")
-                    .font(.headline)
-                
-                Spacer()
-                
-                Text("\(selectedChanges.count)/\(changes.count) selected")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            
-            Divider()
-            
-            // Changes list
-            List {
-                ForEach(changes) { change in
-                    ChangeRow(
-                        change: change,
-                        isSelected: selectedChanges.contains(change.id),
-                        onToggle: {
-                            if selectedChanges.contains(change.id) {
-                                selectedChanges.remove(change.id)
-                            } else {
-                                selectedChanges.insert(change.id)
-                            }
-                        }
-                    )
-                }
-            }
-            
-            Divider()
-            
-            // Actions
-            HStack {
-                Button("Cancel") {
-                    dismiss()
-                }
-                
-                Spacer()
-                
-                Button("Select All") {
-                    selectedChanges = Set(changes.map { $0.id })
-                }
-                .buttonStyle(.bordered)
-                
-                Button("Apply Selected") {
-                    applyChanges()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedChanges.isEmpty)
-            }
-            .padding()
-        }
-        .frame(width: 500, height: 400)
-    }
-    
-    private func applyChanges() {
-        let selectedChangesList = changes.filter { selectedChanges.contains($0.id) }
-        applyService.setPendingChanges(selectedChangesList)
-        
-        applyService.applyAllChanges(
-            onProgress: { _, _ in },
-            onComplete: { result in
-                onApply(result.appliedFiles)
-                dismiss()
-            }
-        )
-    }
-}
-
-struct ChangeRow: View {
-    let change: CodeChange
-    let isSelected: Bool
-    let onToggle: () -> Void
-    
-    @State private var showDiff: Bool = false
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Button(action: onToggle) {
-                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                        .foregroundColor(isSelected ? .accentColor : .secondary)
-                }
-                .buttonStyle(PlainButtonStyle())
-                
-                Image(systemName: iconForOperation)
-                    .foregroundColor(colorForOperation)
-                
-                VStack(alignment: .leading) {
-                    Text(change.fileName)
-                        .font(.headline)
-                    Text(change.changeDescription)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                // Line changes
-                HStack(spacing: 4) {
-                    if change.addedLines > 0 {
-                        Text("+\(change.addedLines)")
+                    
+                    if let result = step.result {
+                        Text(result)
                             .font(.caption)
                             .foregroundColor(.green)
                     }
-                    if change.removedLines > 0 {
-                        Text("-\(change.removedLines)")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
                 }
                 
-                Button(action: { showDiff.toggle() }) {
-                    Image(systemName: showDiff ? "chevron.up" : "chevron.down")
-                        .font(.caption)
+                Spacer()
+                
+                // Icon for type
+                Image(systemName: step.type.icon)
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 14))
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    isExpanded.toggle()
                 }
-                .buttonStyle(PlainButtonStyle())
             }
             
-            if showDiff {
+            // Streaming Output Box
+            if isExpanded, let output = step.output, !output.isEmpty, step.status != .running || output.count > 50 {
                 ScrollView {
-                    Text(ApplyCodeService.shared.generateDiff(for: change))
+                    Text(output)
                         .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
-                .frame(height: 150)
+                .frame(maxHeight: 200)
                 .padding(8)
-                .background(Color(NSColor.textBackgroundColor))
-                .cornerRadius(4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(.vertical, 4)
-    }
-    
-    private var iconForOperation: String {
-        switch change.operationType {
-        case .create: return "plus.circle.fill"
-        case .update: return "pencil.circle.fill"
-        case .append: return "text.append"
-        case .delete: return "minus.circle.fill"
-        }
-    }
-    
-    private var colorForOperation: Color {
-        switch change.operationType {
-        case .create: return .green
-        case .update: return .blue
-        case .append: return .orange
-        case .delete: return .red
-        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(
+                    step.status == .running ? Color.blue.opacity(0.5) : Color.clear,
+                    lineWidth: step.status == .running ? 1.5 : 0
+                )
+        )
+        .shadow(
+            color: step.status == .running ? Color.blue.opacity(0.1) : Color.clear,
+            radius: 4,
+            x: 0,
+            y: 2
+        )
     }
 }
 
-// MARK: - Image Attachment View
-
-struct ImageAttachmentView: View {
-    @StateObject private var imageService = ImageContextService.shared
+struct StatusIndicator: View {
+    let status: AgentStepStatus
     
     var body: some View {
-        VStack(spacing: 8) {
-            if !imageService.attachedImages.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(imageService.attachedImages) { image in
-                            AttachedImageThumbnail(image: image) {
-                                imageService.removeImage(image.id)
-                            }
-                        }
-                    }
-                }
-                .frame(height: 60)
-            }
-            
-            HStack(spacing: 8) {
-                Button(action: { _ = imageService.addFromClipboard() }) {
-                    Label("Paste", systemImage: "doc.on.clipboard")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                Button(action: selectFile) {
-                    Label("Browse", systemImage: "folder")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                Button(action: { imageService.takeScreenshot(type: .window) }) {
-                    Label("Screenshot", systemImage: "camera.viewfinder")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                
-                if !imageService.attachedImages.isEmpty {
-                    Button(action: { imageService.clearImages() }) {
-                        Label("Clear", systemImage: "xmark")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-        }
-    }
-    
-    private func selectFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP]
-        panel.allowsMultipleSelection = true
-        
-        if panel.runModal() == .OK {
-            for url in panel.urls {
-                _ = imageService.addFromFile(url)
-            }
-        }
-    }
-}
-
-struct AttachedImageThumbnail: View {
-    let image: AttachedImage
-    let onRemove: () -> Void
-    
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Image(nsImage: image.image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 50, height: 50)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-            
-            Button(action: onRemove) {
+        Group {
+            switch status {
+            case .pending:
+                Circle()
+                    .strokeBorder(Color.gray, lineWidth: 2)
+                    .frame(width: 16, height: 16)
+            case .running:
+                ProgressView()
+                    .scaleEffect(0.7)
+                    .frame(width: 16, height: 16)
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                    .font(.system(size: 16))
+            case .failed:
                 Image(systemName: "xmark.circle.fill")
-                    .font(.caption)
-                    .foregroundColor(.white)
-                    .background(Color.black.opacity(0.5))
-                    .clipShape(Circle())
+                    .foregroundColor(.red)
+                    .font(.system(size: 16))
+            case .cancelled:
+                Image(systemName: "slash.circle")
+                    .foregroundColor(.gray)
+                    .font(.system(size: 16))
             }
-            .buttonStyle(PlainButtonStyle())
-            .offset(x: 4, y: -4)
         }
     }
 }
 
+// MARK: - Approval Dialog
+
+struct AgentApprovalDialog: View {
+    let decision: AgentDecision
+    let reason: String
+    let onApprove: () -> Void
+    let onDeny: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 24))
+                Text("Action Requires Approval")
+                    .font(.headline)
+                Spacer()
+            }
+            
+            Divider()
+            
+            // Reason
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Reason:")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Text(reason)
+                    .font(.body)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
+            // Action Details
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Action Details:")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledRow(label: "Type:", value: decision.action.capitalized)
+                    LabeledRow(label: "Description:", value: decision.description)
+                    
+                    if let command = decision.command {
+                        LabeledRow(label: "Command:", value: command)
+                    }
+                    if let filePath = decision.filePath {
+                        LabeledRow(label: "File:", value: filePath)
+                    }
+                    if let thought = decision.thought {
+                        LabeledRow(label: "Reasoning:", value: thought)
+                    }
+                }
+                .padding(12)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
+            Divider()
+            
+            // Buttons
+            HStack(spacing: 12) {
+                Button("Deny") {
+                    onDeny()
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                
+                Spacer()
+                
+                Button("Approve") {
+                    onApprove()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            }
+        }
+        .padding(24)
+        .frame(width: 500)
+    }
+}
+
+struct LabeledRow: View {
+    let label: String
+    let value: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Text(value)
+                .font(.caption)
+                .foregroundColor(.primary)
+                .textSelection(.enabled)
+        }
+    }
+}

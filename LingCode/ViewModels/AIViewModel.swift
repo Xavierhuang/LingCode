@@ -25,6 +25,7 @@ class AIViewModel: ObservableObject {
     @Published var generationProgress: ProjectGenerationProgress?
     @Published var isGeneratingProject: Bool = false
     @Published var projectMode: Bool = false
+    @Published var isSpeculating: Bool = false // Visual feedback for speculative context building
     
     private let aiService = AIService.shared
     private let stepParser = AIStepParser.shared
@@ -33,6 +34,46 @@ class AIViewModel: ObservableObject {
     
     // Reference to editor state (set by EditorViewModel)
     weak var editorViewModel: EditorViewModel?
+    
+    // Combine pipeline for speculative context
+    private var cancellables = Set<AnyCancellable>()
+    
+    init() {
+        setupSpeculativePipeline()
+    }
+    
+    private func setupSpeculativePipeline() {
+        // Watch for typing - trigger speculation when user pauses
+        $currentInput
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main) // Wait for pause
+            .removeDuplicates()
+            .filter { !$0.isEmpty && $0.count > 5 } // Don't speculate on empty or very short input
+            .sink { [weak self] query in
+                self?.triggerSpeculation(query: query)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func triggerSpeculation(query: String) {
+        guard let editorVM = editorViewModel else { return }
+        
+        let activeFile = editorVM.editorState.activeDocument?.filePath
+        let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+        let projectURL = editorVM.rootFolderURL
+        
+        // 🚀 START THE ENGINE BEFORE USER HITS ENTER
+        isSpeculating = true
+        LatencyOptimizer.shared.startSpeculativeContext(
+            activeFile: activeFile,
+            selectedText: selectedText,
+            projectURL: projectURL,
+            query: query,
+            onComplete: { [weak self] in
+                // Clear speculation flag when context is ready
+                self?.isSpeculating = false
+            }
+        )
+    }
     
     func sendMessage(context: String? = nil, projectURL: URL? = nil, images: [AttachedImage] = [], forceEditMode: Bool = false) {
         guard !currentInput.isEmpty, !isLoading else { return }
@@ -43,6 +84,7 @@ class AIViewModel: ObservableObject {
         errorMessage = nil
         createdFiles = []
         generationProgress = nil
+        isSpeculating = false // Clear speculation flag when sending message
         
         // Detect if this is a project generation request
         let isProjectRequest = detectProjectRequest(userMessage)
@@ -153,25 +195,22 @@ class AIViewModel: ObservableObject {
         let contextBuilder = CursorContextBuilder.shared
         
         // Build context from editor state (if available)
-        // Use speculative context if available for speed
+        // ⚡️ SPEED CHECK: Do we have speculative context ready?
         var editorContext = ""
-        if let editorVM = editorViewModel {
-            // Try to use speculative context (prepared while user was typing)
-            let speculativeService = SpeculativeContextService.shared
-            let activeFile = editorVM.editorState.activeDocument?.filePath
-            let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+        if let speculative = LatencyOptimizer.shared.getSpeculativeContext() {
+            print("⚡️ SPEED WIN: Used Speculative Context (0ms latency)")
+            editorContext = speculative
             
-            // Check if we have prepared context that matches
-            if let prepared = speculativeService.preparedContext,
-               speculativeService.lastQuery.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) == userMessage.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
-                // Use prepared context (fast path - saved ~500ms)
-                editorContext = prepared
-                speculativeService.clearPreparedContext() // Clear after use
-                print("🚀 Using Speculative Context (Saved ~500ms)")
-            } else {
-                // Cold start - build context now using ContextRankingService (includes semantic search)
-                // Clear any stale prepared context
-                speculativeService.clearPreparedContext()
+            // Clear it so we don't use stale data next time
+            LatencyOptimizer.shared.clearSpeculativeContext()
+        } else {
+            print("🐢 COLD START: Building context manually...")
+            // Fallback to standard (slow) builder
+            if let editorVM = editorViewModel {
+                // Use ContextRankingService for comprehensive context (includes semantic search)
+                let activeFile = editorVM.editorState.activeDocument?.filePath
+                let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+                
                 editorContext = ContextRankingService.shared.buildContext(
                     activeFile: activeFile,
                     selectedRange: selectedText,
@@ -179,26 +218,25 @@ class AIViewModel: ObservableObject {
                     projectURL: projectURL,
                     query: userMessage
                 )
-                print("❄️ Speculative miss - Built Cold Context")
-            }
-            
-            // Also add Cursor-style context for compatibility (has some unique info like git diff)
-            let cursorContext = contextBuilder.buildContext(
-                editorState: editorVM.editorState,
-                cursorPosition: editorVM.editorState.cursorPosition,
-                selectedText: editorVM.editorState.selectedText,
-                projectURL: projectURL,
-                includeDiagnostics: true,
-                includeGitDiff: true,
-                includeFileGraph: true
-            )
-            // Merge both contexts (ranked context is primary, cursor context supplements)
-            if !cursorContext.isEmpty {
-                if editorContext.isEmpty {
-                    editorContext = cursorContext
-                } else {
-                    // Append cursor context if it has unique information
-                    editorContext = editorContext + "\n\n" + cursorContext
+                
+                // Also add Cursor-style context for compatibility (has some unique info like git diff)
+                let cursorContext = contextBuilder.buildContext(
+                    editorState: editorVM.editorState,
+                    cursorPosition: editorVM.editorState.cursorPosition,
+                    selectedText: editorVM.editorState.selectedText,
+                    projectURL: projectURL,
+                    includeDiagnostics: true,
+                    includeGitDiff: true,
+                    includeFileGraph: true
+                )
+                // Merge both contexts (ranked context is primary, cursor context supplements)
+                if !cursorContext.isEmpty {
+                    if editorContext.isEmpty {
+                        editorContext = cursorContext
+                    } else {
+                        // Append cursor context if it has unique information
+                        editorContext = editorContext + "\n\n" + cursorContext
+                    }
                 }
             }
         }

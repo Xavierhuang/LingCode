@@ -98,9 +98,8 @@ struct AIChatView: View {
                     // Switch between views based on mode
                     switch viewMode {
                     case .agent:
-                        // Agent Mode - Full interactive experience with thinking, code generation, and summaries
-                        // Use CursorStreamingView for the full experience
-                        CursorStreamingView(viewModel: viewModel, editorViewModel: editorViewModel)
+                        // Agent Mode - Autonomous ReAct Agent with iterative thinking
+                        AgentModeView(editorViewModel: editorViewModel)
                         
                     case .plan:
                         // Plan Mode - Show planning/thinking process

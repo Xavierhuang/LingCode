@@ -222,13 +222,19 @@ final class EditIntentCoordinator: ObservableObject {
         // PARSER ROBUSTNESS: Parse with isLoading flag to ensure only complete blocks are accepted when done
         // Use contentToParse (may be recovered content if formatting violations were detected)
         let (parsedFiles, parsedCommands) = await Task.detached(priority: .userInitiated) {
-            let commands = TerminalExecutionService.shared.extractCommands(from: contentToParse)
-            let files = StreamingContentParser.shared.parseContent(
-                contentToParse,
-                isLoading: isLoading, // Critical: false when streaming completes, ensures only complete blocks
-                projectURL: projectURL,
-                actions: actions
-            )
+            // Access TerminalExecutionService from MainActor since it's an ObservableObject
+            let commands = await Task { @MainActor in
+                TerminalExecutionService.shared.extractCommands(from: contentToParse)
+            }.value
+            // Access StreamingContentParser from MainActor to avoid actor isolation warnings
+            let files = await Task { @MainActor in
+                StreamingContentParser.shared.parseContent(
+                    contentToParse,
+                    isLoading: isLoading, // Critical: false when streaming completes, ensures only complete blocks
+                    projectURL: projectURL,
+                    actions: actions
+                )
+            }.value
             
             // LOGGING: Track parsing results for debugging
             print("📊 PARSER RESULTS:")
@@ -277,10 +283,8 @@ final class EditIntentCoordinator: ObservableObject {
                 intentCategory: intentCategory
             )
             
-            // Update state asynchronously (after view updates)
-            await MainActor.run {
-                self.currentResult = result
-            }
+            // Update state (we're already on MainActor since function is @MainActor)
+            self.currentResult = result
             
             return result
         }

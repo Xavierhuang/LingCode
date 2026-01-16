@@ -431,7 +431,7 @@ class GraphiteService {
         """
         
         let commitResult = TerminalExecutionService.shared.executeSync(
-            "git commit -m \(commitMessage.shellEscaped)",
+            "git commit -m \(commitMessage.shellEscaped())",
             workingDirectory: directory
         )
         
@@ -525,7 +525,8 @@ struct StackedPR {
     let description: String
     
     var displayDescription: String {
-        "PR \(prNumber)/\(totalPRs): \(layerName) - \(changes.count) files, \(totalLines) lines"
+        let lines = totalLines
+        return "PR \(prNumber)/\(totalPRs): \(layerName) - \(changes.count) files, \(lines) lines"
     }
     
     var totalLines: Int {

@@ -544,7 +544,6 @@ public class InlineEditSessionModel: ObservableObject {
                 }
                 
                 // Preserve selection state for existing proposals, default to true for new ones
-                let existingIds = Set(self.proposedEdits.map { $0.id })
                 let newIds = Set(newProposals.map { $0.id })
                 
                 // Add default selection (true) for new proposals

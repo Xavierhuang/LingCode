@@ -259,7 +259,9 @@ final class StreamingUpdateCoordinator: ObservableObject {
         lastParsedContentHash = contentHash
         
         // Parse and validate using EditIntentCoordinator (ARCHITECTURE: All parsing/validation outside views)
-        pendingParseTask = Task(priority: .userInitiated) {
+        pendingParseTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            
             // Capture context values
             let isLoading = context.isLoading
             let projectURL = context.projectURL
@@ -270,17 +272,14 @@ final class StreamingUpdateCoordinator: ObservableObject {
             // AGENT STATE: Only parse in validating state (after streaming completes)
             // Do NOT parse during streaming/blocked/empty states
             // Check agentState on MainActor since we're in a Task
-            let shouldParse = await MainActor.run {
-                agentState == .validating || agentState == .ready(edits: [])
-            }
+            let currentAgentState = self.agentState
+            let shouldParse = currentAgentState == .validating || currentAgentState == .ready(edits: [])
             
             guard shouldParse else {
-                await MainActor.run {
-                    self.isParsing = false
-                    // SAFETY: If we're not parsing but still in .validating, exit to terminal state
-                    if case .validating = self.agentState {
-                        self.agentState = .empty
-                    }
+                self.isParsing = false
+                // SAFETY: If we're not parsing but still in .validating, exit to terminal state
+                if case .validating = self.agentState {
+                    self.agentState = .empty
                 }
                 return
             }
@@ -294,14 +293,13 @@ final class StreamingUpdateCoordinator: ObservableObject {
                 isLoading: isLoading,
                 projectURL: projectURL,
                 actions: actions,
-                httpStatus: await MainActor.run { AIService.shared.lastHTTPStatusCode } // Completion gate requires real HTTP status
+                httpStatus: AIService.shared.lastHTTPStatusCode // Completion gate requires real HTTP status
             )
             
             // AGENT STATE: Update state based on validation result
             // REQUIREMENT: Validation MUST always resolve to a terminal state
             // Terminal states: .ready(edits), .empty, .blocked(reason)
-            await MainActor.run {
-                self.isParsing = false
+            self.isParsing = false
                 
                 // Handle validation errors - ALWAYS set terminal state
                 if !editResult.isValid {
@@ -403,7 +401,6 @@ final class StreamingUpdateCoordinator: ObservableObject {
                     // Only clear if we have no existing files AND no new files
                     self.parsedFiles = []
                 }
-            }
         }
     }
     

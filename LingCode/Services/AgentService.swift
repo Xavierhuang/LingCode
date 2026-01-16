@@ -2,545 +2,46 @@
 //  AgentService.swift
 //  LingCode
 //
-//  Created by Weijia Huang on 11/23/25.
+//  Created for Phase 6: Autonomous "ReAct" Agent
+//  Beats Cursor by self-correcting errors dynamically.
 //
 
 import Foundation
 import Combine
 
-/// Agent Mode - Autonomous multi-step task completion like Cursor
-class AgentService: ObservableObject {
-    static let shared = AgentService()
-    
-    @Published var isRunning: Bool = false
-    @Published var currentTask: AgentTask?
-    @Published var taskHistory: [AgentTask] = []
-    @Published var currentStep: AgentStep?
-    @Published var steps: [AgentStep] = []
-    
-    private let aiService = AIService.shared
-    private let terminalService = TerminalExecutionService.shared
-    private let codeGenerator = CodeGeneratorService.shared
-    private let webSearch = WebSearchService.shared
-    
-    private var isCancelled = false
-    
-    private init() {}
-    
-    // MARK: - Agent Execution
-    
-    /// Run an agent task
-    func runTask(
-        _ taskDescription: String,
-        projectURL: URL?,
-        context: String?,
-        onStepUpdate: @escaping (AgentStep) -> Void,
-        onComplete: @escaping (AgentTaskResult) -> Void
-    ) {
-        guard !isRunning else {
-            onComplete(AgentTaskResult(success: false, error: "Agent is already running"))
-            return
-        }
-        
-        isCancelled = false
-        isRunning = true
-        steps = []
-        
-        let task = AgentTask(
-            description: taskDescription,
-            projectURL: projectURL,
-            startTime: Date()
-        )
-        currentTask = task
-        
-        // Add planning step
-        let planningStep = AgentStep(
-            type: .planning,
-            description: "Analyzing task and creating plan...",
-            status: .running
-        )
-        addStep(planningStep, onUpdate: onStepUpdate)
-        
-        // Get AI to create a plan
-        let planningPrompt = buildPlanningPrompt(taskDescription, context: context, projectURL: projectURL)
-        
-        aiService.sendMessage(
-            planningPrompt,
-            context: context,
-            onResponse: { [weak self] response in
-                guard let self = self, !self.isCancelled else { return }
-                
-                // Parse the plan
-                let plan = self.parsePlan(from: response)
-                
-                // Update planning step
-                self.updateStep(planningStep.id, status: .completed, result: "Created \(plan.count) step plan")
-                if let updatedStep = self.steps.first(where: { $0.id == planningStep.id }) {
-                    onStepUpdate(updatedStep)
-                }
-                
-                // Execute the plan
-                self.executePlan(
-                    plan,
-                    projectURL: projectURL,
-                    context: context,
-                    onStepUpdate: onStepUpdate,
-                    onComplete: { result in
-                        self.isRunning = false
-                        self.currentTask = nil
-                        onComplete(result)
-                    }
-                )
-            },
-            onError: { error in
-                self.updateStep(planningStep.id, status: .failed, error: error.localizedDescription)
-                if let updatedStep = self.steps.first(where: { $0.id == planningStep.id }) {
-                    onStepUpdate(updatedStep)
-                }
-                self.isRunning = false
-                onComplete(AgentTaskResult(success: false, error: error.localizedDescription))
-            }
-        )
-    }
-    
-    /// Cancel the current task
-    func cancel() {
-        isCancelled = true
-        aiService.cancelCurrentRequest()
-        terminalService.cancel()
-        
-        if let currentStep = currentStep {
-            updateStep(currentStep.id, status: .cancelled)
-        }
-        
-        isRunning = false
-        currentTask = nil
-    }
-    
-    // MARK: - Plan Execution
-    
-    private func executePlan(
-        _ plan: [PlanStep],
-        projectURL: URL?,
-        context: String?,
-        onStepUpdate: @escaping (AgentStep) -> Void,
-        onComplete: @escaping (AgentTaskResult) -> Void
-    ) {
-        executePlanStep(
-            plan,
-            index: 0,
-            projectURL: projectURL,
-            context: context,
-            createdFiles: [],
-            onStepUpdate: onStepUpdate,
-            onComplete: onComplete
-        )
-    }
-    
-    private func executePlanStep(
-        _ plan: [PlanStep],
-        index: Int,
-        projectURL: URL?,
-        context: String?,
-        createdFiles: [URL],
-        onStepUpdate: @escaping (AgentStep) -> Void,
-        onComplete: @escaping (AgentTaskResult) -> Void
-    ) {
-        guard !isCancelled else {
-            onComplete(AgentTaskResult(success: false, error: "Task cancelled", createdFiles: createdFiles))
-            return
-        }
-        
-        guard index < plan.count else {
-            // All steps completed
-            onComplete(AgentTaskResult(success: true, createdFiles: createdFiles))
-            return
-        }
-        
-        let planStep = plan[index]
-        let agentStep = AgentStep(
-            type: planStep.type,
-            description: planStep.description,
-            status: .running
-        )
-        addStep(agentStep, onUpdate: onStepUpdate)
-        currentStep = agentStep
-        
-        executeAction(
-            planStep,
-            projectURL: projectURL,
-            context: context,
-            onOutput: { output in
-                self.updateStep(agentStep.id, output: output)
-                if let updatedStep = self.steps.first(where: { $0.id == agentStep.id }) {
-                    onStepUpdate(updatedStep)
-                }
-            },
-            onComplete: { success, newFiles, error in
-                if success {
-                    self.updateStep(agentStep.id, status: .completed, result: "Completed")
-                } else {
-                    self.updateStep(agentStep.id, status: .failed, error: error)
-                }
-                if let updatedStep = self.steps.first(where: { $0.id == agentStep.id }) {
-                    onStepUpdate(updatedStep)
-                }
-                
-                var allCreatedFiles = createdFiles
-                allCreatedFiles.append(contentsOf: newFiles)
-                
-                // Continue to next step (even on failure for non-critical steps)
-                self.executePlanStep(
-                    plan,
-                    index: index + 1,
-                    projectURL: projectURL,
-                    context: context,
-                    createdFiles: allCreatedFiles,
-                    onStepUpdate: onStepUpdate,
-                    onComplete: onComplete
-                )
-            }
-        )
-    }
-    
-    private func executeAction(
-        _ step: PlanStep,
-        projectURL: URL?,
-        context: String?,
-        onOutput: @escaping (String) -> Void,
-        onComplete: @escaping (Bool, [URL], String?) -> Void
-    ) {
-        switch step.type {
-        case .codeGeneration:
-            executeCodeGeneration(
-                step.description,
-                projectURL: projectURL,
-                context: context,
-                onOutput: onOutput,
-                onComplete: onComplete
-            )
-            
-        case .terminal:
-            executeTerminalCommand(
-                step.command ?? step.description,
-                projectURL: projectURL,
-                onOutput: onOutput,
-                onComplete: onComplete
-            )
-            
-        case .webSearch:
-            executeWebSearch(
-                step.query ?? step.description,
-                onOutput: onOutput,
-                onComplete: onComplete
-            )
-            
-        case .fileOperation:
-            executeFileOperation(
-                step,
-                projectURL: projectURL,
-                onOutput: onOutput,
-                onComplete: onComplete
-            )
-            
-        case .thinking, .planning:
-            // These are informational steps
-            onComplete(true, [], nil)
-        }
-    }
-    
-    // MARK: - Action Implementations
-    
-    private func executeCodeGeneration(
-        _ description: String,
-        projectURL: URL?,
-        context: String?,
-        onOutput: @escaping (String) -> Void,
-        onComplete: @escaping (Bool, [URL], String?) -> Void
-    ) {
-        let prompt = """
-        Generate code for: \(description)
-        
-        Requirements:
-        - Provide complete, working code
-        - Include file paths for each code block
-        - Use the format: `path/to/file.ext`:
-        ```language
-        code
-        ```
-        """
-        
-        aiService.sendMessage(
-            prompt,
-            context: context,
-            onResponse: { response in
-                onOutput("AI generated code response")
-                
-                // Parse and create files
-                let operations = self.codeGenerator.extractFileOperations(from: response, projectURL: projectURL)
-                var createdFiles: [URL] = []
-                
-                for operation in operations {
-                    let fileURL = URL(fileURLWithPath: operation.filePath)
-                    do {
-                        let directory = fileURL.deletingLastPathComponent()
-                        if !FileManager.default.fileExists(atPath: directory.path) {
-                            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                        }
-                        try (operation.content ?? "").write(to: fileURL, atomically: true, encoding: .utf8)
-                        createdFiles.append(fileURL)
-                        onOutput("Created: \(fileURL.lastPathComponent)")
-                    } catch {
-                        onOutput("Failed to create: \(fileURL.lastPathComponent)")
-                    }
-                }
-                
-                onComplete(true, createdFiles, nil)
-            },
-            onError: { error in
-                onComplete(false, [], error.localizedDescription)
-            }
-        )
-    }
-    
-    private func executeTerminalCommand(
-        _ command: String,
-        projectURL: URL?,
-        onOutput: @escaping (String) -> Void,
-        onComplete: @escaping (Bool, [URL], String?) -> Void
-    ) {
-        onOutput("$ \(command)\n")
-        
-        terminalService.execute(
-            command,
-            workingDirectory: projectURL,
-            environment: nil,
-            onOutput: { output in
-                onOutput(output)
-            },
-            onError: { error in
-                onOutput(error)
-            },
-            onComplete: { exitCode in
-                onComplete(exitCode == 0, [], exitCode != 0 ? "Exit code: \(exitCode)" : nil)
-            }
-        )
-    }
-    
-    private func executeWebSearch(
-        _ query: String,
-        onOutput: @escaping (String) -> Void,
-        onComplete: @escaping (Bool, [URL], String?) -> Void
-    ) {
-        onOutput("Searching: \(query)\n")
-        
-        webSearch.search(query: query, maxResults: 3) { results in
-            if results.isEmpty {
-                onOutput("No results found\n")
-            } else {
-                for result in results {
-                    onOutput("- \(result.title)\n  \(result.url)\n")
-                }
-            }
-            onComplete(true, [], nil)
-        }
-    }
-    
-    private func executeFileOperation(
-        _ step: PlanStep,
-        projectURL: URL?,
-        onOutput: @escaping (String) -> Void,
-        onComplete: @escaping (Bool, [URL], String?) -> Void
-    ) {
-        guard let filePath = step.filePath else {
-            onComplete(false, [], "No file path specified")
-            return
-        }
-        
-        let fileURL: URL
-        if filePath.hasPrefix("/") {
-            fileURL = URL(fileURLWithPath: filePath)
-        } else if let project = projectURL {
-            fileURL = project.appendingPathComponent(filePath)
-        } else {
-            onComplete(false, [], "No project URL")
-            return
-        }
-        
-        do {
-            if step.description.lowercased().contains("delete") {
-                try FileManager.default.removeItem(at: fileURL)
-                onOutput("Deleted: \(fileURL.lastPathComponent)")
-                onComplete(true, [], nil)
-            } else if step.description.lowercased().contains("create") {
-                let directory = fileURL.deletingLastPathComponent()
-                if !FileManager.default.fileExists(atPath: directory.path) {
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                }
-                try "".write(to: fileURL, atomically: true, encoding: .utf8)
-                onOutput("Created: \(fileURL.lastPathComponent)")
-                onComplete(true, [fileURL], nil)
-            } else {
-                onComplete(true, [], nil)
-            }
-        } catch {
-            onComplete(false, [], error.localizedDescription)
-        }
-    }
-    
-    // MARK: - Planning
-    
-    private func buildPlanningPrompt(_ task: String, context: String?, projectURL: URL?) -> String {
-        var prompt = """
-        You are an AI coding agent. Create a step-by-step plan to complete this task:
-        
-        TASK: \(task)
-        
-        """
-        
-        if let project = projectURL {
-            prompt += "PROJECT: \(project.path)\n\n"
-        }
-        
-        prompt += """
-        Respond with a JSON plan in this format:
-        ```json
-        {
-          "steps": [
-            {
-              "type": "codeGeneration|terminal|webSearch|fileOperation",
-              "description": "What this step does",
-              "command": "command to run (for terminal type)",
-              "query": "search query (for webSearch type)",
-              "filePath": "file path (for fileOperation type)"
-            }
-          ]
-        }
-        ```
-        
-        Available step types:
-        - codeGeneration: Generate code files
-        - terminal: Run shell commands (npm install, pip install, etc.)
-        - webSearch: Search the web for information
-        - fileOperation: Create, delete, or modify files
-        
-        Create a practical, executable plan.
-        """
-        
-        return prompt
-    }
-    
-    private func parsePlan(from response: String) -> [PlanStep] {
-        // Try to extract JSON from response
-        let jsonPattern = #"```json\s*([\s\S]*?)```"#
-        
-        if let regex = try? NSRegularExpression(pattern: jsonPattern, options: []),
-           let match = regex.firstMatch(in: response, options: [], range: NSRange(response.startIndex..., in: response)),
-           match.numberOfRanges > 1,
-           let jsonRange = Range(match.range(at: 1), in: response) {
-            
-            let jsonString = String(response[jsonRange])
-            
-            if let data = jsonString.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let stepsArray = json["steps"] as? [[String: Any]] {
-                
-                return stepsArray.compactMap { stepDict -> PlanStep? in
-                    guard let typeString = stepDict["type"] as? String,
-                          let description = stepDict["description"] as? String else {
-                        return nil
-                    }
-                    
-                    let type: AgentStepType
-                    switch typeString.lowercased() {
-                    case "codegeneration", "code": type = .codeGeneration
-                    case "terminal", "command", "shell": type = .terminal
-                    case "websearch", "search", "web": type = .webSearch
-                    case "fileoperation", "file": type = .fileOperation
-                    default: type = .thinking
-                    }
-                    
-                    return PlanStep(
-                        type: type,
-                        description: description,
-                        command: stepDict["command"] as? String,
-                        query: stepDict["query"] as? String,
-                        filePath: stepDict["filePath"] as? String
-                    )
-                }
-            }
-        }
-        
-        // Fallback: create a simple code generation step
-        return [
-            PlanStep(type: .codeGeneration, description: "Generate code for the task")
-        ]
-    }
-    
-    // MARK: - Step Management
-    
-    private func addStep(_ step: AgentStep, onUpdate: @escaping (AgentStep) -> Void) {
-        DispatchQueue.main.async {
-            self.steps.append(step)
-            onUpdate(step)
-        }
-    }
-    
-    private func updateStep(
-        _ id: UUID,
-        status: AgentStepStatus? = nil,
-        result: String? = nil,
-        error: String? = nil,
-        output: String? = nil
-    ) {
-        DispatchQueue.main.async {
-            if let index = self.steps.firstIndex(where: { $0.id == id }) {
-                var step = self.steps[index]
-                if let status = status { step.status = status }
-                if let result = result { step.result = result }
-                if let error = error { step.error = error }
-                if let output = output { step.output = (step.output ?? "") + output }
-                self.steps[index] = step
-            }
-        }
-    }
-}
-
-// MARK: - Supporting Types
+// MARK: - Models
 
 struct AgentTask: Identifiable {
     let id = UUID()
     let description: String
     let projectURL: URL?
     let startTime: Date
-    var endTime: Date?
 }
 
 struct AgentStep: Identifiable {
     let id = UUID()
     let type: AgentStepType
-    let description: String
+    var description: String
     var status: AgentStepStatus
+    var output: String?
     var result: String?
     var error: String?
-    var output: String?
+    var timestamp: Date = Date()
 }
 
-enum AgentStepType: String {
-    case planning = "Planning"
-    case thinking = "Thinking"
-    case codeGeneration = "Code Generation"
-    case terminal = "Terminal"
-    case webSearch = "Web Search"
-    case fileOperation = "File Operation"
+enum AgentStepType {
+    case thinking
+    case terminal
+    case codeGeneration
+    case webSearch
+    case fileOperation
     
     var icon: String {
         switch self {
-        case .planning: return "list.bullet.rectangle"
-        case .thinking: return "brain.head.profile"
-        case .codeGeneration: return "doc.text"
+        case .thinking: return "brain"
         case .terminal: return "terminal"
-        case .webSearch: return "globe"
+        case .codeGeneration: return "doc.text"
+        case .webSearch: return "magnifyingglass"
         case .fileOperation: return "folder"
         }
     }
@@ -552,39 +53,558 @@ enum AgentStepStatus {
     case completed
     case failed
     case cancelled
-    
-    var icon: String {
-        switch self {
-        case .pending: return "circle"
-        case .running: return "circle.dotted"
-        case .completed: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
-        case .cancelled: return "slash.circle"
-        }
-    }
-    
-    var color: String {
-        switch self {
-        case .pending: return "gray"
-        case .running: return "blue"
-        case .completed: return "green"
-        case .failed: return "red"
-        case .cancelled: return "orange"
-        }
-    }
-}
-
-struct PlanStep {
-    let type: AgentStepType
-    let description: String
-    var command: String?
-    var query: String?
-    var filePath: String?
 }
 
 struct AgentTaskResult {
     let success: Bool
-    var error: String?
-    var createdFiles: [URL] = []
+    let error: String?
+    let steps: [AgentStep]
 }
 
+struct AgentDecision: Codable, Equatable {
+    let action: String
+    let description: String
+    let command: String?
+    let query: String?
+    let filePath: String?
+    let code: String?
+    let thought: String?
+}
+
+// MARK: - AgentService
+
+class AgentService: ObservableObject {
+    static let shared = AgentService()
+    
+    @Published var isRunning: Bool = false
+    @Published var currentTask: AgentTask?
+    @Published var steps: [AgentStep] = []
+    
+    // 🛑 Safety Brake State
+    @Published var pendingApproval: AgentDecision?
+    @Published var pendingApprovalReason: String?
+    
+    // Internal services
+    private let aiService = AIService.shared
+    private let terminalService = TerminalExecutionService.shared
+    private let webSearch = WebSearchService.shared
+    
+    private var isCancelled = false
+    private var iterationCount = 0
+    private let MAX_ITERATIONS = 20
+    
+    // Store context for resuming after approval
+    private class PendingExecutionContext {
+        let decision: AgentDecision
+        let task: AgentTask
+        let projectURL: URL?
+        let originalContext: String?
+        let onStepUpdate: (AgentStep) -> Void
+        let onComplete: (AgentTaskResult) -> Void
+        let stepId: UUID
+        
+        init(decision: AgentDecision, task: AgentTask, projectURL: URL?, originalContext: String?, onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void, stepId: UUID) {
+            self.decision = decision
+            self.task = task
+            self.projectURL = projectURL
+            self.originalContext = originalContext
+            self.onStepUpdate = onStepUpdate
+            self.onComplete = onComplete
+            self.stepId = stepId
+        }
+    }
+    private var pendingExecutionContext: PendingExecutionContext?
+    
+    private init() {}
+    
+    // MARK: - Public API
+    
+    func cancel() {
+        isCancelled = true
+        if let lastStep = steps.last, lastStep.status == .running {
+            updateStep(lastStep.id, status: .cancelled)
+        }
+        pendingApproval = nil // Clear any pending approvals
+        pendingApprovalReason = nil // Clear approval reason
+        pendingExecutionContext = nil
+    }
+    
+    func runTask(
+        _ taskDescription: String,
+        projectURL: URL?,
+        context: String?,
+        onStepUpdate: @escaping (AgentStep) -> Void,
+        onComplete: @escaping (AgentTaskResult) -> Void
+    ) {
+        guard !isRunning else { return }
+        
+        isCancelled = false
+        isRunning = true
+        steps = []
+        iterationCount = 0
+        pendingApproval = nil
+        pendingApprovalReason = nil
+        pendingExecutionContext = nil
+        
+        let task = AgentTask(description: taskDescription, projectURL: projectURL, startTime: Date())
+        currentTask = task
+        
+        // Start the ReAct Loop
+        runNextIteration(
+            task: task,
+            projectURL: projectURL,
+            originalContext: context,
+            onStepUpdate: onStepUpdate,
+            onComplete: onComplete
+        )
+    }
+    
+    // MARK: - The "Brain" Loop
+    
+    private func runNextIteration(
+        task: AgentTask,
+        projectURL: URL?,
+        originalContext: String?,
+        onStepUpdate: @escaping (AgentStep) -> Void,
+        onComplete: @escaping (AgentTaskResult) -> Void
+    ) {
+        // 1. Safety Checks
+        guard !isCancelled else {
+            finalize(success: false, error: "Cancelled by user", onComplete: onComplete)
+            return
+        }
+        
+        if iterationCount >= MAX_ITERATIONS {
+            finalize(success: false, error: "Max iterations reached", onComplete: onComplete)
+            return
+        }
+        iterationCount += 1
+        
+        // 2. Build History (The "Memory")
+        let history = steps.map { step in
+            var historyLine = "Step: \(step.description)\nStatus: \(step.status)"
+            if let output = step.output, !output.isEmpty {
+                historyLine += "\nOutput: \(output.prefix(500))"
+            }
+            if let error = step.error {
+                historyLine += "\nError: \(error)"
+            }
+            return historyLine
+        }.joined(separator: "\n---\n")
+        
+        // 3. Prompt the LLM ("What should I do next?")
+        let prompt = """
+        You are an autonomous coding agent.
+        Goal: \(task.description)
+        
+        History:
+        \(history.isEmpty ? "No previous steps." : history)
+        
+        Analyze the history. If previous step failed, fix it.
+        If task is done, return "DONE".
+        Otherwise, determine the SINGLE next step.
+        
+        Respond ONLY with JSON:
+        {
+            "action": "code|terminal|search|done",
+            "description": "Short description",
+            "command": "shell command (if terminal)",
+            "query": "search query (if search)",
+            "filePath": "path (if code)",
+            "code": "code content (if code)",
+            "thought": "Why I am choosing this"
+        }
+        """
+        
+        // Add "Thinking" Step (Visual Feedback)
+        let thinkingStep = AgentStep(
+            type: .thinking,
+            description: "Analyzing next step...",
+            status: .running
+        )
+        addStep(thinkingStep, onUpdate: onStepUpdate)
+        
+        // Use AIService to get response
+        var accumulatedResponse = ""
+        aiService.streamMessage(
+            prompt,
+            context: originalContext,
+            systemPrompt: "You are an autonomous coding agent. Always respond with valid JSON only.",
+            onChunk: { [weak self] chunk in
+                accumulatedResponse += chunk
+                // Update thinking step with partial response
+                self?.updateStep(thinkingStep.id, output: accumulatedResponse)
+            },
+            onComplete: { [weak self] in
+                guard let self = self else { return }
+                
+                // Remove "Thinking" placeholder
+                self.removeStep(thinkingStep.id)
+                
+                // Parse Decision
+                guard let decision = self.parseDecision(from: accumulatedResponse) else {
+                    // Retry if JSON failed
+                    let errorStep = AgentStep(
+                        type: .thinking,
+                        description: "Failed to parse decision, retrying...",
+                        status: .failed,
+                        error: "Invalid JSON response"
+                    )
+                    self.addStep(errorStep, onUpdate: onStepUpdate)
+                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                    return
+                }
+                
+                if decision.action.lowercased() == "done" {
+                    self.finalize(success: true, onComplete: onComplete)
+                    return
+                }
+                
+                // 4. Create Actual Step
+                let nextStep = AgentStep(
+                    type: self.mapType(decision.action),
+                    description: decision.description,
+                    status: .running,
+                    output: decision.thought // Show thought process initially
+                )
+                self.addStep(nextStep, onUpdate: onStepUpdate)
+                
+                // 🛑 SAFETY INTERCEPTION
+                let safetyCheck = AgentSafetyGuard.shared.check(decision)
+                
+                switch safetyCheck {
+                case .blocked(let reason):
+                    // Blocked - mark as failed and continue loop
+                    self.updateStep(nextStep.id, status: .failed, error: "Blocked: \(reason)")
+                    onStepUpdate(nextStep)
+                    // Continue loop - agent will see failure and try something else
+                    self.runNextIteration(
+                        task: task,
+                        projectURL: projectURL,
+                        originalContext: originalContext,
+                        onStepUpdate: onStepUpdate,
+                        onComplete: onComplete
+                    )
+                    
+                case .needsApproval(let reason):
+                    // PAUSE and show approval UI
+                    DispatchQueue.main.async {
+                        self.pendingApproval = decision
+                        self.pendingApprovalReason = reason
+                        // Store context for resuming after approval
+                        self.pendingExecutionContext = PendingExecutionContext(
+                            decision: decision,
+                            task: task,
+                            projectURL: projectURL,
+                            originalContext: originalContext,
+                            onStepUpdate: onStepUpdate,
+                            onComplete: onComplete,
+                            stepId: nextStep.id
+                        )
+                    }
+                    
+                case .safe:
+                    // Safe - execute immediately
+                    self.executeDecision(
+                        decision,
+                        projectURL: projectURL,
+                        onOutput: { output in
+                            self.updateStep(nextStep.id, output: output)
+                            onStepUpdate(nextStep)
+                        },
+                        onComplete: { success, output in
+                            self.updateStep(
+                                nextStep.id,
+                                status: success ? .completed : .failed,
+                                result: success ? "Success" : nil,
+                                error: success ? nil : output
+                            )
+                            onStepUpdate(nextStep)
+                            
+                            // 6. LOOP (Recursive)
+                            self.runNextIteration(
+                                task: task,
+                                projectURL: projectURL,
+                                originalContext: originalContext,
+                                onStepUpdate: onStepUpdate,
+                                onComplete: onComplete
+                            )
+                        }
+                    )
+                }
+            },
+            onError: { [weak self] error in
+                self?.finalize(success: false, error: error.localizedDescription, onComplete: onComplete)
+            }
+        )
+    }
+    
+    // MARK: - Action Execution
+    
+    private func executeDecision(
+        _ decision: AgentDecision,
+        projectURL: URL?,
+        onOutput: @escaping (String) -> Void,
+        onComplete: @escaping (Bool, String) -> Void
+    ) {
+        switch decision.action.lowercased() {
+        case "terminal":
+            guard let cmd = decision.command, !cmd.isEmpty else {
+                onComplete(false, "No command provided")
+                return
+            }
+            terminalService.execute(
+                cmd,
+                workingDirectory: projectURL,
+                onOutput: { output in
+                    onOutput(output)
+                },
+                onError: { error in
+                    onOutput("Error: \(error)")
+                },
+                onComplete: { exitCode in
+                    onComplete(exitCode == 0, "Exit code: \(exitCode)")
+                }
+            )
+            
+        case "code":
+            guard let filePath = decision.filePath, let code = decision.code else {
+                onComplete(false, "Missing filePath or code")
+                return
+            }
+            
+            // Write code to file
+            let fullPath: URL
+            if let projectURL = projectURL {
+                fullPath = projectURL.appendingPathComponent(filePath)
+            } else {
+                fullPath = URL(fileURLWithPath: filePath)
+            }
+            
+            do {
+                try code.write(to: fullPath, atomically: true, encoding: .utf8)
+                onOutput("File written: \(filePath)")
+                onComplete(true, "File written successfully")
+            } catch {
+                onComplete(false, "Failed to write file: \(error.localizedDescription)")
+            }
+            
+        case "search":
+            guard let query = decision.query, !query.isEmpty else {
+                onComplete(false, "No search query provided")
+                return
+            }
+            
+            webSearch.search(query: query) { results in
+                let summary = results.prefix(5).map { "• \($0.title): \($0.snippet.prefix(100))" }.joined(separator: "\n")
+                onOutput("Search results:\n\(summary)")
+                onComplete(true, "Found \(results.count) results")
+            }
+            
+        default:
+            onComplete(false, "Unknown action: \(decision.action)")
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private func finalize(success: Bool, error: String? = nil, onComplete: @escaping (AgentTaskResult) -> Void) {
+        DispatchQueue.main.async {
+            self.isRunning = false
+            let result = AgentTaskResult(success: success, error: error, steps: self.steps)
+            self.currentTask = nil
+            onComplete(result)
+        }
+    }
+    
+    private func addStep(_ step: AgentStep, onUpdate: @escaping (AgentStep) -> Void) {
+        DispatchQueue.main.async {
+            self.steps.append(step)
+            onUpdate(step)
+        }
+    }
+    
+    private func updateStep(_ id: UUID, status: AgentStepStatus? = nil, result: String? = nil, error: String? = nil, output: String? = nil) {
+        DispatchQueue.main.async {
+            if let index = self.steps.firstIndex(where: { $0.id == id }) {
+                var s = self.steps[index]
+                if let st = status { s.status = st }
+                if let r = result { s.result = r }
+                if let e = error { s.error = e }
+                if let o = output {
+                    s.output = (s.output ?? "") + o
+                }
+                self.steps[index] = s
+            }
+        }
+    }
+    
+    private func removeStep(_ id: UUID) {
+        DispatchQueue.main.async {
+            self.steps.removeAll { $0.id == id }
+        }
+    }
+    
+    private func parseDecision(from response: String) -> AgentDecision? {
+        // Extract JSON from response (might be wrapped in markdown code blocks)
+        var jsonString = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Remove markdown code blocks if present
+        if jsonString.hasPrefix("```") {
+            let lines = jsonString.components(separatedBy: .newlines)
+            jsonString = lines.dropFirst().dropLast().joined(separator: "\n")
+        }
+        
+        // Try to find JSON object
+        if let jsonStart = jsonString.range(of: "{"),
+           let jsonEnd = jsonString.range(of: "}", options: .backwards, range: jsonStart.upperBound..<jsonString.endIndex) {
+            jsonString = String(jsonString[jsonStart.lowerBound...jsonEnd.upperBound])
+        }
+        
+        guard let data = jsonString.data(using: .utf8) else { return nil }
+        
+        do {
+            let decoder = JSONDecoder()
+            return try decoder.decode(AgentDecision.self, from: data)
+        } catch {
+            print("Failed to parse AgentDecision: \(error)")
+            return nil
+        }
+    }
+    
+    private func mapType(_ action: String) -> AgentStepType {
+        switch action.lowercased() {
+        case "terminal": return .terminal
+        case "code": return .codeGeneration
+        case "search": return .webSearch
+        case "file": return .fileOperation
+        default: return .thinking
+        }
+    }
+    
+    // 🛑 Resume after user approval
+    func resumeWithApproval(_ approved: Bool) {
+        guard let context = pendingExecutionContext else {
+            return
+        }
+        
+        let decision = context.decision
+        let stepId = context.stepId
+        
+        // Clear pending state
+        DispatchQueue.main.async {
+            self.pendingApproval = nil
+            self.pendingApprovalReason = nil
+            self.pendingExecutionContext = nil
+        }
+        
+        if approved {
+            print("✅ Action Approved: \(decision.action) - \(decision.description)")
+            // Execute the stored decision
+            executeDecision(
+                decision,
+                projectURL: context.projectURL,
+                onOutput: { output in
+                    self.updateStep(stepId, output: output)
+                    context.onStepUpdate(self.steps.first(where: { $0.id == stepId }) ?? AgentStep(
+                        type: .thinking,
+                        description: "",
+                        status: .running
+                    ))
+                },
+                onComplete: { success, output in
+                    self.updateStep(
+                        stepId,
+                        status: success ? .completed : .failed,
+                        result: success ? "Success" : nil,
+                        error: success ? nil : output
+                    )
+                    if let step = self.steps.first(where: { $0.id == stepId }) {
+                        context.onStepUpdate(step)
+                    }
+                    // Continue loop
+                    self.runNextIteration(
+                        task: context.task,
+                        projectURL: context.projectURL,
+                        originalContext: context.originalContext,
+                        onStepUpdate: context.onStepUpdate,
+                        onComplete: context.onComplete
+                    )
+                }
+            )
+        } else {
+            print("❌ Action Denied by user")
+            // Mark step as failed
+            updateStep(stepId, status: .failed, error: "Action denied by user")
+            if let step = self.steps.first(where: { $0.id == stepId }) {
+                context.onStepUpdate(step)
+            }
+            // Continue loop - agent will see the failure and try something else
+            runNextIteration(
+                task: context.task,
+                projectURL: context.projectURL,
+                originalContext: context.originalContext,
+                onStepUpdate: context.onStepUpdate,
+                onComplete: context.onComplete
+            )
+        }
+    }
+}
+
+// MARK: - Safety Guard
+
+enum SafetyCheckResult {
+    case safe
+    case needsApproval(reason: String)
+    case blocked(reason: String)
+}
+
+class AgentSafetyGuard {
+    static let shared = AgentSafetyGuard()
+    
+    private let dangerousCommands = [
+        "rm", "del", "mkfs", "dd", "git push", "git reset", "sudo", "chmod", "format"
+    ]
+    
+    private let blockedCommands = [
+        "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero", "format c:"
+    ]
+    
+    func check(_ decision: AgentDecision) -> SafetyCheckResult {
+        // 1. Check Terminal Commands
+        if decision.action == "terminal", let cmd = decision.command?.lowercased() {
+            // Check for completely blocked commands
+            for blocked in blockedCommands {
+                if cmd.contains(blocked.lowercased()) {
+                    return .blocked(reason: "Catastrophic command detected: \(blocked)")
+                }
+            }
+            
+            // Check for commands that need approval
+            for risk in dangerousCommands {
+                if cmd.contains(risk.lowercased()) {
+                    return .needsApproval(reason: "Risky command detected: \(risk)")
+                }
+            }
+            
+            // Check for destructive git operations
+            if cmd.contains("git") {
+                if cmd.contains("reset --hard") || cmd.contains("push --force") || cmd.contains("clean -fd") {
+                    return .needsApproval(reason: "Destructive git operation")
+                }
+            }
+        }
+        
+        // 2. Check File Edits (Protect sensitive config)
+        if decision.action == "code", let path = decision.filePath?.lowercased() {
+            let sensitivePatterns = [".env", "credentials", "secrets", "config.json", "package-lock.json", ".git/config"]
+            for pattern in sensitivePatterns {
+                if path.contains(pattern) {
+                    return .needsApproval(reason: "Editing sensitive file: \(pattern)")
+                }
+            }
+        }
+        
+        return .safe
+    }
+}
