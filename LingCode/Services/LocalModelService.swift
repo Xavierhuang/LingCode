@@ -133,6 +133,7 @@ class LocalModelService {
     #endif
     
     /// Run inference using llama.cpp (fallback)
+    /// CRITICAL FIX: Uses file-based prompt to avoid ARG_MAX crash on large contexts
     private func runInferenceWithLlamaCpp(
         model: LocalModel,
         prompt: String,
@@ -146,9 +147,23 @@ class LocalModelService {
             throw LocalModelError.modelNotFound(model.identifier)
         }
         
-        // Use llama-cli for inference
+        // CRITICAL FIX: Write prompt to temporary file to avoid ARG_MAX limit
+        // macOS has ~262KB limit on command-line arguments, which large contexts can exceed
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).txt")
+        defer {
+            // Clean up temp file
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+        
+        do {
+            try prompt.write(to: tempURL, atomically: true, encoding: .utf8)
+        } catch {
+            throw LocalModelError.inferenceFailed("Failed to write prompt to temp file: \(error.localizedDescription)")
+        }
+        
+        // Use llama-cli with file-based prompt (-f flag)
         let terminalService = TerminalExecutionService.shared
-        let command = "llama-cli -m \(shellQuote(modelPath.path)) -p \(shellQuote(prompt)) -n \(maxTokens) -t \(temperature)"
+        let command = "llama-cli -m \(shellQuote(modelPath.path)) -f \(shellQuote(tempURL.path)) -n \(maxTokens) -t \(temperature)"
         
         let result = terminalService.executeSync(command, workingDirectory: nil)
         

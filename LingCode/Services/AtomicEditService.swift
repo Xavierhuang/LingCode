@@ -8,12 +8,13 @@
 import Foundation
 
 struct WorkspaceSnapshot {
-    let files: [URL: String]
+    // CRITICAL FIX: Use Data instead of String to prevent binary file corruption
+    let files: [URL: Data]
     let timestamp: Date
     let gitWorktreePath: URL? // Git worktree path for hardened rollback
     
     static func create(from workspaceURL: URL) -> WorkspaceSnapshot {
-        var files: [URL: String] = [:]
+        var files: [URL: Data] = [:]
         var gitWorktree: URL? = nil
         
         // HARDENED ROLLBACK: Use git worktree if available (atomic, crash-safe)
@@ -32,11 +33,13 @@ struct WorkspaceSnapshot {
             }
             
             for case let url as URL in enumerator {
-                guard !url.hasDirectoryPath,
-                      let content = try? String(contentsOf: url, encoding: .utf8) else {
-                    continue
+                guard !url.hasDirectoryPath else { continue }
+                
+                // CRITICAL FIX: Read as Data to preserve binary files (images, compiled binaries, etc.)
+                // Only attempt UTF-8 conversion for text files when needed for restore
+                if let data = try? Data(contentsOf: url) {
+                    files[url] = data
                 }
-                files[url] = content
             }
         }
         
@@ -54,12 +57,14 @@ struct WorkspaceSnapshot {
     }
     
     private func restoreManually(to workspaceURL: URL) throws {
-        for (url, content) in files {
+        for (url, data) in files {
             let directory = url.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: directory.path) {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             }
-            try content.write(to: url, atomically: true, encoding: .utf8)
+            // CRITICAL FIX: Write Data directly to preserve binary files
+            // No UTF-8 conversion that would corrupt images, binaries, etc.
+            try data.write(to: url, options: .atomic)
         }
     }
     
@@ -264,9 +269,56 @@ class AtomicEditService {
         }
     }
     
+    /// CRITICAL FIX: Use import-based dependency detection instead of brittle string matching
     private func detectDependencyType(fileURL: URL) -> EditDependencyType {
+        // CRITICAL FIX: Use FileDependencyService to build import graph
+        // This is more accurate than string matching (e.g., ReviewController.swift won't be misclassified)
+        guard let projectURL = getProjectURL(for: fileURL) else {
+            // Fallback to path-based detection if project URL unavailable
+            return detectDependencyTypeByPath(fileURL: fileURL)
+        }
+        
+        // Build dependency graph to understand import relationships
+        let dependencyService = FileDependencyService.shared
+        let importedFiles = dependencyService.findImportedFiles(for: fileURL, in: projectURL)
+        let referencedBy = dependencyService.findReferencedFiles(for: fileURL, in: projectURL)
+        
+        // If file imports many files but is imported by few, it's likely a call site (view/component)
+        if importedFiles.count > 3 && referencedBy.count < 2 {
+            return .callSite
+        }
+        
+        // If file is imported by many files but imports few, it's likely core/type
+        if referencedBy.count > 3 && importedFiles.count < 2 {
+            // Check if it's a type/model by reading content
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                if content.contains("struct ") || content.contains("class ") || content.contains("enum ") {
+                    return .type
+                }
+                if content.contains("protocol ") {
+                    return .interface
+                }
+            }
+            return .core
+        }
+        
+        // Fallback to path-based detection for edge cases
+        return detectDependencyTypeByPath(fileURL: fileURL)
+    }
+    
+    /// Fallback: Path-based detection (used when import graph unavailable)
+    private func detectDependencyTypeByPath(fileURL: URL) -> EditDependencyType {
         let path = fileURL.path.lowercased()
         let fileName = fileURL.lastPathComponent.lowercased()
+        
+        // Tests
+        if fileName.contains("test") ||
+           fileName.contains("spec") ||
+           path.contains("/test") ||
+           path.contains("/tests/") ||
+           path.contains("/spec/") {
+            return .test
+        }
         
         // Types
         if fileName.contains("type") || 
@@ -279,19 +331,9 @@ class AtomicEditService {
         // Interfaces
         if fileName.contains("interface") ||
            fileName.contains("protocol") ||
-           fileName.contains("protocol") ||
            path.contains("/interfaces/") ||
            path.contains("/protocols/") {
             return .interface
-        }
-        
-        // Tests
-        if fileName.contains("test") ||
-           fileName.contains("spec") ||
-           path.contains("/test") ||
-           path.contains("/tests/") ||
-           path.contains("/spec/") {
-            return .test
         }
         
         // Core logic (services, controllers, etc.)
@@ -313,6 +355,26 @@ class AtomicEditService {
         }
         
         return .other
+    }
+    
+    /// Get project URL from file URL (walks up directory tree to find project root)
+    private func getProjectURL(for fileURL: URL) -> URL? {
+        var current = fileURL.deletingLastPathComponent()
+        while current.path != "/" {
+            // Check for common project indicators
+            let gitDir = current.appendingPathComponent(".git")
+            let xcodeProj = current.pathExtension == "xcodeproj"
+            let packageSwift = current.appendingPathComponent("Package.swift")
+            
+            if FileManager.default.fileExists(atPath: gitDir.path) ||
+               xcodeProj ||
+               FileManager.default.fileExists(atPath: packageSwift.path) {
+                return current
+            }
+            
+            current = current.deletingLastPathComponent()
+        }
+        return nil
     }
 }
 

@@ -151,7 +151,8 @@ class EditorViewModel: ObservableObject {
                     )
                 }
                 // Dispatch result back to main thread
-                await MainActor.run {
+                // FIX: Capture self weakly and ensure main actor isolation
+                await MainActor.run { [weak self] in
                     self?.currentDiagnostics = diagnostics
                 }
             }
@@ -302,7 +303,8 @@ class EditorViewModel: ObservableObject {
                     fileContent: contentCopy
                 )
             }
-            await MainActor.run {
+            // FIX: Capture self weakly and ensure main actor isolation
+            await MainActor.run { [weak self] in
                 self?.currentDiagnostics = diagnostics
             }
         }

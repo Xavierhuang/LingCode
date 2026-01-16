@@ -148,7 +148,8 @@ class VectorDB {
         // This is a placeholder - actual implementation depends on your CoreML model's input/output format
         // Example for a typical sentence-transformer model:
         
-        guard let input = try? MLMultiArray(shape: [1, NSNumber(value: text.count)], dataType: .float32) else {
+        // FIX: Check if we can create input array (placeholder for future implementation)
+        guard (try? MLMultiArray(shape: [1, NSNumber(value: text.count)], dataType: .float32)) != nil else {
             return nil
         }
         

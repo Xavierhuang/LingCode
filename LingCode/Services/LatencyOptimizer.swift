@@ -50,6 +50,7 @@ class LatencyOptimizer {
     private let astCache = ASTCache()
     private var speculativeContext: String? = nil
     private var speculativeContextTask: Task<Void, Never>? = nil
+    private var speculativeContextStartTime: Date? = nil // Track when speculation started
     private var currentRequest: URLSessionTask? = nil
     
     private init() {}
@@ -114,6 +115,9 @@ class LatencyOptimizer {
         // Cancel previous speculative task
         speculativeContextTask?.cancel()
         
+        // CRITICAL FIX: Track when speculation starts
+        speculativeContextStartTime = Date()
+        
         speculativeContextTask = Task {
             // Build context in background
             let context = await buildContextSpeculatively(
@@ -126,6 +130,7 @@ class LatencyOptimizer {
             if !Task.isCancelled {
                 await MainActor.run {
                     self.speculativeContext = context
+                    self.speculativeContextStartTime = nil // Clear start time when done
                     onComplete?() // Notify completion (e.g., to clear isSpeculating flag)
                 }
             }
@@ -164,7 +169,44 @@ class LatencyOptimizer {
     }
     
     /// Get speculative context if available
+    /// CRITICAL FIX: Wait briefly for in-progress speculation if it's fresh enough to avoid race condition
     func getSpeculativeContext() -> String? {
+        // If context is already ready, return it
+        if let context = speculativeContext {
+            return context
+        }
+        
+        // CRITICAL FIX: If speculation is in progress and started recently, wait briefly for it
+        // This prevents discarding 90% complete context for a cold start
+        if let task = speculativeContextTask, 
+           !task.isCancelled,
+           let startTime = speculativeContextStartTime,
+           Date().timeIntervalSince(startTime) < 1.5 { // Started within last 1.5 seconds
+            
+            // Wait synchronously for up to 300ms for the task to complete
+            // This is a compromise - we don't want to block too long, but we want to use almost-ready context
+            let startWait = Date()
+            while Date().timeIntervalSince(startWait) < 0.3 { // Wait up to 300ms
+                // Check if context is now available
+                if let context = speculativeContext {
+                    return context
+                }
+                
+                // Check if task completed
+                if task.isCancelled {
+                    break
+                }
+                
+                // Small delay to avoid busy-waiting
+                Thread.sleep(forTimeInterval: 0.01) // 10ms
+            }
+            
+            // Final check after wait
+            if let context = speculativeContext {
+                return context
+            }
+        }
+        
         return speculativeContext
     }
     

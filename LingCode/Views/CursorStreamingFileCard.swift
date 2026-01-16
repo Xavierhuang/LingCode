@@ -24,7 +24,8 @@ struct CursorStreamingFileCard: View {
     let onReject: (() -> Void)? // Optional reject callback
     
     @State private var isHovered = false
-    @State private var isApplied = false
+    // CRITICAL FIX: Use model's isApplied state instead of local state
+    private var isApplied: Bool { file.isApplied }
     @State private var isRejected = false
     @State private var validationResult: ValidationResult?
     @State private var shouldAutoScroll = true // Track if we should auto-scroll
@@ -369,9 +370,7 @@ struct CursorStreamingFileCard: View {
                 
                 if !isRejected {
                     Button(action: {
-                        withAnimation(.spring(response: 0.2, dampingFraction: 0.6)) {
-                            isApplied = true
-                        }
+                        // CRITICAL FIX: Apply action - state is managed by coordinator
                         onApply()
                     }) {
                         Image(systemName: isApplied ? "checkmark.circle.fill" : "checkmark.circle")
@@ -381,7 +380,7 @@ struct CursorStreamingFileCard: View {
                     .buttonStyle(PlainButtonStyle())
                     .scaleEffect(isApplied ? 1.1 : 1.0)
                     .help(isApplied ? "Applied" : "Apply changes")
-                    .disabled(isApplied)
+                    .disabled(isApplied) // CRITICAL FIX: Disable button when already applied
                 }
                 
                 if let reject = onReject, !isApplied {

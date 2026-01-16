@@ -61,15 +61,13 @@ struct CursorStreamingView: View {
     // state when parsed output meaningfully changes
     
     // Computed properties that observe coordinator's published state
-    private var streamingText: String { updateCoordinator.throttledStreamingText }
+    // SMOOTH STREAMING FIX: Use displayedText (60 FPS interpolated) instead of throttledStreamingText
+    private var streamingText: String { updateCoordinator.displayedText }
     private var parsedFiles: [StreamingFileInfo] { updateCoordinator.parsedFiles }
     private var parsedCommands: [ParsedCommand] { updateCoordinator.parsedCommands }
     
-    // CPU OPTIMIZATION: Single scroll trigger tied to coordinator ticks
-    // PROBLEM: Multiple onChange handlers were triggering scrolls on every character/state change
-    // SOLUTION: Use coordinator's updateTick as single source of truth for scroll triggers
-    // Coordinator only increments tick on throttled updates (~100ms), preventing excessive scrolling
-    private var scrollTrigger: Int { updateCoordinator.updateTick }
+    // SMOOTH STREAMING FIX: State for sticky scroll
+    @State private var shouldAutoScroll: Bool = true
     
     var body: some View {
         VStack(spacing: 0) {
@@ -181,36 +179,32 @@ struct CursorStreamingView: View {
     
     
     private var streamingContent: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: DesignSystem.Spacing.md) {
-                    // AGENT STATE: Always show a state - never blank
-                    agentStateView
-                        .id("streaming")
-                }
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .padding(.vertical, DesignSystem.Spacing.md)
+        // SMOOTH STREAMING FIX: Use NSScrollView wrapper for 60 FPS sticky scroll
+        StickyScrollView(shouldAutoScroll: $shouldAutoScroll) { scrollPercentage in
+            // Track scroll position for auto-scroll detection
+        } content: {
+            VStack(spacing: DesignSystem.Spacing.md) {
+                // AGENT STATE: Always show a state - never blank
+                agentStateView
             }
-            .scrollDismissesKeyboard(.interactively)
-            // CPU OPTIMIZATION: Single auto-scroll trigger tied to coordinator ticks
-            // PROBLEM: Multiple onChange handlers were triggering scrolls on every character/state change
-            // SOLUTION: Coordinator's updateTick only increments on throttled updates (~100ms)
-            // This ensures scrolling happens at most once per coordinator tick, preventing excessive scroll operations
-            .onChange(of: scrollTrigger) { _, _ in
-                guard viewModel.isLoading else { return }
-                // Coordinator already throttles updates, so we can scroll immediately
-                // No additional throttle needed - coordinator tick is already throttled
-                withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
-                    proxy.scrollTo("streaming", anchor: .bottom)
-                }
+            .padding(.horizontal, DesignSystem.Spacing.md)
+            .padding(.vertical, DesignSystem.Spacing.md)
+            // SMOOTH STREAMING FIX: Force view update when displayedText changes (triggers scroll)
+            // This ensures StickyScrollView.updateNSView is called on every 60 FPS text update
+            .id(updateCoordinator.displayedText.count) // Use count as ID to trigger updates
+        }
+        .onChange(of: updateCoordinator.displayedText) { _, _ in
+            // SMOOTH STREAMING FIX: Auto-scroll on every text update (60 FPS smooth)
+            // The .id() modifier above ensures StickyScrollView.updateNSView is called,
+            // which will trigger scrollToBottom() when shouldAutoScroll is true
+            if shouldAutoScroll && viewModel.isLoading {
+                // Scroll happens automatically in StickyScrollView.updateNSView
+                // No animation needed here because the text change is already small (2 chars)
+                // The "stick-to-bottom" will feel natural
             }
-            .onAppear {
-                // Always scroll to bottom on appear (one-time, not throttled)
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                    proxy.scrollTo("streaming", anchor: .bottom)
-                }
-            }
+        }
+        .onAppear {
+            shouldAutoScroll = true
         }
     }
     
@@ -576,10 +570,16 @@ struct CursorStreamingView: View {
         }
     }
     
+    // SMOOTH STREAMING FIX: Namespace for matchedGeometryEffect
+    @Namespace private var fileCardNamespace
+    
     private var parsedFilesView: some View {
         ForEach(parsedFiles) { file in
             fileCard(for: file)
                 .id(file.id)
+                // SMOOTH STREAMING FIX: Use matchedGeometryEffect for smooth morphing transitions
+                // This allows cards to "slide open" smoothly instead of snapping into place
+                .matchedGeometryEffect(id: file.id, in: fileCardNamespace)
                 .transition(.asymmetric(
                     insertion: .move(edge: .top)
                         .combined(with: .opacity)
@@ -891,10 +891,14 @@ struct CursorStreamingView: View {
     }
     
     private func applyFile(_ file: StreamingFileInfo) {
+        // CRITICAL FIX: Mark file as applied to prevent confusion
         // Defer to avoid publishing during view updates
         Task { @MainActor in
             await Task.yield()
             fileActionHandler.applyFile(file, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+            
+            // Mark file as applied
+            updateCoordinator.markFileAsApplied(file.id)
         }
     }
     

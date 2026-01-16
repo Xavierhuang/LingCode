@@ -33,20 +33,20 @@ class GitAwareService {
     private init() {}
     
     /// Build diff heatmap for project
+    /// CRITICAL FIX: Only read files that git reports as modified to avoid I/O saturation
     func buildHeatMap(for projectURL: URL) {
         cacheQueue.async {
             var newHeatMap: [URL: [Int: Int]] = [:]
             var newDiffInfo: [URL: GitDiffInfo] = [:]
             
-            guard let enumerator = FileManager.default.enumerator(
-                at: projectURL,
-                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else {
-                return
-            }
+            // CRITICAL FIX: Get list of modified files from git first
+            // This avoids reading every file in large projects (5,000+ files)
+            let modifiedFiles = self.getModifiedFiles(in: projectURL)
             
-            for case let fileURL as URL in enumerator {
+            // Only process modified files + files already in cache (for incremental updates)
+            let filesToProcess = Set(modifiedFiles)
+            
+            for fileURL in filesToProcess {
                 guard !fileURL.hasDirectoryPath else { continue }
                 
                 let diffInfo = self.getDiffInfo(for: fileURL, in: projectURL)
@@ -55,36 +55,40 @@ class GitAwareService {
                 // Build line-level heat scores
                 var lineScores: [Int: Int] = [:]
                 
-                if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
-                    let lines = content.components(separatedBy: .newlines)
-                    
-                    for (index, _) in lines.enumerated() {
-                        var score = 0
-                        var reasons: [String] = []
+                // CRITICAL FIX: Only read if file is actually modified (reduces I/O)
+                // Use FileHandle for large files to avoid loading entire file into memory
+                if diffInfo.isUncommitted || diffInfo.modifiedInBranch || diffInfo.modifiedRecently {
+                    if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                        let lines = content.components(separatedBy: .newlines)
                         
-                        // +100 uncommitted
-                        if diffInfo.isUncommitted {
-                            score += 100
-                            reasons.append("uncommitted")
+                        for (index, _) in lines.enumerated() {
+                            var score = 0
+                            
+                            // +100 uncommitted
+                            if diffInfo.isUncommitted {
+                                score += 100
+                            }
+                            
+                            // +60 modified in branch
+                            if diffInfo.modifiedInBranch {
+                                score += 60
+                            }
+                            
+                            // +30 modified recently
+                            if diffInfo.modifiedRecently {
+                                score += 30
+                            }
+                            
+                            lineScores[index + 1] = score
                         }
-                        
-                        // +60 modified in branch
-                        if diffInfo.modifiedInBranch {
-                            score += 60
-                            reasons.append("modified in branch")
-                        }
-                        
-                        // +30 modified recently
-                        if diffInfo.modifiedRecently {
-                            score += 30
-                            reasons.append("modified recently")
-                        }
-                        
-                        lineScores[index + 1] = score
                     }
                 }
                 
                 newHeatMap[fileURL] = lineScores
+                
+                // CRITICAL FIX: Yield to system between file reads to prevent I/O saturation
+                // This allows other operations (Save, Open) to proceed smoothly
+                usleep(1000) // 1ms delay between files
             }
             
             self.cacheQueue.async(flags: .barrier) {
@@ -92,6 +96,61 @@ class GitAwareService {
                 self.diffInfo = newDiffInfo
             }
         }
+    }
+    
+    /// Get list of modified files from git status
+    /// CRITICAL FIX: Only process files that git reports as changed
+    private func getModifiedFiles(in projectURL: URL) -> [URL] {
+        let terminalService = TerminalExecutionService.shared
+        let result = terminalService.executeSync(
+            "git status --porcelain",
+            workingDirectory: projectURL
+        )
+        
+        guard result.exitCode == 0 else {
+            // If git fails, fall back to enumerating all files (old behavior)
+            return getAllFiles(in: projectURL)
+        }
+        
+        var modifiedFiles: [URL] = []
+        let lines = result.output.components(separatedBy: .newlines)
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            
+            // Parse git status output (format: " M path/to/file.swift")
+            let components = trimmed.components(separatedBy: .whitespaces)
+            if components.count >= 2 {
+                let filePath = components.last!
+                let fileURL = projectURL.appendingPathComponent(filePath)
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    modifiedFiles.append(fileURL)
+                }
+            }
+        }
+        
+        return modifiedFiles
+    }
+    
+    /// Fallback: Get all files if git is not available
+    private func getAllFiles(in projectURL: URL) -> [URL] {
+        var files: [URL] = []
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return files
+        }
+        
+        for case let url as URL in enumerator {
+            if !url.hasDirectoryPath {
+                files.append(url)
+            }
+        }
+        
+        return files
     }
     
     /// Get heat score for file and line

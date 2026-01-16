@@ -185,10 +185,12 @@ class SourceKitLSPClient: LSPClientProtocol, StoppableLSPClient {
             "capabilities": [:]
         ]
         
-        let requestId = getNextRequestId()
+        // FIX: requestId is used in the dictionary, but compiler may not detect it
+        // Keep it for future response handling
+        let _requestId = getNextRequestId()
         let requestDict: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": requestId,
+            "id": _requestId,
             "method": "initialize",
             "params": params
         ]
@@ -559,8 +561,10 @@ class SourceKitLSPClient: LSPClientProtocol, StoppableLSPClient {
             
             // Check if this is a diagnostics response (textDocument/diagnostic)
             // Note: Diagnostics come via publishDiagnostics notification, not request response
+            // FIX: Check for items without assigning to unused variable
             if result["items"] != nil {
                 // Handle diagnostic items if needed (currently handled via notifications)
+                // Currently no-op, but structure is here for future use
             }
             
             // Parse WorkspaceEdit (for rename)

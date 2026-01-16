@@ -29,8 +29,12 @@ final class StreamingUpdateCoordinator: ObservableObject {
     
     // MARK: - Published Properties
     
-    /// Throttled streaming text for display (updates at ~80-120ms intervals)
-    /// ARCHITECTURE: This is the displayed buffer, separate from rawStreamingText
+    /// SMOOTH STREAMING FIX: Interpolated text for 60 FPS display (character-by-character)
+    /// Decouples network speed from render speed - creates buttery smooth "typing" effect
+    @Published private(set) var displayedText: String = ""
+    
+    /// Throttled streaming text for parsing (updates at ~80-120ms intervals)
+    /// ARCHITECTURE: This is the parsing buffer, separate from displayed text
     /// PROBLEM 1 FIX: Separating streaming buffer from displayed buffer preserves user selection
     /// Streaming updates do NOT reset user selection because we only update when content meaningfully changes
     @Published private(set) var throttledStreamingText: String = ""
@@ -56,6 +60,19 @@ final class StreamingUpdateCoordinator: ObservableObject {
     /// PROBLEM 2 FIX: Raw streams are buffered internally but never rendered
     /// This prevents users from seeing internal reasoning, thinking, or raw tokens
     private var rawStreamingText: String = ""
+    
+    /// SMOOTH STREAMING FIX: Buffer for token interpolation
+    /// displayedText interpolates from this buffer at 60 FPS
+    private var interpolationBuffer: String = ""
+    
+    /// SMOOTH STREAMING FIX: Timer for 60 FPS token interpolation (macOS-compatible)
+    private var interpolationTimer: Timer?
+    
+    /// SMOOTH STREAMING FIX: Characters per frame for interpolation (2-3 chars for smooth effect)
+    private let charsPerFrame: Int = 2
+    
+    /// SMOOTH STREAMING FIX: Target frame rate (60 FPS = ~16.67ms interval)
+    private let frameInterval: TimeInterval = 1.0 / 60.0
     
     /// Last throttled update time
     private var lastUpdateTime: Date = .distantPast
@@ -101,6 +118,55 @@ final class StreamingUpdateCoordinator: ObservableObject {
     
     init() {
         // Coordinator is ready to receive updates
+        setupTokenInterpolation()
+    }
+    
+    
+    /// SMOOTH STREAMING FIX: Setup 60 FPS token interpolation using Timer (macOS-compatible)
+    private func setupTokenInterpolation() {
+        // Timer will be created when streaming starts
+        // This avoids creating timers unnecessarily
+    }
+    
+    /// SMOOTH STREAMING FIX: Start token interpolation timer
+    private func startInterpolationTimer() {
+        guard interpolationTimer == nil else { return }
+        
+        interpolationTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { [weak self] _ in
+            // FIX: Ensure interpolateTokens runs on main actor (Timer callbacks run on main run loop)
+            // FIX: Capture self weakly to avoid concurrent access warnings
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.interpolateTokens()
+            }
+        }
+        // Add to common run loop modes to ensure it runs during scrolling/UI interactions
+        RunLoop.current.add(interpolationTimer!, forMode: .common)
+    }
+    
+    /// SMOOTH STREAMING FIX: Stop token interpolation timer
+    private func stopInterpolationTimer() {
+        interpolationTimer?.invalidate()
+        interpolationTimer = nil
+    }
+    
+    /// SMOOTH STREAMING FIX: Interpolate tokens at 60 FPS (called by Timer)
+    /// FIX: Mark as @MainActor since it updates @Published property
+    @MainActor
+    private func interpolateTokens() {
+        guard displayedText.count < interpolationBuffer.count else {
+            // Caught up - stop interpolation
+            stopInterpolationTimer()
+            return
+        }
+        
+        // Append 2-3 characters per frame for smooth effect
+        let targetLength = min(displayedText.count + charsPerFrame, interpolationBuffer.count)
+        let newText = String(interpolationBuffer.prefix(targetLength))
+        
+        // Update displayedText directly (we're already on main actor)
+        displayedText = newText
     }
     
     // MARK: - Public Interface
@@ -110,6 +176,15 @@ final class StreamingUpdateCoordinator: ObservableObject {
     func updateStreamingText(_ text: String) {
         // Update raw text immediately (no throttling here - we want to capture all text)
         rawStreamingText = text
+        
+        // SMOOTH STREAMING FIX: Update interpolation buffer and start timer if needed
+        Task { @MainActor in
+            interpolationBuffer = text
+            // Start interpolation timer if not already running (starts smooth character-by-character rendering)
+            if interpolationTimer == nil {
+                startInterpolationTimer()
+            }
+        }
         
         // AGENT STATE: Set to streaming while receiving chunks
         Task { @MainActor in
@@ -146,8 +221,13 @@ final class StreamingUpdateCoordinator: ObservableObject {
     /// Reset coordinator state (e.g., when starting new conversation)
     func reset() {
         rawStreamingText = ""
+        interpolationBuffer = ""
+        displayedText = ""
         throttledStreamingText = ""
         parsedFiles = []
+        
+        // SMOOTH STREAMING FIX: Stop interpolation timer on reset
+        stopInterpolationTimer()
         parsedCommands = []
         lastParsedContentHash = 0
         isParsing = false
@@ -180,6 +260,18 @@ final class StreamingUpdateCoordinator: ObservableObject {
     }
     
     /// Update files (safe state update, used for final state)
+    /// Mark a file as applied (CRITICAL FIX: prevents confusion about apply state)
+    func markFileAsApplied(_ fileId: String) {
+        parsedFiles = parsedFiles.map { file in
+            if file.id == fileId {
+                var updated = file
+                updated.isApplied = true
+                return updated
+            }
+            return file
+        }
+    }
+    
     func updateFiles(_ files: [StreamingFileInfo]) {
         // ARCHITECTURE: State updates happen asynchronously AFTER view updates
         Task { @MainActor in
@@ -408,6 +500,8 @@ final class StreamingUpdateCoordinator: ObservableObject {
     }
     
     deinit {
+        // Clean up all timers and tasks
+        interpolationTimer?.invalidate()
         updateTimer?.invalidate()
         pendingParseTask?.cancel()
     }

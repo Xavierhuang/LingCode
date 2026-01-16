@@ -144,6 +144,7 @@ class RenameRefactorService {
                         } catch {
                             // Fallback to SwiftSyntax if LSP fails
                             print("⚠️ LSP rename failed, falling back to SwiftSyntax: \(error)")
+                            // FIX: Call nonisolated method directly (buildReferenceIndexWithSwiftSyntax is not @MainActor)
                             let references = self.buildReferenceIndexWithSwiftSyntax(
                                 for: symbol,
                                 in: projectURL
@@ -228,7 +229,8 @@ class RenameRefactorService {
     }
     
     /// LEVEL 2: Build reference index using SwiftSyntax (syntactic, name-based)
-    private func buildReferenceIndexWithSwiftSyntax(
+    /// FIX: Mark as nonisolated to allow calling from any context
+    nonisolated private func buildReferenceIndexWithSwiftSyntax(
         for symbol: ResolvedSymbol,
         in projectURL: URL
     ) -> [SymbolReference] {
@@ -455,7 +457,8 @@ class RenameRefactorService {
     
     // MARK: - Helper Methods
     
-    private func findReferences(
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func findReferences(
         to symbol: ResolvedSymbol,
         in content: String,
         fileURL: URL
@@ -472,7 +475,8 @@ class RenameRefactorService {
     
     #if canImport(SwiftSyntax)
     /// Find references using SwiftSyntax (semantic, accurate)
-    private func findReferencesWithSwiftSyntax(
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func findReferencesWithSwiftSyntax(
         to symbol: ResolvedSymbol,
         in content: String,
         fileURL: URL
@@ -490,7 +494,8 @@ class RenameRefactorService {
     #endif
     
     /// Fallback: Find references using regex (unsafe, but better than nothing)
-    private func findReferencesWithRegex(
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func findReferencesWithRegex(
         to symbol: ResolvedSymbol,
         in content: String,
         fileURL: URL
@@ -625,7 +630,8 @@ class RenameRefactorService {
         }
     }
     
-    private func isSameLanguage(_ file1: URL, as file2: URL) -> Bool {
+    /// FIX: Mark as nonisolated since it's a pure function that doesn't need actor isolation
+    nonisolated private func isSameLanguage(_ file1: URL, as file2: URL) -> Bool {
         return file1.pathExtension.lowercased() == file2.pathExtension.lowercased()
     }
 }

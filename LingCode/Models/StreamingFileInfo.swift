@@ -14,6 +14,7 @@ struct StreamingFileInfo: Identifiable, Equatable {
     var language: String
     var content: String
     var isStreaming: Bool
+    var isApplied: Bool = false // CRITICAL FIX: Track applied state to prevent confusion
     var changeSummary: String? // Summary of what changed
     var addedLines: Int = 0
     var removedLines: Int = 0
@@ -26,6 +27,7 @@ struct StreamingFileInfo: Identifiable, Equatable {
                lhs.language == rhs.language &&
                lhs.content == rhs.content &&
                lhs.isStreaming == rhs.isStreaming &&
+               lhs.isApplied == rhs.isApplied &&
                lhs.changeSummary == rhs.changeSummary &&
                lhs.addedLines == rhs.addedLines &&
                lhs.removedLines == rhs.removedLines

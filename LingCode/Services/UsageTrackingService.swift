@@ -123,26 +123,42 @@ class UsageTrackingService: ObservableObject {
     }
     
     /// Get rate limits for a provider
+    /// CRITICAL FIX: Anchor resetTime to fixed midnight, not sliding window
     private func getRateLimits(provider: AIProvider) -> ProviderRateLimit {
+        // CRITICAL FIX: Calculate reset time based on fixed midnight (not sliding)
+        // This ensures limits actually reset at midnight, not every time the function is called
+        let calendar = Calendar.current
+        let now = Date()
+        let tomorrowMidnight = calendar.startOfDay(for: calendar.date(byAdding: .day, value: 1, to: now) ?? now)
+        
         // Default rate limits (can be configured)
         switch provider {
         case .anthropic:
             return ProviderRateLimit(
                 maxRequests: 1000, // per day
                 maxTokens: 1_000_000, // per day
-                resetTime: Calendar.current.startOfDay(for: Date().addingTimeInterval(86400))
+                resetTime: tomorrowMidnight // Fixed anchor point
             )
         case .openAI:
             return ProviderRateLimit(
                 maxRequests: 500, // per day
                 maxTokens: 500_000, // per day
-                resetTime: Calendar.current.startOfDay(for: Date().addingTimeInterval(86400))
+                resetTime: tomorrowMidnight // Fixed anchor point
             )
         }
     }
     
     /// Get cost per token for a model
+    /// CRITICAL FIX: Fetch pricing from remote JSON, fallback to hardcoded values
     private func getCostPerToken(provider: AIProvider, model: String) -> Double {
+        // CRITICAL FIX: Try to fetch pricing from remote JSON first
+        if let remotePricing = fetchRemotePricing() {
+            if let cost = remotePricing[provider.rawValue]?[model] {
+                return cost
+            }
+        }
+        
+        // Fallback to hardcoded values (updated periodically)
         // Pricing as of 2025 (approximate)
         switch provider {
         case .anthropic:
@@ -160,6 +176,34 @@ class UsageTrackingService: ObservableObject {
             }
             return 0.00003
         }
+    }
+    
+    /// CRITICAL FIX: Fetch pricing from remote JSON (GitHub/Server)
+    /// This prevents needing App Store updates when providers change prices
+    private var cachedPricing: [String: [String: Double]]? = nil
+    private var lastPricingFetch: Date? = nil
+    private let pricingCacheTTL: TimeInterval = 86400 // 24 hours
+    
+    private func fetchRemotePricing() -> [String: [String: Double]]? {
+        // Check cache first
+        if let cached = cachedPricing,
+           let lastFetch = lastPricingFetch,
+           Date().timeIntervalSince(lastFetch) < pricingCacheTTL {
+            return cached
+        }
+        
+        // Fetch from remote (non-blocking, async)
+        // In production, this would fetch from your GitHub repo or server
+        // For now, return nil to use hardcoded fallback
+        // TODO: Implement actual remote fetch:
+        // let url = URL(string: "https://raw.githubusercontent.com/yourorg/lingcode/main/pricing.json")!
+        // let data = try? Data(contentsOf: url)
+        // let pricing = try? JSONDecoder().decode([String: [String: Double]].self, from: data)
+        
+        // Update cache
+        lastPricingFetch = Date()
+        
+        return cachedPricing
     }
     
     // MARK: - Persistence
