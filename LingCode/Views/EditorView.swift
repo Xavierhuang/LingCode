@@ -16,6 +16,11 @@ struct EditorView: View {
     @StateObject private var suggestionService = InlineSuggestionService.shared
     @State private var editorScrollView: NSScrollView?
     
+    // MARK: - Rename State
+    @State private var showRenameSheet = false
+    @State private var newNameInput = ""
+    @State private var cursorOffsetForRename: Int = 0
+    
     // EditorCore integration - SINGLE BRIDGE POINT
     // INVARIANT: EditorCoreAdapter is the only way to access EditorCore
     @StateObject private var editorCoreAdapter = EditorCoreAdapter()
@@ -54,6 +59,26 @@ struct EditorView: View {
                             editorScrollView = scrollView
                         }
                     )
+                    .contextMenu {
+                        Button {
+                            // Capture current cursor position
+                            let currentOffset = viewModel.editorState.cursorPosition
+                            self.cursorOffsetForRename = currentOffset
+                            
+                            // Pre-fill the input with the selected text if available
+                            if !viewModel.editorState.selectedText.isEmpty {
+                                // Extract word from selected text (remove whitespace)
+                                self.newNameInput = viewModel.editorState.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            } else {
+                                self.newNameInput = ""
+                            }
+                            
+                            // Show the dialog
+                            self.showRenameSheet = true
+                        } label: {
+                            Label("Rename Symbol", systemImage: "pencil.and.outline")
+                        }
+                    }
                     
                     // Ghost text indicator
                     if suggestionService.isLoading {
@@ -74,6 +99,23 @@ struct EditorView: View {
                                 .cornerRadius(4)
                                 .padding()
                             }
+                        }
+                    }
+                    
+                    // Rename loading overlay
+                    if viewModel.isRenaming {
+                        ZStack {
+                            Color.black.opacity(0.4)
+                            VStack {
+                                ProgressView()
+                                    .controlSize(.large)
+                                Text("Analyzing Project...")
+                                    .foregroundColor(.white)
+                                    .padding(.top, 8)
+                            }
+                            .padding(24)
+                            .background(.regularMaterial)
+                            .cornerRadius(12)
                         }
                     }
                     
@@ -123,6 +165,31 @@ struct EditorView: View {
                 .keyboardShortcut("k", modifiers: .command)
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerInlineEdit"))) { _ in
                     showInlineEdit = true
+                }
+                // Rename sheet
+                .sheet(isPresented: $showRenameSheet) {
+                    RenameSymbolSheet(
+                        newName: $newNameInput,
+                        errorMessage: viewModel.renameErrorMessage,
+                        onRename: {
+                            guard !newNameInput.isEmpty else { return }
+                            Task {
+                                await viewModel.performRename(
+                                    at: cursorOffsetForRename,
+                                    to: newNameInput
+                                )
+                                // Clear input and close sheet after rename
+                                if viewModel.renameErrorMessage == nil {
+                                    newNameInput = ""
+                                    showRenameSheet = false
+                                }
+                            }
+                        },
+                        onCancel: {
+                            newNameInput = ""
+                            showRenameSheet = false
+                        }
+                    )
                 }
             } else {
                 VStack(spacing: 20) {
@@ -916,5 +983,75 @@ struct QuickEditButton: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+}
+
+// MARK: - Rename Symbol Sheet
+
+struct RenameSymbolSheet: View {
+    @Binding var newName: String
+    let errorMessage: String?
+    let onRename: () -> Void
+    let onCancel: () -> Void
+    
+    @FocusState private var isTextFieldFocused: Bool
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Rename Symbol")
+                .font(.headline)
+                .padding(.top)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("New Name:")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                TextField("Enter new name", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isTextFieldFocused)
+                    .onSubmit {
+                        if !newName.isEmpty {
+                            onRename()
+                        }
+                    }
+                
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .padding(.top, 4)
+                } else {
+                    Text("Enter the new name for this symbol")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.top, 4)
+                }
+            }
+            .padding(.horizontal)
+            
+            HStack(spacing: 12) {
+                Button("Cancel", role: .cancel) {
+                    onCancel()
+                }
+                .keyboardShortcut(.escape)
+                
+                Button("Rename") {
+                    onRename()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newName.isEmpty)
+                .keyboardShortcut(.return)
+            }
+            .padding(.bottom)
+        }
+        .frame(width: 400)
+        .padding()
+        .onAppear {
+            // Focus the text field when sheet appears
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isTextFieldFocused = true
+            }
+        }
     }
 }

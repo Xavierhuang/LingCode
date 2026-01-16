@@ -29,6 +29,7 @@ struct JSONRPCParams: Codable {
     let cursor: Int?
     let newName: String?
     let edits: [Edit]?
+    let currentContent: String? // Optional: Current editor buffer (for unsaved changes)
     
     // Add other params as needed
 }
@@ -95,10 +96,13 @@ class JSONRPCService {
             let projectURL = fileURL.deletingLastPathComponent()
             
             // Perform rename
+            // CRITICAL: Pass currentContent if available (for unsaved changes)
+            // If nil, will fall back to reading from disk
             let edits = try await renameService.rename(
                 symbol: symbol,
                 to: newName,
-                in: projectURL
+                in: projectURL,
+                currentContent: params.currentContent
             )
             
             return JSONRPCResult(edits: edits, success: true, message: nil)

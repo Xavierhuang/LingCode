@@ -10,30 +10,50 @@ import Foundation
 struct WorkspaceSnapshot {
     let files: [URL: String]
     let timestamp: Date
+    let gitWorktreePath: URL? // Git worktree path for hardened rollback
     
     static func create(from workspaceURL: URL) -> WorkspaceSnapshot {
         var files: [URL: String] = [:]
+        var gitWorktree: URL? = nil
         
-        guard let enumerator = FileManager.default.enumerator(
-            at: workspaceURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else {
-            return WorkspaceSnapshot(files: files, timestamp: Date())
+        // HARDENED ROLLBACK: Use git worktree if available (atomic, crash-safe)
+        if isGitRepository(workspaceURL) {
+            gitWorktree = createGitWorktree(for: workspaceURL)
         }
         
-        for case let url as URL in enumerator {
-            guard !url.hasDirectoryPath,
-                  let content = try? String(contentsOf: url, encoding: .utf8) else {
-                continue
+        // Fallback: manual snapshot if git is not available
+        if gitWorktree == nil {
+            guard let enumerator = FileManager.default.enumerator(
+                at: workspaceURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else {
+                return WorkspaceSnapshot(files: files, timestamp: Date(), gitWorktreePath: nil)
             }
-            files[url] = content
+            
+            for case let url as URL in enumerator {
+                guard !url.hasDirectoryPath,
+                      let content = try? String(contentsOf: url, encoding: .utf8) else {
+                    continue
+                }
+                files[url] = content
+            }
         }
         
-        return WorkspaceSnapshot(files: files, timestamp: Date())
+        return WorkspaceSnapshot(files: files, timestamp: Date(), gitWorktreePath: gitWorktree)
     }
     
     func restore(to workspaceURL: URL) throws {
+        // HARDENED ROLLBACK: Use git worktree if available (atomic, crash-safe)
+        if let worktree = gitWorktreePath {
+            try restoreFromGitWorktree(worktree: worktree, to: workspaceURL)
+        } else {
+            // Fallback: manual restore
+            try restoreManually(to: workspaceURL)
+        }
+    }
+    
+    private func restoreManually(to workspaceURL: URL) throws {
         for (url, content) in files {
             let directory = url.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: directory.path) {
@@ -41,6 +61,54 @@ struct WorkspaceSnapshot {
             }
             try content.write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+    
+    private func restoreFromGitWorktree(worktree: URL, to workspaceURL: URL) throws {
+        // Use git checkout to restore from worktree (atomic operation)
+        let terminalService = TerminalExecutionService.shared
+        let result = terminalService.executeSync(
+            "git --work-tree=\(shellQuote(worktree.path)) checkout --work-tree=\(shellQuote(workspaceURL.path)) .",
+            workingDirectory: workspaceURL
+        )
+        
+        if result.exitCode != 0 {
+            throw AtomicEditError.restoreFailed(
+                original: NSError(domain: "AtomicEdit", code: 1, userInfo: [NSLocalizedDescriptionKey: "Git restore failed"]),
+                restore: NSError(domain: "AtomicEdit", code: 2, userInfo: [NSLocalizedDescriptionKey: result.output])
+            )
+        }
+    }
+    
+    private func shellQuote(_ path: String) -> String {
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+    
+    private static func isGitRepository(_ url: URL) -> Bool {
+        let gitDir = url.appendingPathComponent(".git")
+        return FileManager.default.fileExists(atPath: gitDir.path) || 
+               FileManager.default.fileExists(atPath: gitDir.path + "/HEAD")
+    }
+    
+    private static func createGitWorktree(for workspaceURL: URL) -> URL? {
+        let tempDir = FileManager.default.temporaryDirectory
+        let worktreeName = "LingCode_Worktree_\(UUID().uuidString)"
+        let worktreePath = tempDir.appendingPathComponent(worktreeName)
+        
+        let terminalService = TerminalExecutionService.shared
+        let result = terminalService.executeSync(
+            "git worktree add \(shellQuote(worktreePath.path)) HEAD",
+            workingDirectory: workspaceURL
+        )
+        
+        if result.exitCode == 0 {
+            return worktreePath
+        }
+        
+        return nil
+    }
+    
+    private static func shellQuote(_ path: String) -> String {
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
@@ -62,7 +130,32 @@ struct EditWithDependency {
 class AtomicEditService {
     static let shared = AtomicEditService()
     
+    private var activeWorktrees: [URL: URL] = [:] // Maps workspace -> worktree
+    private let worktreeQueue = DispatchQueue(label: "com.lingcode.worktree", attributes: .concurrent)
+    
     private init() {}
+    
+    deinit {
+        // Cleanup all active worktrees
+        for (workspace, worktree) in activeWorktrees {
+            cleanupWorktree(worktree, in: workspace)
+        }
+    }
+    
+    private func cleanupWorktree(_ worktree: URL, in workspace: URL) {
+        let terminalService = TerminalExecutionService.shared
+        _ = terminalService.executeSync(
+            "git worktree remove \(shellQuote(worktree.path))",
+            workingDirectory: workspace
+        )
+        worktreeQueue.async(flags: .barrier) {
+            self.activeWorktrees.removeValue(forKey: workspace)
+        }
+    }
+    
+    private func shellQuote(_ path: String) -> String {
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
     
     /// Apply multiple edits atomically with dependency ordering
     func applyEdits(
@@ -120,11 +213,22 @@ class AtomicEditService {
             // Rollback on error
             do {
                 try snapshot.restore(to: workspaceURL)
+                
+                // Cleanup worktree after successful restore
+                if let worktree = snapshot.gitWorktreePath {
+                    cleanupWorktree(worktree, in: workspaceURL)
+                }
+                
                 onError(error)
             } catch let restoreError {
                 // If restore fails, this is critical
                 onError(AtomicEditError.restoreFailed(original: error, restore: restoreError))
             }
+        }
+        
+        // Cleanup worktree after successful completion
+        if let worktree = snapshot.gitWorktreePath {
+            cleanupWorktree(worktree, in: workspaceURL)
         }
     }
     

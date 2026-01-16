@@ -18,6 +18,10 @@ class EditorViewModel: ObservableObject {
     @Published var wordWrap: Bool = false
     @Published var includeRelatedFilesInContext: Bool = true
     
+    // MARK: - Refactoring State
+    @Published var isRenaming: Bool = false
+    @Published var renameErrorMessage: String?
+    
     // AI
     let aiViewModel = AIViewModel()
     
@@ -534,5 +538,122 @@ class EditorViewModel: ObservableObject {
         case "go": return "go"
         default: return "text"
         }
+    }
+    
+    // MARK: - Refactoring / Rename Integration
+    
+    /// Trigger the Level 3 Semantic Rename
+    /// Uses SourceKit-LSP with "Dirty Buffer" support (analyzing unsaved text)
+    @MainActor
+    func performRename(at cursorOffset: Int, to newName: String) async {
+        // 1. Get the Active Document (The "Dirty Buffer")
+        guard let document = editorState.activeDocument,
+              let fileURL = document.filePath else {
+            self.renameErrorMessage = "No active file to rename."
+            return
+        }
+        
+        self.isRenaming = true
+        self.renameErrorMessage = nil
+        
+        defer { self.isRenaming = false }
+        
+        do {
+            // 2. Resolve the symbol at the cursor
+            // This checks what specific variable/function the user clicked on
+            guard let symbol = RenameRefactorService.shared.resolveSymbol(
+                at: cursorOffset,
+                in: fileURL
+            ) else {
+                self.renameErrorMessage = "No symbol found at cursor."
+                return
+            }
+            
+            print("🔍 Resolving symbol: \(symbol.name)")
+            
+            // 3. Execute the Rename
+            // CRITICAL: We pass 'document.content' (RAM) so LSP sees unsaved changes.
+            // If we didn't pass this, LSP would read the old file from disk.
+            let edits = try await RenameRefactorService.shared.rename(
+                symbol: symbol,
+                to: newName,
+                in: getProjectRootURL(),
+                currentContent: document.content // <--- THE KEY TO BEATING CURSOR
+            )
+            
+            // 4. Apply the Edits
+            applyEditsToWorkspace(edits)
+            print("✅ Rename success: \(edits.count) changes applied.")
+            
+        } catch {
+            print("❌ Rename failed: \(error.localizedDescription)")
+            self.renameErrorMessage = "Rename failed: \(error.localizedDescription)"
+        }
+    }
+    
+    // MARK: - Rename Helpers
+    
+    /// Returns the project root, or falls back to the file's directory
+    private func getProjectRootURL() -> URL {
+        return rootFolderURL ?? 
+               editorState.activeDocument?.filePath?.deletingLastPathComponent() ?? 
+               URL(fileURLWithPath: "/")
+    }
+    
+    /// Applies edits to both Open Tabs (RAM) and Closed Files (Disk)
+    private func applyEditsToWorkspace(_ edits: [Edit]) {
+        for edit in edits {
+            let editURL = URL(fileURLWithPath: edit.file)
+            
+            // Check if this file is currently open in a tab
+            if let index = editorState.documents.firstIndex(where: { 
+                guard let docPath = $0.filePath else { return false }
+                return docPath.standardized.path == editURL.standardized.path
+            }) {
+                // CASE A: File is OPEN. Update the RAM buffer directly.
+                // This updates the UI immediately without needing a reload.
+                var document = editorState.documents[index]
+                let newContent = applyEditToString(document.content, edit: edit)
+                
+                document.content = newContent
+                document.isModified = true // Mark as dirty so user can save later
+                
+                editorState.documents[index] = document
+                
+            } else {
+                // CASE B: File is CLOSED. Write directly to disk.
+                // Using JSONEditSchemaService to apply the edit safely.
+                if let projectURL = rootFolderURL {
+                    try? JSONEditSchemaService.shared.apply(edit: edit, in: projectURL)
+                } else {
+                    // Fallback: Write directly if no project URL
+                    let editURL = URL(fileURLWithPath: edit.file)
+                    if let content = edit.content.first {
+                        try? content.write(to: editURL, atomically: true, encoding: .utf8)
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Applies a specific text change to a string content
+    private func applyEditToString(_ source: String, edit: Edit) -> String {
+        guard let range = edit.range else {
+            // If no range specified, append content
+            return source + "\n" + edit.content.joined(separator: "\n")
+        }
+        
+        var lines = source.components(separatedBy: .newlines)
+        
+        // Safety check for line ranges
+        let startLine = max(0, range.startLine)
+        let endLine = min(lines.count, range.endLine)
+        
+        guard startLine <= endLine else { return source }
+        
+        // Replace the lines
+        lines.replaceSubrange(startLine..<endLine, with: edit.content)
+        
+        return lines.joined(separator: "\n")
     }
 }

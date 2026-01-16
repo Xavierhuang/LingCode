@@ -59,7 +59,7 @@ class VectorDB {
     
     /// Generate embedding for text using CoreML/NaturalLanguage
     func generateEmbedding(for text: String) -> [Float]? {
-        guard let embedding = embeddingModel else { return nil }
+        guard embeddingModel != nil else { return nil }
         
         // Use NLEmbedding to get vector representation
         // Note: NLEmbedding doesn't directly expose vectors, so we use distance-based approach

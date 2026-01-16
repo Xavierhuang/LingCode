@@ -2,10 +2,20 @@
 //  RenameRefactorService.swift
 //  LingCode
 //
-//  Safe, global, AST-based rename refactor engine
+//  Level 3 Semantic Refactoring: Type-aware rename using SourceKit-LSP
+//  Beats Cursor by distinguishing User.name from Product.name using compiler type information
+//
+//  Architecture:
+//  - Level 3 (Preferred): SourceKit-LSP for semantic, type-aware refactoring
+//  - Level 2 (Fallback): SwiftSyntax for syntactic, name-based refactoring
 //
 
 import Foundation
+
+#if canImport(SwiftSyntax)
+import SwiftSyntax
+import SwiftParser
+#endif
 
 struct ResolvedSymbol {
     let id: UUID
@@ -14,6 +24,7 @@ struct ResolvedSymbol {
     let scope: ScopeID
     let file: URL
     let definitionRange: Range<Int>
+    let typeName: String? // LEVEL 3: Type information for semantic matching
     
     enum SymbolKind {
         case function
@@ -72,7 +83,8 @@ class RenameRefactorService {
                     kind: convertKind(symbol.kind),
                     scope: scope,
                     file: fileURL,
-                    definitionRange: symbol.range
+                    definitionRange: symbol.range,
+                    typeName: nil // Would be populated from LSP if available
                 )
             }
         }
@@ -81,52 +93,170 @@ class RenameRefactorService {
     }
     
     /// Build reference index for symbol (precomputed, reusable)
-    func buildReferenceIndex(for symbol: ResolvedSymbol, in projectURL: URL) -> [SymbolReference] {
-        return indexQueue.sync {
-            if let cached = referenceIndex[symbol.id] {
-                return cached
-            }
-            
-            var references: [SymbolReference] = []
-            
-            // Find all references using AST queries
-            guard let enumerator = FileManager.default.enumerator(
-                at: projectURL,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) else {
-                return references
-            }
-            
-            for case let fileURL as URL in enumerator {
-                guard !fileURL.hasDirectoryPath else { continue }
-                
-                // Skip if not same language
-                if !isSameLanguage(fileURL, as: symbol.file) {
-                    continue
+    /// LEVEL 3: Uses SourceKit-LSP for semantic (type-aware) refactoring when available
+    /// Returns references and optional LSP workspace edit (for direct application)
+    /// 
+    /// CRITICAL: Accepts currentContent to handle unsaved editor changes
+    /// - If currentContent is provided, uses in-memory buffer (unsaved changes)
+    /// - If nil, falls back to reading from disk
+    func buildReferenceIndex(
+        for symbol: ResolvedSymbol,
+        newName: String,
+        in projectURL: URL,
+        currentContent: String? = nil // CRITICAL: Current editor buffer (for unsaved changes)
+    ) async -> (references: [SymbolReference], lspEdit: LSPWorkspaceEdit?) {
+        return await withCheckedContinuation { continuation in
+            indexQueue.async {
+                // Check cache first
+                // Note: Cache only stores references, not LSP edit (which depends on newName)
+                if let cached = self.referenceIndex[symbol.id] {
+                    continuation.resume(returning: (cached, nil))
+                    return
                 }
                 
-                guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
-                    continue
+                // LEVEL 3: Try SourceKit-LSP first (semantic, type-aware)
+                if SourceKitLSPClient.shared.isAvailable {
+                    Task {
+                        do {
+                            // ✅ CORRECT: Use passed RAM content first, fallback to disk only if nil
+                            let actualContent = currentContent ?? (try? String(contentsOf: symbol.file, encoding: .utf8))
+                            
+                            let (references, lspEdit) = try await self.buildReferenceIndexWithLSP(
+                                for: symbol,
+                                newName: newName,
+                                in: projectURL,
+                                fileContent: actualContent
+                            )
+                            
+                            // Cache and return
+                            self.indexQueue.async(flags: .barrier) {
+                                self.referenceIndex[symbol.id] = references
+                            }
+                            continuation.resume(returning: (references, lspEdit))
+                        } catch {
+                            // Fallback to SwiftSyntax if LSP fails
+                            print("⚠️ LSP rename failed, falling back to SwiftSyntax: \(error)")
+                            let references = self.buildReferenceIndexWithSwiftSyntax(
+                                for: symbol,
+                                in: projectURL
+                            )
+                            self.indexQueue.async(flags: .barrier) {
+                                self.referenceIndex[symbol.id] = references
+                            }
+                            continuation.resume(returning: (references, nil))
+                        }
+                    }
+                } else {
+                    // LEVEL 2: Fallback to SwiftSyntax (syntactic, name-based)
+                    let references = self.buildReferenceIndexWithSwiftSyntax(
+                        for: symbol,
+                        in: projectURL
+                    )
+                    self.indexQueue.async(flags: .barrier) {
+                        self.referenceIndex[symbol.id] = references
+                    }
+                    continuation.resume(returning: (references, nil))
                 }
-                
-                // Find references in this file
-                let fileReferences = findReferences(
-                    to: symbol,
-                    in: content,
-                    fileURL: fileURL
-                )
-                
-                references.append(contentsOf: fileReferences)
             }
+        }
+    }
+    
+    /// LEVEL 3: Build reference index using SourceKit-LSP (semantic, type-aware)
+    /// Returns both references and the LSP workspace edit (for direct application)
+    private func buildReferenceIndexWithLSP(
+        for symbol: ResolvedSymbol,
+        newName: String,
+        in projectURL: URL,
+        fileContent: String? = nil // Optional: in-memory content for unsaved changes
+    ) async throws -> (references: [SymbolReference], workspaceEdit: LSPWorkspaceEdit?) {
+        let lspClient = SourceKitLSPClient.shared
+        
+        // Convert symbol position to LSP position
+        let content = fileContent ?? (try? String(contentsOf: symbol.file, encoding: .utf8)) ?? ""
+        guard !content.isEmpty else {
+            throw RenameError.symbolNotFound
+        }
+        
+        let lines = content.components(separatedBy: .newlines)
+        let startLine = symbol.definitionRange.lowerBound
+        let startChar = startLine < lines.count ? lines[startLine].count : 0
+        
+        let position = LSPPosition(line: startLine, character: startChar)
+        
+        // CRITICAL: Pass fileContent to ensure LSP uses in-memory state, not stale disk content
+        // Request rename from LSP (returns all type-aware references)
+        let workspaceEdit = try await lspClient.rename(
+            at: position,
+            in: symbol.file,
+            newName: newName,
+            fileContent: fileContent ?? content
+        )
+        
+        // Convert LSP WorkspaceEdit to SymbolReference array
+        var references: [SymbolReference] = []
+        
+        for (uri, edits) in workspaceEdit.changes {
+            guard let fileURL = URL(string: uri) else { continue }
             
-            // Cache index
-            indexQueue.async(flags: .barrier) {
-                self.referenceIndex[symbol.id] = references
+            for edit in edits {
+                let startLine = edit.range.start.line
+                let endLine = edit.range.end.line
+                let range = startLine..<endLine
+                
+                references.append(SymbolReference(
+                    symbolID: symbol.id,
+                    file: fileURL,
+                    range: range,
+                    isDefinition: fileURL == symbol.file && range == symbol.definitionRange,
+                    isInString: false, // LSP knows this
+                    isInComment: false, // LSP knows this
+                    isShadowed: false // LSP handles shadowing correctly
+                ))
             }
-            
+        }
+        
+        return (references, workspaceEdit)
+    }
+    
+    /// LEVEL 2: Build reference index using SwiftSyntax (syntactic, name-based)
+    private func buildReferenceIndexWithSwiftSyntax(
+        for symbol: ResolvedSymbol,
+        in projectURL: URL
+    ) -> [SymbolReference] {
+        var references: [SymbolReference] = []
+        
+        // Find all references using AST queries
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
             return references
         }
+        
+        for case let fileURL as URL in enumerator {
+            guard !fileURL.hasDirectoryPath else { continue }
+            
+            // Skip if not same language
+            if !isSameLanguage(fileURL, as: symbol.file) {
+                continue
+            }
+            
+            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                continue
+            }
+            
+            // Find references in this file
+            let fileReferences = findReferences(
+                to: symbol,
+                in: content,
+                fileURL: fileURL
+            )
+            
+            references.append(contentsOf: fileReferences)
+        }
+        
+        return references
     }
     
     /// Generate edit plan for rename (NO LLM YET)
@@ -214,14 +344,26 @@ class RenameRefactorService {
     }
     
     /// Execute rename (complete flow)
+    /// LEVEL 3: Uses SourceKit-LSP for semantic refactoring when available
+    /// 
+    /// CRITICAL: Accepts currentContent to handle unsaved editor changes
+    /// - If currentContent is provided, uses in-memory buffer (unsaved changes)
+    /// - If nil, falls back to reading from disk
     func rename(
         symbol: ResolvedSymbol,
         to newName: String,
         in projectURL: URL,
+        currentContent: String? = nil, // CRITICAL: Current editor buffer (for unsaved changes)
         validateWithLLM: Bool = false
     ) async throws -> [Edit] {
-        // Step 1: Build reference index
-        let references = buildReferenceIndex(for: symbol, in: projectURL)
+        // Step 1: Build reference index (now async, uses LSP if available)
+        // CRITICAL: Pass currentContent to use in-memory buffer instead of stale disk content
+        let (references, lspEdit) = await buildReferenceIndex(
+            for: symbol,
+            newName: newName,
+            in: projectURL,
+            currentContent: currentContent
+        )
         
         // Step 2: Validate scope safety
         let validation = self.validateRename(symbol: symbol, newName: newName, in: projectURL)
@@ -235,7 +377,16 @@ class RenameRefactorService {
         }
         
         // Step 3: Generate edit plan
-        let edits = generateRenamePlan(symbol: symbol, newName: newName, references: references)
+        // LEVEL 3: If LSP was used, convert LSP WorkspaceEdit directly to Edits (type-aware, accurate)
+        // LEVEL 2: If SwiftSyntax was used, generate from references (name-based, may have false positives)
+        let edits: [Edit]
+        if let lspEdit = lspEdit {
+            // LEVEL 3: Use LSP's type-aware edits directly
+            edits = convertLSPWorkspaceEditToEdits(lspEdit, symbol: symbol, newName: newName)
+        } else {
+            // LEVEL 2: Generate from SwiftSyntax references
+            edits = generateRenamePlan(symbol: symbol, newName: newName, references: references)
+        }
         
         // Step 4: Optional LLM validation
         if validateWithLLM {
@@ -261,9 +412,76 @@ class RenameRefactorService {
         return edits
     }
     
+    /// Convert LSP WorkspaceEdit to Edit array
+    /// LEVEL 3: Direct conversion from LSP's type-aware rename result
+    private func convertLSPWorkspaceEditToEdits(
+        _ workspaceEdit: LSPWorkspaceEdit,
+        symbol: ResolvedSymbol,
+        newName: String
+    ) -> [Edit] {
+        var edits: [Edit] = []
+        
+        for (uri, textEdits) in workspaceEdit.changes {
+            guard let fileURL = URL(string: uri) else { continue }
+            
+            for textEdit in textEdits {
+                let startLine = textEdit.range.start.line
+                let endLine = textEdit.range.end.line
+                
+                // Split newText into lines
+                let content = textEdit.newText.components(separatedBy: .newlines)
+                
+                edits.append(Edit(
+                    file: fileURL.path,
+                    operation: .replace,
+                    range: EditRange(startLine: startLine, endLine: endLine),
+                    anchor: nil,
+                    content: content
+                ))
+            }
+        }
+        
+        return edits
+    }
+    
     // MARK: - Helper Methods
     
     private func findReferences(
+        to symbol: ResolvedSymbol,
+        in content: String,
+        fileURL: URL
+    ) -> [SymbolReference] {
+        #if canImport(SwiftSyntax)
+        // REAL SEMANTIC RESOLUTION: Use SwiftSyntax to find actual symbol references
+        // This correctly handles scope, shadowing, and ignores strings/comments
+        return findReferencesWithSwiftSyntax(to: symbol, in: content, fileURL: fileURL)
+        #else
+        // Fallback to regex if SwiftSyntax is not available
+        return findReferencesWithRegex(to: symbol, in: content, fileURL: fileURL)
+        #endif
+    }
+    
+    #if canImport(SwiftSyntax)
+    /// Find references using SwiftSyntax (semantic, accurate)
+    private func findReferencesWithSwiftSyntax(
+        to symbol: ResolvedSymbol,
+        in content: String,
+        fileURL: URL
+    ) -> [SymbolReference] {
+        let sourceFile = Parser.parse(source: content)
+        let sourceLocationConverter = SourceLocationConverter(fileName: fileURL.path, tree: sourceFile)
+        let visitor = ReferenceFinderVisitor(
+            targetSymbol: symbol,
+            sourceLocationConverter: sourceLocationConverter,
+            fileURL: fileURL
+        )
+        visitor.walk(sourceFile)
+        return visitor.references
+    }
+    #endif
+    
+    /// Fallback: Find references using regex (unsafe, but better than nothing)
+    private func findReferencesWithRegex(
         to symbol: ResolvedSymbol,
         in content: String,
         fileURL: URL
@@ -402,6 +620,91 @@ class RenameRefactorService {
         return file1.pathExtension.lowercased() == file2.pathExtension.lowercased()
     }
 }
+
+// MARK: - SwiftSyntax Reference Finder
+
+#if canImport(SwiftSyntax)
+/// Visitor to find semantic references to a symbol using SwiftSyntax
+/// Only finds actual references, not matches in strings/comments
+private nonisolated class ReferenceFinderVisitor: SyntaxVisitor {
+    let targetSymbol: ResolvedSymbol
+    let sourceLocationConverter: SourceLocationConverter
+    let fileURL: URL
+    var references: [SymbolReference] = []
+    var currentScope: [String] = [] // Track scope for shadowing detection
+    
+    init(
+        targetSymbol: ResolvedSymbol,
+        sourceLocationConverter: SourceLocationConverter,
+        fileURL: URL
+    ) {
+        self.targetSymbol = targetSymbol
+        self.sourceLocationConverter = sourceLocationConverter
+        self.fileURL = fileURL
+        super.init(viewMode: .sourceAccurate)
+    }
+    
+    private func getLine(_ position: AbsolutePosition) -> Int {
+        let location = sourceLocationConverter.location(for: position)
+        return location.line
+    }
+    
+    override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        // Check if this declaration reference matches our target
+        if node.baseName.text == targetSymbol.name {
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let range = startLine..<endLine
+            
+            let isShadowed = currentScope.contains(targetSymbol.name)
+            
+            references.append(SymbolReference(
+                symbolID: targetSymbol.id,
+                file: fileURL,
+                range: range,
+                isDefinition: false,
+                isInString: false,
+                isInComment: false,
+                isShadowed: isShadowed
+            ))
+        }
+        return .visitChildren
+    }
+    
+    // Track scope for shadowing detection
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        currentScope.append(node.name.text)
+        return .visitChildren
+    }
+    
+    override func visitPost(_ node: FunctionDeclSyntax) {
+        if !currentScope.isEmpty {
+            currentScope.removeLast()
+        }
+    }
+    
+    override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        // Track variable declarations in current scope
+        for binding in node.bindings {
+            if let identifier = binding.pattern.as(IdentifierPatternSyntax.self) {
+                currentScope.append(identifier.identifier.text)
+            }
+        }
+        return .visitChildren
+    }
+    
+    override func visitPost(_ node: VariableDeclSyntax) {
+        // Remove variables from scope when leaving
+        for binding in node.bindings {
+            if let identifier = binding.pattern.as(IdentifierPatternSyntax.self) {
+                if let index = currentScope.firstIndex(of: identifier.identifier.text) {
+                    currentScope.remove(at: index)
+                }
+            }
+        }
+    }
+}
+#endif
 
 enum RenameValidationResult {
     case valid

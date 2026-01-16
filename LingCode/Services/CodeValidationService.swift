@@ -4,9 +4,15 @@
 //
 //  Prevents "unintended deletions" and "code on LSD" issues
 //  Validates all changes before applying
+//  Uses SwiftSyntax for real compiler-based validation (not heuristics)
 //
 
 import Foundation
+
+#if canImport(SwiftSyntax)
+import SwiftSyntax
+import SwiftParser
+#endif
 
 /// Service for validating code changes before applying
 /// Addresses Cursor's "unintended deletions" and "code on LSD" problems
@@ -206,8 +212,32 @@ class CodeValidationService {
     // MARK: - Helper Methods
     
     private func validateSwiftSyntax(_ code: String) -> String? {
-        // Basic Swift validation
-        // Check for unmatched braces, brackets, parentheses
+        #if canImport(SwiftSyntax)
+        // REAL VALIDATION: Use SwiftSyntax parser (not heuristics)
+        // This catches actual syntax errors that would break compilation
+        let sourceFile = Parser.parse(source: code)
+        let sourceLocationConverter = SourceLocationConverter(fileName: "", tree: sourceFile)
+        
+        // Check for syntax errors by looking for error nodes in the tree
+        let errorVisitor = SyntaxErrorVisitor(sourceLocationConverter: sourceLocationConverter)
+        errorVisitor.walk(sourceFile)
+        
+        if let firstError = errorVisitor.firstError {
+            return firstError
+        }
+        
+        // Also check for unexpected nodes (syntax errors)
+        let unexpectedVisitor = UnexpectedNodeVisitor(sourceLocationConverter: sourceLocationConverter)
+        unexpectedVisitor.walk(sourceFile)
+        
+        if let unexpectedError = unexpectedVisitor.firstError {
+            return unexpectedError
+        }
+        
+        return nil
+        #else
+        // Fallback to basic validation if SwiftSyntax is not available
+        // This is a temporary measure until SwiftSyntax package is added
         if !isBalanced(code, open: "{", close: "}") {
             return "Unmatched braces"
         }
@@ -218,6 +248,7 @@ class CodeValidationService {
             return "Unmatched parentheses"
         }
         return nil
+        #endif
     }
     
     private func validateJavaScriptSyntax(_ code: String) -> String? {
@@ -313,15 +344,33 @@ class CodeValidationService {
     }
     
     private func extractFunctions(_ code: String) -> [String] {
-        // Extract function names (simplified)
+        #if canImport(SwiftSyntax)
+        // REAL EXTRACTION: Use SwiftSyntax visitor (not regex)
+        // This correctly handles functions in comments, strings, etc.
+        let sourceFile = Parser.parse(source: code)
+        let visitor = FunctionExtractorVisitor()
+        visitor.walk(sourceFile)
+        return visitor.functionNames
+        #else
+        // Fallback to regex if SwiftSyntax is not available
         let pattern = #"func\s+(\w+)\s*\("#
         return extractMatches(code, pattern: pattern)
+        #endif
     }
     
     private func extractClasses(_ code: String) -> [String] {
-        // Extract class names (simplified)
+        #if canImport(SwiftSyntax)
+        // REAL EXTRACTION: Use SwiftSyntax visitor (not regex)
+        // This correctly handles classes/structs in comments, strings, etc.
+        let sourceFile = Parser.parse(source: code)
+        let visitor = ClassExtractorVisitor()
+        visitor.walk(sourceFile)
+        return visitor.classNames
+        #else
+        // Fallback to regex if SwiftSyntax is not available
         let pattern = #"(?:class|struct)\s+(\w+)"#
         return extractMatches(code, pattern: pattern)
+        #endif
     }
     
     private func extractMatches(_ text: String, pattern: String) -> [String] {
@@ -478,3 +527,89 @@ extension String {
     }
 }
 
+// MARK: - SwiftSyntax Visitors (Real AST Parsing)
+
+#if canImport(SwiftSyntax)
+/// Visitor to detect syntax errors in Swift code
+private nonisolated class SyntaxErrorVisitor: SyntaxVisitor {
+    var firstError: String?
+    private let sourceLocationConverter: SourceLocationConverter
+    
+    init(sourceLocationConverter: SourceLocationConverter) {
+        self.sourceLocationConverter = sourceLocationConverter
+        super.init(viewMode: .sourceAccurate)
+    }
+    
+    override func visit(_ node: TokenSyntax) -> SyntaxVisitorContinueKind {
+        // Check for error tokens
+        if node.tokenKind == .endOfFile {
+            return .skipChildren
+        }
+        
+        // Check for missing tokens (syntax errors)
+        if node.presence == .missing {
+            let location = sourceLocationConverter.location(for: node.positionAfterSkippingLeadingTrivia)
+            firstError = "Syntax error: missing token at line \(location.line), column \(location.column)"
+            return .skipChildren
+        }
+        
+        return .visitChildren
+    }
+}
+
+/// Visitor to detect unexpected nodes (syntax errors)
+private nonisolated class UnexpectedNodeVisitor: SyntaxVisitor {
+    var firstError: String?
+    private let sourceLocationConverter: SourceLocationConverter
+    
+    init(sourceLocationConverter: SourceLocationConverter) {
+        self.sourceLocationConverter = sourceLocationConverter
+        super.init(viewMode: .sourceAccurate)
+    }
+    
+    override func visit(_ node: UnexpectedNodesSyntax) -> SyntaxVisitorContinueKind {
+        // Check for unexpected nodes (syntax errors)
+        let location = sourceLocationConverter.location(for: node.positionAfterSkippingLeadingTrivia)
+        firstError = "Syntax error: unexpected code at line \(location.line), column \(location.column)"
+        return .skipChildren
+    }
+}
+
+/// Visitor to extract function names from Swift AST
+/// Only extracts actual function declarations, not comments or strings
+private nonisolated class FunctionExtractorVisitor: SyntaxVisitor {
+    var functionNames: [String] = []
+    
+    override init(viewMode: SyntaxTreeViewMode = .sourceAccurate) {
+        super.init(viewMode: viewMode)
+    }
+    
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.name.text
+        functionNames.append(name)
+        return .visitChildren
+    }
+}
+
+/// Visitor to extract class/struct names from Swift AST
+/// Only extracts actual type declarations, not comments or strings
+private nonisolated class ClassExtractorVisitor: SyntaxVisitor {
+    var classNames: [String] = []
+    
+    override init(viewMode: SyntaxTreeViewMode = .sourceAccurate) {
+        super.init(viewMode: viewMode)
+    }
+    
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.name.text
+        classNames.append(name)
+        return .visitChildren
+    }
+    
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.name.text
+        classNames.append(name)
+        return .visitChildren
+    }
+}
+#endif

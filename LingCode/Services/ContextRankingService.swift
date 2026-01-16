@@ -382,7 +382,9 @@ class ContextRankingService {
     }
     
     private func estimateTokens(_ text: String) -> Int {
-        // Rough estimation: ~4 characters per token
-        return text.count / 4
+        // IMPROVEMENT: More accurate heuristic (closer to BPE tokenization)
+        // TODO: Integrate Tiktoken for exact token counting
+        // Use the same improved heuristic as TokenBudgetOptimizer
+        return TokenBudgetOptimizer.shared.estimateTokens(text)
     }
 }
