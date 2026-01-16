@@ -17,22 +17,8 @@ class GraphiteService {
     
     /// Check if Graphite CLI is installed
     func isGraphiteInstalled() -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = ["gt"]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return !output.trimmingCharacters(in: .whitespaces).isEmpty
-        } catch {
-            return false
-        }
+        let result = TerminalExecutionService.shared.executeSync("which gt")
+        return result.exitCode == 0 && !result.output.trimmingCharacters(in: .whitespaces).isEmpty
     }
     
     /// Create a new branch for a change set
@@ -96,13 +82,16 @@ class GraphiteService {
                 // Apply changes to this branch
                 if applyChangesToBranch(group, in: directory) {
                     // Commit changes
-                    if commitChanges(group, branch: branchName, in: directory) {
+                    let commitMessage = "AI-generated changes (\(group.count) files)"
+                    if commitChanges(group, branch: branchName, message: commitMessage, in: directory) {
                         let pr = StackedPR(
                             branch: branchName,
                             baseBranch: previousBranch,
                             changes: group,
                             prNumber: index + 1,
-                            totalPRs: prGroups.count
+                            totalPRs: prGroups.count,
+                            layerName: "layer-\(index + 1)",
+                            description: commitMessage
                         )
                         stackedPRs.append(pr)
                         previousBranch = branchName
@@ -116,7 +105,262 @@ class GraphiteService {
         return .success(stackedPRs)
     }
     
-    /// Group changes into logical PRs based on size and dependencies
+    /// AI-powered: Split large diff into logical layers (Infrastructure, Logic, UI)
+    func createStackingPlan(
+        changes: [CodeChange],
+        completion: @escaping (Result<StackingPlan, Error>) -> Void
+    ) {
+        // Build diff summary for AI
+        let diffSummary = buildDiffSummary(changes)
+        
+        let prompt = """
+        Analyze this large code diff and split it into logical layers for stacked PRs.
+        
+        Diff Summary:
+        \(diffSummary)
+        
+        Split the changes into layers such as:
+        - Infrastructure (database, config, core services)
+        - Logic (business logic, services, utilities)
+        - UI (views, components, styling)
+        - Tests (test files)
+        
+        Return a JSON array of layers, each with:
+        - name: Layer name (e.g., "infra", "logic", "ui")
+        - description: Brief description
+        - files: Array of file paths that belong to this layer
+        
+        Format:
+        [
+          {
+            "name": "infra",
+            "description": "Infrastructure changes",
+            "files": ["path/to/file1.swift", "path/to/file2.swift"]
+          },
+          {
+            "name": "logic",
+            "description": "Business logic changes",
+            "files": ["path/to/file3.swift"]
+          }
+        ]
+        """
+        
+        // Use AI to generate stacking plan
+        AIService.shared.sendMessage(
+            prompt,
+            context: nil,
+            onResponse: { response in
+                // Parse AI response to extract stacking plan
+                if let plan = self.parseStackingPlan(from: response, changes: changes) {
+                    completion(.success(plan))
+                } else {
+                    // Fallback to size-based grouping
+                    let fallbackPlan = self.createFallbackPlan(changes: changes)
+                    completion(.success(fallbackPlan))
+                }
+            },
+            onError: { error in
+                // Fallback to size-based grouping on AI error
+                let fallbackPlan = self.createFallbackPlan(changes: changes)
+                completion(.success(fallbackPlan))
+            }
+        )
+    }
+    
+    /// Create a stack from a stacking plan using Graphite CLI
+    func createStack(
+        from plan: StackingPlan,
+        baseBranch: String = "main",
+        in workspaceURL: URL,
+        completion: @escaping (Result<[StackedPR], Error>) -> Void
+    ) {
+        guard isGraphiteInstalled() else {
+            completion(.failure(NSError(domain: "GraphiteService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Graphite CLI not installed. Install from https://graphite.dev"])))
+            return
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var stackedPRs: [StackedPR] = []
+            var previousBranch = baseBranch
+            
+            for (index, layer) in plan.layers.enumerated() {
+                // Get changes for this layer
+                let layerChanges = plan.getChangesForLayer(layer, from: plan.allChanges)
+                
+                guard !layerChanges.isEmpty else { continue }
+                
+                // Create branch name from layer name
+                let branchName = "\(layer.name)-\(index + 1)"
+                
+                // Use Graphite CLI: gt create <branch> --insert
+                let createCommand = index == 0 
+                    ? "gt create \(branchName) -m \"\(layer.description)\""
+                    : "gt create \(branchName) --insert -m \"\(layer.description)\""
+                
+                let createResult = TerminalExecutionService.shared.executeSync(
+                    createCommand,
+                    workingDirectory: workspaceURL
+                )
+                
+                guard createResult.exitCode == 0 else {
+                    completion(.failure(NSError(domain: "GraphiteService", code: Int(createResult.exitCode), userInfo: [NSLocalizedDescriptionKey: "Failed to create branch: \(createResult.output)"])))
+                    return
+                }
+                
+                // Apply changes for this layer
+                if self.applyChangesToBranch(layerChanges, in: workspaceURL) {
+                    // Commit changes
+                    if self.commitChanges(layerChanges, branch: branchName, message: layer.description, in: workspaceURL) {
+                        let pr = StackedPR(
+                            branch: branchName,
+                            baseBranch: previousBranch,
+                            changes: layerChanges,
+                            prNumber: index + 1,
+                            totalPRs: plan.layers.count,
+                            layerName: layer.name,
+                            description: layer.description
+                        )
+                        stackedPRs.append(pr)
+                        previousBranch = branchName
+                    }
+                }
+            }
+            
+            DispatchQueue.main.async {
+                completion(.success(stackedPRs))
+            }
+        }
+    }
+    
+    /// Submit the entire stack to GitHub
+    func submitStack(in workspaceURL: URL, completion: @escaping (Result<Bool, Error>) -> Void) {
+        guard isGraphiteInstalled() else {
+            completion(.failure(NSError(domain: "GraphiteService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Graphite CLI not installed"])))
+            return
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = TerminalExecutionService.shared.executeSync(
+                "gt submit --no-interactive",
+                workingDirectory: workspaceURL
+            )
+            
+            DispatchQueue.main.async {
+                if result.exitCode == 0 {
+                    completion(.success(true))
+                } else {
+                    completion(.failure(NSError(domain: "GraphiteService", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.output])))
+                }
+            }
+        }
+    }
+    
+    /// Checkout a specific branch in the stack
+    func checkoutBranch(_ branchName: String, in workspaceURL: URL, completion: @escaping (Result<Bool, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = TerminalExecutionService.shared.executeSync(
+                "gt checkout \(branchName)",
+                workingDirectory: workspaceURL
+            )
+            
+            DispatchQueue.main.async {
+                if result.exitCode == 0 {
+                    completion(.success(true))
+                } else {
+                    completion(.failure(NSError(domain: "GraphiteService", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.output])))
+                }
+            }
+        }
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func buildDiffSummary(_ changes: [CodeChange]) -> String {
+        var summary = "Total: \(changes.count) files changed\n\n"
+        
+        for change in changes {
+            let lines = change.addedLines + change.removedLines
+            summary += "\(change.filePath): \(lines) lines (\(change.operationType.rawValue))\n"
+        }
+        
+        return summary
+    }
+    
+    private func parseStackingPlan(from response: String, changes: [CodeChange]) -> StackingPlan? {
+        // Try to extract JSON from response
+        let jsonPattern = #"```json\s*(\[[\s\S]*?\])\s*```"#
+        guard let regex = try? NSRegularExpression(pattern: jsonPattern, options: []),
+              let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..<response.endIndex, in: response)),
+              let jsonRange = Range(match.range(at: 1), in: response) else {
+            return nil
+        }
+        
+        let jsonString = String(response[jsonRange])
+        guard let jsonData = jsonString.data(using: .utf8),
+              let layers = try? JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] else {
+            return nil
+        }
+        
+        var stackingLayers: [StackingLayer] = []
+        for layerDict in layers {
+            guard let name = layerDict["name"] as? String,
+                  let description = layerDict["description"] as? String,
+                  let files = layerDict["files"] as? [String] else {
+                continue
+            }
+            stackingLayers.append(StackingLayer(
+                name: name,
+                description: description,
+                filePaths: files
+            ))
+        }
+        
+        guard !stackingLayers.isEmpty else { return nil }
+        
+        return StackingPlan(layers: stackingLayers, allChanges: changes)
+    }
+    
+    func createFallbackPlan(changes: [CodeChange]) -> StackingPlan {
+        // Fallback: Group by size (max 5 files or 300 lines per layer)
+        var layers: [StackingLayer] = []
+        var currentLayerFiles: [String] = []
+        var currentLayerLines = 0
+        var layerIndex = 1
+        
+        for change in changes {
+            let changeLines = change.addedLines + change.removedLines
+            
+            if currentLayerFiles.count >= 5 || (currentLayerLines + changeLines) > 300 {
+                // Start new layer
+                if !currentLayerFiles.isEmpty {
+                    layers.append(StackingLayer(
+                        name: "layer-\(layerIndex)",
+                        description: "Changes \(layerIndex) (\(currentLayerFiles.count) files)",
+                        filePaths: currentLayerFiles
+                    ))
+                    layerIndex += 1
+                    currentLayerFiles = []
+                    currentLayerLines = 0
+                }
+            }
+            
+            currentLayerFiles.append(change.filePath)
+            currentLayerLines += changeLines
+        }
+        
+        // Add final layer
+        if !currentLayerFiles.isEmpty {
+            layers.append(StackingLayer(
+                name: "layer-\(layerIndex)",
+                description: "Changes \(layerIndex) (\(currentLayerFiles.count) files)",
+                filePaths: currentLayerFiles
+            ))
+        }
+        
+        return StackingPlan(layers: layers, allChanges: changes)
+    }
+    
+    /// Group changes into logical PRs based on size and dependencies (legacy method)
     private func groupChangesForStacking(
         changes: [CodeChange],
         maxFiles: Int,
@@ -165,40 +409,33 @@ class GraphiteService {
     }
     
     /// Commit changes with descriptive message
-    private func commitChanges(_ changes: [CodeChange], branch: String, in directory: URL) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        
+    private func commitChanges(_ changes: [CodeChange], branch: String, message: String, in directory: URL) -> Bool {
         // Stage all changes
         for change in changes {
-            let addProcess = Process()
-            addProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            addProcess.arguments = ["add", change.filePath]
-            addProcess.currentDirectoryURL = directory
-            try? addProcess.run()
-            addProcess.waitUntilExit()
+            let addResult = TerminalExecutionService.shared.executeSync(
+                "git add \(change.filePath)",
+                workingDirectory: directory
+            )
+            guard addResult.exitCode == 0 else { return false }
         }
         
         // Create commit message
         let fileCount = changes.count
         let totalLines = changes.reduce(0) { $0 + $1.addedLines + $1.removedLines }
         let commitMessage = """
-        AI-generated changes (\(fileCount) files, \(totalLines) lines)
+        \(message)
         
-        Files changed:
+        \(fileCount) files, \(totalLines) lines changed
+        Files:
         \(changes.map { "- \($0.fileName)" }.joined(separator: "\n"))
         """
         
-        process.arguments = ["commit", "-m", commitMessage]
-        process.currentDirectoryURL = directory
+        let commitResult = TerminalExecutionService.shared.executeSync(
+            "git commit -m \(commitMessage.shellEscaped)",
+            workingDirectory: directory
+        )
         
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        return commitResult.exitCode == 0
     }
     
     /// Push stacked PRs to remote
@@ -284,9 +521,11 @@ struct StackedPR {
     let changes: [CodeChange]
     let prNumber: Int
     let totalPRs: Int
+    let layerName: String
+    let description: String
     
-    var description: String {
-        "PR \(prNumber)/\(totalPRs): \(changes.count) files, \(totalLines) lines"
+    var displayDescription: String {
+        "PR \(prNumber)/\(totalPRs): \(layerName) - \(changes.count) files, \(totalLines) lines"
     }
     
     var totalLines: Int {
@@ -294,8 +533,31 @@ struct StackedPR {
     }
 }
 
+struct StackingPlan {
+    let layers: [StackingLayer]
+    let allChanges: [CodeChange]
+    
+    func getChangesForLayer(_ layer: StackingLayer, from changes: [CodeChange]) -> [CodeChange] {
+        let layerFilePaths = Set(layer.filePaths)
+        return changes.filter { layerFilePaths.contains($0.filePath) }
+    }
+}
+
+struct StackingLayer {
+    let name: String
+    let description: String
+    let filePaths: [String]
+}
+
 struct StackStatus {
     let branches: [String]
     let totalPRs: Int
 }
 
+// MARK: - Extensions
+
+extension String {
+    func shellEscaped() -> String {
+        return "'" + self.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}

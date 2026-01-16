@@ -34,7 +34,7 @@ class AIViewModel: ObservableObject {
     // Reference to editor state (set by EditorViewModel)
     weak var editorViewModel: EditorViewModel?
     
-    func sendMessage(context: String? = nil, projectURL: URL? = nil, images: [AttachedImage] = []) {
+    func sendMessage(context: String? = nil, projectURL: URL? = nil, images: [AttachedImage] = [], forceEditMode: Bool = false) {
         guard !currentInput.isEmpty, !isLoading else { return }
         
         let userMessage = currentInput
@@ -153,9 +153,37 @@ class AIViewModel: ObservableObject {
         let contextBuilder = CursorContextBuilder.shared
         
         // Build context from editor state (if available)
+        // Use speculative context if available for speed
         var editorContext = ""
         if let editorVM = editorViewModel {
-            editorContext = contextBuilder.buildContext(
+            // Try to use speculative context (prepared while user was typing)
+            let speculativeService = SpeculativeContextService.shared
+            let activeFile = editorVM.editorState.activeDocument?.filePath
+            let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+            
+            // Check if we have prepared context that matches
+            if let prepared = speculativeService.preparedContext,
+               speculativeService.lastQuery.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) == userMessage.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+                // Use prepared context (fast path - saved ~500ms)
+                editorContext = prepared
+                speculativeService.clearPreparedContext() // Clear after use
+                print("🚀 Using Speculative Context (Saved ~500ms)")
+            } else {
+                // Cold start - build context now using ContextRankingService (includes semantic search)
+                // Clear any stale prepared context
+                speculativeService.clearPreparedContext()
+                editorContext = ContextRankingService.shared.buildContext(
+                    activeFile: activeFile,
+                    selectedRange: selectedText,
+                    diagnostics: nil,
+                    projectURL: projectURL,
+                    query: userMessage
+                )
+                print("❄️ Speculative miss - Built Cold Context")
+            }
+            
+            // Also add Cursor-style context for compatibility (has some unique info like git diff)
+            let cursorContext = contextBuilder.buildContext(
                 editorState: editorVM.editorState,
                 cursorPosition: editorVM.editorState.cursorPosition,
                 selectedText: editorVM.editorState.selectedText,
@@ -164,12 +192,27 @@ class AIViewModel: ObservableObject {
                 includeGitDiff: true,
                 includeFileGraph: true
             )
+            // Merge both contexts (ranked context is primary, cursor context supplements)
+            if !cursorContext.isEmpty {
+                if editorContext.isEmpty {
+                    editorContext = cursorContext
+                } else {
+                    // Append cursor context if it has unique information
+                    editorContext = editorContext + "\n\n" + cursorContext
+                }
+            }
         }
         
         // Decide whether this request must use strict Edit Mode (no prose, edits only).
         // This prevents the model from returning "PLAN" / markdown like in the raw dump.
+        // NOTE: Agent mode ALWAYS uses Edit Mode to ensure executable edits only.
         let intent = IntentClassifier.shared.classify(userMessage)
         let shouldUseEditMode: Bool = {
+            // Force Edit Mode if explicitly requested (e.g., Agent mode)
+            if forceEditMode {
+                return true
+            }
+            // For other modes, check intent and task type
             switch intent {
             case .simpleReplace, .rename:
                 return true

@@ -70,7 +70,7 @@ class ContextRankingService {
             ))
         }
         
-        // Tier 2: Include if space (imports, symbols, recent files)
+        // Tier 2: Include if space (imports, symbols, recent files, semantic matches)
         if let projectURL = projectURL, let activeFile = activeFile {
             let tier2Items = getTier2Items(
                 for: activeFile,
@@ -78,6 +78,15 @@ class ContextRankingService {
                 query: query
             )
             items.append(contentsOf: tier2Items)
+            
+            // Semantic search results (if query provided)
+            if let query = query, !query.isEmpty {
+                let semanticItems = getSemanticSearchItems(
+                    query: query,
+                    in: projectURL
+                )
+                items.append(contentsOf: semanticItems)
+            }
         }
         
         // Tier 3: Fallback (tests, interfaces, docs)
@@ -192,6 +201,65 @@ class ContextRankingService {
                           path.contains("build") ||
                           path.contains(".generated")
             return !isVendor
+        }
+        
+        return items
+    }
+    
+    /// Get semantic search results for the query
+    private func getSemanticSearchItems(
+        query: String,
+        in projectURL: URL
+    ) -> [ContextRankingItem] {
+        var items: [ContextRankingItem] = []
+        
+        // Use semantic search to find relevant code chunks
+        let semanticService = SemanticSearchService.shared
+        let chunks = semanticService.search(query: query, limit: 5)
+        
+        for chunk in chunks {
+            let fileURL = projectURL.appendingPathComponent(chunk.filePath)
+            
+            // 1. Try to read file
+            if let fullContent = try? String(contentsOf: fileURL, encoding: .utf8) {
+                let lines = fullContent.components(separatedBy: .newlines)
+                
+                // 2. Optimization: If file is huge (> 300 lines), only take a "Smart Window"
+                if lines.count > 300 {
+                    let start = max(0, chunk.startLine - 20)
+                    let end = min(lines.count - 1, chunk.endLine + 20)
+                    let windowContent = lines[start...end].joined(separator: "\n")
+                    
+                    let header = "// ... (lines \(0)-\(start) hidden)\n"
+                    let footer = "\n// ... (lines \(end + 1)-\(lines.count) hidden)"
+                    
+                    items.append(ContextRankingItem(
+                        file: fileURL,
+                        score: 35,
+                        content: header + windowContent + footer,
+                        tier: .tier2,
+                        reason: "Semantic match (window)"
+                    ))
+                } else {
+                    // Small file? Take it all.
+                    items.append(ContextRankingItem(
+                        file: fileURL,
+                        score: 35,
+                        content: fullContent,
+                        tier: .tier2,
+                        reason: "Semantic match"
+                    ))
+                }
+            } else {
+                // Fallback to cached chunk
+                items.append(ContextRankingItem(
+                    file: fileURL,
+                    score: 35,
+                    content: chunk.content,
+                    tier: .tier2,
+                    reason: "Semantic match (chunk)"
+                ))
+            }
         }
         
         return items

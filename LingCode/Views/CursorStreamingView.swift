@@ -28,7 +28,27 @@ struct CursorStreamingView: View {
     @State private var activeMentions: [Mention] = []
     @State private var showUndoConfirmation = false
     @State private var isApplyingFiles = false // Track if files are currently being applied
+    @State private var isVerifying: Bool = false // Track if shadow verification is in progress
+    @State private var verificationStatus: VerificationStatus? = nil // Verification result
+    @State private var showStackDialog = false // Show Graphite stacking dialog
+    @State private var stackingPlan: StackingPlan? = nil // AI-generated stacking plan
+    @State private var isCreatingStack = false // Track stack creation progress
     private let fileActionHandler = FileActionHandler.shared
+    
+    enum VerificationStatus {
+        case success
+        case failure(String)
+    }
+    
+    // Check if changes are large enough to warrant stacking
+    private var shouldOfferStacking: Bool {
+        guard let projectURL = editorViewModel.rootFolderURL else { return false }
+        let totalFiles = parsedFiles.count
+        let totalLines = parsedFiles.reduce(0) { $0 + $1.content.components(separatedBy: .newlines).count }
+        
+        // Use same threshold as ApplyCodeService
+        return totalFiles > 10 || totalLines > 500 || (totalFiles > 5 && totalLines > 200)
+    }
     
     // CPU OPTIMIZATION: Coordinator provides throttled updates and prevents 100% CPU usage
     // PROBLEM: Without coordinator, every token/character chunk triggers:
@@ -131,6 +151,29 @@ struct CursorStreamingView: View {
             // Setup coordinator callbacks on appear
             setupCoordinator()
             handleAppear()
+        }
+        .sheet(isPresented: $showStackDialog) {
+            if let plan = stackingPlan {
+                GraphiteStackDialogView(
+                    plan: plan,
+                    workspaceURL: editorViewModel.rootFolderURL ?? URL(fileURLWithPath: "/"),
+                    isCreating: $isCreatingStack,
+                    onDismiss: { showStackDialog = false },
+                    onStackCreated: { stackedPRs in
+                        print("✅ Created stack with \(stackedPRs.count) PRs")
+                        showStackDialog = false
+                    }
+                )
+            } else {
+                // Loading state
+                VStack(spacing: 16) {
+                    ProgressView()
+                    Text("Analyzing changes for stacking...")
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                }
+                .padding(40)
+            }
         }
     }
     
@@ -650,12 +693,61 @@ struct CursorStreamingView: View {
                 Text("This will remove all \(parsedFiles.count) file\(parsedFiles.count == 1 ? "" : "s") from the view. The files will remain on disk if they were already applied.")
             }
             
+            // Smart Stack badge (shown when changes are large)
+            if shouldOfferStacking && GraphiteService.shared.isGraphiteInstalled() {
+                Button(action: {
+                    showStackDialog = true
+                    createStackingPlan()
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.stack.3d.up")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("Stack it?")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.blue)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            
+            // Verification badge (shown when verification is complete)
+            if let status = verificationStatus {
+                HStack(spacing: 4) {
+                    switch status {
+                    case .success:
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Compiles")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.green)
+                    case .failure(let message):
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.red)
+                        Text("Build Failed")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.red)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(4)
+            }
+            
             Button(action: {
-                // Apply all files
+                // Apply all files (with shadow verification)
                 autoApplyAllFiles()
             }) {
                 HStack(spacing: 4) {
-                    if isApplyingFiles {
+                    if isVerifying {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                            .frame(width: 12, height: 12)
+                    } else if isApplyingFiles {
                         ProgressView()
                             .scaleEffect(0.7)
                             .frame(width: 12, height: 12)
@@ -663,17 +755,17 @@ struct CursorStreamingView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    Text(isApplyingFiles ? "Applying..." : "Apply All")
+                    Text(isVerifying ? "Verifying..." : (isApplyingFiles ? "Applying..." : "Apply All"))
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .background(isApplyingFiles ? Color.accentColor.opacity(0.7) : Color.accentColor)
+                .background((isVerifying || isApplyingFiles) ? Color.accentColor.opacity(0.7) : Color.accentColor)
                 .cornerRadius(6)
             }
             .buttonStyle(PlainButtonStyle())
-            .disabled(isApplyingFiles)
+            .disabled(isVerifying || isApplyingFiles)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -808,8 +900,8 @@ struct CursorStreamingView: View {
     
     private func autoApplyAllFiles() {
         // Prevent multiple simultaneous apply operations
-        guard !isApplyingFiles else {
-            print("⚠️ Apply operation already in progress")
+        guard !isApplyingFiles && !isVerifying else {
+            print("⚠️ Apply/verification operation already in progress")
             return
         }
         
@@ -839,6 +931,38 @@ struct CursorStreamingView: View {
             return
         }
         
+        // SHADOW WORKSPACE: Verify edits compile before applying
+        guard let projectURL = editorViewModel.rootFolderURL else {
+            print("⚠️ No project URL - skipping shadow verification")
+            applyFilesDirectly(filesToApply)
+            return
+        }
+        
+        // Start verification
+        isVerifying = true
+        verificationStatus = nil
+        
+        ShadowWorkspaceService.shared.verifyFilesInShadow(
+            files: filesToApply,
+            originalWorkspace: projectURL
+        ) { success, message in
+            DispatchQueue.main.async {
+                isVerifying = false
+                verificationStatus = success ? .success : .failure(message)
+                
+                if success {
+                    print("✅ Shadow verification passed - applying files")
+                    applyFilesDirectly(filesToApply)
+                } else {
+                    print("❌ Shadow verification failed: \(message)")
+                    // Still allow applying, but user sees the failure badge
+                    // User can choose to apply anyway or fix the issues
+                }
+            }
+        }
+    }
+    
+    private func applyFilesDirectly(_ filesToApply: [StreamingFileInfo]) {
         // Apply and open files sequentially to avoid state update conflicts
         // IMPORTANT: Do NOT remove files from parsedFiles after applying - keep them visible for review
         Task { @MainActor in
@@ -883,6 +1007,57 @@ struct CursorStreamingView: View {
     
     private func applyAction(_ action: AIAction) {
         fileActionHandler.applyAction(action, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
+    }
+    
+    // MARK: - Graphite Stacking
+    
+    private func createStackingPlan() {
+        guard let projectURL = editorViewModel.rootFolderURL else { return }
+        
+        // Convert StreamingFileInfo to CodeChange for stacking analysis
+        let changes = parsedFiles.map { file -> CodeChange in
+            let fileURL = projectURL.appendingPathComponent(file.path)
+            let originalContent = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+            
+            return CodeChange(
+                id: UUID(),
+                filePath: file.path,
+                fileName: fileURL.lastPathComponent,
+                operationType: originalContent.isEmpty ? .create : .update,
+                originalContent: originalContent.isEmpty ? nil : originalContent,
+                newContent: file.content,
+                lineRange: nil,
+                language: detectLanguage(from: fileURL.pathExtension)
+            )
+        }
+        
+        GraphiteService.shared.createStackingPlan(changes: changes) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let plan):
+                    stackingPlan = plan
+                case .failure(let error):
+                    print("❌ Failed to create stacking plan: \(error.localizedDescription)")
+                    // Fallback: create simple plan
+                    let fallbackPlan = GraphiteService.shared.createFallbackPlan(changes: changes)
+                    stackingPlan = fallbackPlan
+                }
+            }
+        }
+    }
+    
+    private func detectLanguage(from fileExtension: String) -> String {
+        switch fileExtension.lowercased() {
+        case "swift": return "swift"
+        case "js", "jsx": return "javascript"
+        case "ts", "tsx": return "typescript"
+        case "py": return "python"
+        case "go": return "go"
+        case "rs": return "rust"
+        case "java": return "java"
+        case "c", "cpp", "h", "hpp": return "c"
+        default: return "text"
+        }
     }
     
     // MARK: - Drag and Drop
@@ -963,6 +1138,9 @@ struct CursorStreamingView: View {
 
             // Reset coordinator state (clears all streaming text, parsed files, and commands)
             updateCoordinator.reset()
+            
+            // Clear verification status for new request
+            verificationStatus = nil
 
             // Pass user message as query to detect website modifications and include existing files
             var context = editorViewModel.getContextForAI(query: userRequest) ?? ""
@@ -976,10 +1154,12 @@ struct CursorStreamingView: View {
             )
             context += mentionContext
 
+            // Agent mode always uses Edit Mode to ensure executable edits only
             viewModel.sendMessage(
                 context: context,
                 projectURL: editorViewModel.rootFolderURL,
-                images: imageContextService.attachedImages
+                images: imageContextService.attachedImages,
+                forceEditMode: true
             )
 
             // Clear images and mentions after sending

@@ -28,6 +28,8 @@ class EditorViewModel: ObservableObject {
             if let url = rootFolderURL {
                 print("rootFolderURL set to: \(url.path)")
                 CodebaseIndexService.shared.indexProject(at: url) { _, _ in }
+                // Also index for semantic search
+                SemanticSearchService.shared.indexWorkspace(url)
             }
         }
     }

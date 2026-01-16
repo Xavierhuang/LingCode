@@ -166,6 +166,23 @@ struct StreamingInputView: View {
                         if newValue.hasSuffix("@") {
                             showMentionPopup = true
                         }
+                        
+                        // Trigger speculative context preparation
+                        SpeculativeContextService.shared.onUserTyping(text: newValue)
+                        
+                        // Prepare context in background if we have editor state
+                        if !newValue.isEmpty && newValue.count > 5 {
+                            let activeFile = editorViewModel.editorState.activeDocument?.filePath
+                            let selectedText = editorViewModel.editorState.selectedText.isEmpty ? nil : editorViewModel.editorState.selectedText
+                            
+                            SpeculativeContextService.shared.prepareContext(
+                                query: newValue,
+                                activeFile: activeFile,
+                                selectedRange: selectedText,
+                                diagnostics: nil,
+                                projectURL: editorViewModel.rootFolderURL
+                            )
+                        }
                     }
                 
                 // Send/Stop button
