@@ -399,7 +399,7 @@ struct EditorView: View {
                 
                 // Stream completed - run validation in background
                 Task.detached(priority: .userInitiated) {
-                    let validation = EditOutputValidator.shared.validateEditOutput(responseText)
+                    let validation = await EditOutputValidator.shared.validateEditOutput(responseText)
                     
                     // Switch to MainActor for UI updates
                     await MainActor.run {
