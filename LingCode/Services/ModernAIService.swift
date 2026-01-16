@@ -53,43 +53,47 @@ class ModernAIService: AIProviderProtocol {
                     let localService = LocalOnlyService.shared
                     if localService.isLocalModeEnabled && localService.isLocalModelAvailable() {
                         // Use local streaming (convert callback to async stream)
-                        // Use a thread-safe cancellation flag with NSLock
-                        var localStreamCancelled = false
-                        let cancellationLock = NSLock()
+                        // Use a thread-safe cancellation flag with actor
+                        actor LocalStreamCancellation {
+                            var isCancelled = false
+                            func setCancelled(_ value: Bool) { self.isCancelled = value }
+                            func getCancelled() -> Bool { return self.isCancelled }
+                        }
+                        let cancellation = LocalStreamCancellation()
                         
                         localService.streamLocally(
                             prompt: message,
                             context: context,
                             onChunk: { chunk in
-                                cancellationLock.lock()
-                                let cancelled = localStreamCancelled
-                                cancellationLock.unlock()
-                                if !cancelled {
-                                    continuation.yield(chunk)
+                                Task {
+                                    let cancelled = await cancellation.getCancelled()
+                                    if !cancelled {
+                                        continuation.yield(chunk)
+                                    }
                                 }
                             },
                             onComplete: {
-                                cancellationLock.lock()
-                                let cancelled = localStreamCancelled
-                                cancellationLock.unlock()
-                                if !cancelled {
-                                    continuation.finish()
+                                Task {
+                                    let cancelled = await cancellation.getCancelled()
+                                    if !cancelled {
+                                        continuation.finish()
+                                    }
                                 }
                             },
                             onError: { error in
-                                cancellationLock.lock()
-                                let cancelled = localStreamCancelled
-                                cancellationLock.unlock()
-                                if !cancelled {
-                                    continuation.finish(throwing: error)
+                                Task {
+                                    let cancelled = await cancellation.getCancelled()
+                                    if !cancelled {
+                                        continuation.finish(throwing: error)
+                                    }
                                 }
                             }
                         )
                         
                         continuation.onTermination = { @Sendable _ in
-                            cancellationLock.lock()
-                            localStreamCancelled = true
-                            cancellationLock.unlock()
+                            Task {
+                                await cancellation.setCancelled(true)
+                            }
                         }
                         return
                     }

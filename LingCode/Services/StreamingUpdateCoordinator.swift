@@ -215,8 +215,9 @@ final class StreamingUpdateCoordinator: ObservableObject {
         // Schedule new timer
         let delay = throttleInterval - Date().timeIntervalSince(lastUpdateTime)
         updateTimer = Timer.scheduledTimer(withTimeInterval: max(0.01, delay), repeats: false) { [weak self] _ in
+            guard let strongSelf = self else { return }
             Task { @MainActor in
-                self?.performThrottledUpdate()
+                strongSelf.performThrottledUpdate()
             }
         }
     }

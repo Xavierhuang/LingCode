@@ -8,6 +8,11 @@
 
 import Foundation
 
+#if canImport(SwiftSyntax)
+import SwiftSyntax
+import SwiftParser
+#endif
+
 // MARK: - Code Symbol Model
 
 struct CodeSymbol {
@@ -62,16 +67,221 @@ class SwiftSyntaxParser {
     /// Extract symbols using SwiftSyntax (robust AST parsing)
     private func extractSymbolsWithSwiftSyntax(from content: String, filePath: String) -> [CodeSymbol] {
         #if canImport(SwiftSyntax)
-        // TODO: Implement SwiftSyntax parsing once package is added
-        // This will use SwiftSyntax's SyntaxVisitor to walk the AST
-        // and extract function/class/struct definitions robustly
-        
-        // Placeholder implementation - will be replaced with actual SwiftSyntax code
-        return extractSymbolsWithRegex(from: content, filePath: filePath)
+        let sourceFile = Parser.parse(source: content)
+        let sourceLocationConverter = SourceLocationConverter(fileName: filePath, tree: sourceFile)
+        let visitor = SymbolExtractorVisitor(filePath: filePath, sourceLocationConverter: sourceLocationConverter)
+        visitor.walk(sourceFile)
+        return visitor.symbols
         #else
         return extractSymbolsWithRegex(from: content, filePath: filePath)
         #endif
     }
+    
+    #if canImport(SwiftSyntax)
+    /// SwiftSyntax visitor to extract symbols
+    private nonisolated class SymbolExtractorVisitor: SyntaxVisitor {
+        var symbols: [CodeSymbol] = []
+        let filePath: String
+        let sourceLocationConverter: SourceLocationConverter
+        var currentParent: String? = nil
+        var parentStack: [String] = []
+        
+        init(filePath: String, sourceLocationConverter: SourceLocationConverter) {
+            self.filePath = filePath
+            self.sourceLocationConverter = sourceLocationConverter
+            super.init(viewMode: .sourceAccurate)
+        }
+        
+        private func getLine(_ position: AbsolutePosition) -> Int {
+            let location = sourceLocationConverter.location(for: position)
+            return location.line
+        }
+        
+        override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            parentStack.append(currentParent ?? "")
+            currentParent = name
+            
+            symbols.append(CodeSymbol(
+                name: name,
+                kind: .class,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visitPost(_ node: ClassDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
+            }
+        }
+        
+        override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            parentStack.append(currentParent ?? "")
+            currentParent = name
+            
+            symbols.append(CodeSymbol(
+                name: name,
+                kind: .struct,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visitPost(_ node: StructDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
+            }
+        }
+        
+        override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            parentStack.append(currentParent ?? "")
+            currentParent = name
+            
+            symbols.append(CodeSymbol(
+                name: name,
+                kind: .enum,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visitPost(_ node: EnumDeclSyntax) {
+            if !parentStack.isEmpty {
+                currentParent = parentStack.removeLast()
+            }
+        }
+        
+        override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.description
+            
+            symbols.append(CodeSymbol(
+                name: name,
+                kind: .protocol,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: signature,
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
+            if let extendedType = node.extendedType.as(IdentifierTypeSyntax.self) {
+                let name = extendedType.name.text
+                let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+                let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+                
+                symbols.append(CodeSymbol(
+                    name: name,
+                    kind: .extension,
+                    filePath: filePath,
+                    startLine: startLine,
+                    endLine: endLine,
+                    signature: "extension \(name)",
+                    content: node.description
+                ))
+            }
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+            let name = node.name.text
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            let signature = node.signature.description
+            let isStatic = node.modifiers.contains { $0.name.text == "static" || $0.name.text == "class" }
+            
+            symbols.append(CodeSymbol(
+                name: name,
+                kind: (currentParent != nil || isStatic) ? .method : .function,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: "func \(name)\(signature)",
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+            for binding in node.bindings {
+                if let pattern = binding.pattern.as(IdentifierPatternSyntax.self) {
+                    let name = pattern.identifier.text
+                    let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+                    let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+                    let isProperty = currentParent != nil
+                    
+                    symbols.append(CodeSymbol(
+                        name: name,
+                        kind: isProperty ? .property : .variable,
+                        filePath: filePath,
+                        startLine: startLine,
+                        endLine: endLine,
+                        signature: node.description,
+                        content: node.description
+                    ))
+                }
+            }
+            
+            return .visitChildren
+        }
+        
+        override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
+            let path = node.path.description
+            let startLine = getLine(node.positionAfterSkippingLeadingTrivia)
+            let endLine = getLine(node.endPositionBeforeTrailingTrivia)
+            
+            symbols.append(CodeSymbol(
+                name: path,
+                kind: .import,
+                filePath: filePath,
+                startLine: startLine,
+                endLine: endLine,
+                signature: "import \(path)",
+                content: node.description
+            ))
+            
+            return .visitChildren
+        }
+    }
+    #endif
     
     /// Extract symbols using regex (fallback for when SwiftSyntax isn't available)
     private func extractSymbolsWithRegex(from content: String, filePath: String) -> [CodeSymbol] {

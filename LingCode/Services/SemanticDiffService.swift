@@ -263,6 +263,7 @@ class SemanticDiffService {
         case .enumSymbol: return "enum"
         case .structSymbol: return "struct"
         case .protocolSymbol: return "protocol"
+        case .extension: return "extension"
         }
     }
 }

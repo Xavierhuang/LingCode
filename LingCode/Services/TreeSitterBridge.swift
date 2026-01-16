@@ -74,7 +74,7 @@ class SwiftSyntaxASTParser {
     /// Real SwiftSyntax-based parsing (production-grade)
     private func parseWithSwiftSyntax(content: String, fileURL: URL) -> [ASTSymbol] {
         let sourceFile = Parser.parse(source: content)
-        let sourceLocationConverter = SourceLocationConverter(file: fileURL.path, tree: sourceFile)
+        let sourceLocationConverter = SourceLocationConverter(fileName: fileURL.path, tree: sourceFile)
         let visitor = SymbolExtractorVisitor(fileURL: fileURL, sourceLocationConverter: sourceLocationConverter)
         visitor.walk(sourceFile)
         return visitor.symbols
@@ -96,7 +96,7 @@ class SwiftSyntaxASTParser {
         
         private func getLine(_ position: AbsolutePosition) -> Int {
             let location = sourceLocationConverter.location(for: position)
-            return location.line ?? 1
+            return location.line
         }
         
         override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {

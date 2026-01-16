@@ -382,6 +382,7 @@ class RenameRefactorService {
         case .enumSymbol: return .typeAlias
         case .structSymbol: return .typeAlias
         case .protocolSymbol: return .typeAlias
+        case .extension: return .typeAlias
         }
     }
     

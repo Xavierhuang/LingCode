@@ -22,8 +22,6 @@
 		6A9CA15E2F1A8E8200E5C691 /* SwiftSyntaxBuilder in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA15D2F1A8E8200E5C691 /* SwiftSyntaxBuilder */; };
 		6A9CA1602F1A8E8200E5C691 /* SwiftSyntaxMacroExpansion in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA15F2F1A8E8200E5C691 /* SwiftSyntaxMacroExpansion */; };
 		6A9CA1622F1A8E8200E5C691 /* SwiftSyntaxMacros in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1612F1A8E8200E5C691 /* SwiftSyntaxMacros */; };
-		6A9CA1642F1A8E8200E5C691 /* SwiftSyntaxMacrosGenericTestSupport in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1632F1A8E8200E5C691 /* SwiftSyntaxMacrosGenericTestSupport */; };
-		6A9CA1662F1A8E8200E5C691 /* SwiftSyntaxMacrosTestSupport in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1652F1A8E8200E5C691 /* SwiftSyntaxMacrosTestSupport */; };
 		6A9CA1682F1A8E8200E5C691 /* _SwiftCompilerPluginMessageHandling in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1672F1A8E8200E5C691 /* _SwiftCompilerPluginMessageHandling */; };
 		6A9CA16A2F1A8E8200E5C691 /* _SwiftLibraryPluginProvider in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1692F1A8E8200E5C691 /* _SwiftLibraryPluginProvider */; };
 /* End PBXBuildFile section */
@@ -329,7 +327,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.5;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 4;
 				PRODUCT_BUNDLE_IDENTIFIER = hainanmandi.LingCode;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -368,7 +366,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 14.5;
+				MACOSX_DEPLOYMENT_TARGET = 15.6;
 				MARKETING_VERSION = 4;
 				PRODUCT_BUNDLE_IDENTIFIER = hainanmandi.LingCode;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -498,16 +496,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 6A9CA1462F1A8E8200E5C691 /* XCRemoteSwiftPackageReference "swift-syntax" */;
 			productName = SwiftSyntaxMacros;
-		};
-		6A9CA1632F1A8E8200E5C691 /* SwiftSyntaxMacrosGenericTestSupport */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 6A9CA1462F1A8E8200E5C691 /* XCRemoteSwiftPackageReference "swift-syntax" */;
-			productName = SwiftSyntaxMacrosGenericTestSupport;
-		};
-		6A9CA1652F1A8E8200E5C691 /* SwiftSyntaxMacrosTestSupport */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 6A9CA1462F1A8E8200E5C691 /* XCRemoteSwiftPackageReference "swift-syntax" */;
-			productName = SwiftSyntaxMacrosTestSupport;
 		};
 		6A9CA1672F1A8E8200E5C691 /* _SwiftCompilerPluginMessageHandling */ = {
 			isa = XCSwiftPackageProductDependency;
