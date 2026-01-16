@@ -12,6 +12,7 @@ struct RetryContext {
     let error: Error
     let failedEdit: Edit?
     let previousAttempts: Int
+    let isLinterError: Bool
 }
 
 class EditRetryService {
@@ -23,8 +24,15 @@ class EditRetryService {
     
     /// Generate retry prompt for AI with error feedback
     func generateRetryPrompt(context: RetryContext) -> String {
+        let header: String
+        if context.isLinterError {
+            header = "The edits were applied but failed linting/validation checks."
+        } else {
+            header = "The previous edits failed to apply."
+        }
+        
         var prompt = """
-        The previous edits failed to apply.
+        \(header)
         
         Error:
         \(context.error.localizedDescription)
@@ -101,52 +109,102 @@ class EditRetryService {
             in: workspaceURL,
             onProgress: onProgress,
             onComplete: { appliedFiles in
+                // Validation gate: run linter on changed files (best effort)
+                if LinterService.shared.hasLinter(for: workspaceURL) {
+                    onProgress("Verifying changes with linter...")
+                    LinterService.shared.validate(files: appliedFiles, in: workspaceURL) { linterError in
+                        if let linterError = linterError {
+                            self.handleRetry(
+                                error: linterError,
+                                edits: edits,
+                                workspaceURL: workspaceURL,
+                                aiService: aiService,
+                                attempt: attempt,
+                                isLinterError: true,
+                                onProgress: onProgress,
+                                onComplete: onComplete,
+                                onError: onError
+                            )
+                            return
+                        }
+                        
+                        onComplete(appliedFiles)
+                    }
+                    return
+                }
+                
                 onComplete(appliedFiles)
             },
             onError: { error in
-                // Check if we should retry
-                if attempt < self.maxRetries {
-                    onProgress("Edit failed, requesting AI to fix... (Attempt \(attempt + 1)/\(self.maxRetries))")
-                    
-                    // Generate retry prompt
-                    let retryContext = RetryContext(
-                        originalEdits: edits,
-                        error: error,
-                        failedEdit: self.findFailedEdit(edits: edits, error: error),
-                        previousAttempts: attempt
-                    )
-                    
-                    let retryPrompt = self.generateRetryPrompt(context: retryContext)
-                    
-                    // Request corrected edits from AI
-                    aiService.sendMessage(
-                        retryPrompt,
-                        context: nil,
-                        onResponse: { response in
-                            // Parse corrected edits
-                            if let correctedEdits = JSONEditSchemaService.shared.parseEdits(from: response) {
-                                // Retry with corrected edits
-                                self.applyWithRetryInternal(
-                                    edits: correctedEdits,
-                                    in: workspaceURL,
-                                    aiService: aiService,
-                                    attempt: attempt + 1,
-                                    onProgress: onProgress,
-                                    onComplete: onComplete,
-                                    onError: onError
-                                )
-                            } else {
-                                onError(RetryError.couldNotParseCorrectedEdits)
-                            }
-                        },
-                        onError: { aiError in
-                            onError(RetryError.aiRetryFailed(aiError))
-                        }
+                self.handleRetry(
+                    error: error,
+                    edits: edits,
+                    workspaceURL: workspaceURL,
+                    aiService: aiService,
+                    attempt: attempt,
+                    isLinterError: false,
+                    onProgress: onProgress,
+                    onComplete: onComplete,
+                    onError: onError
+                )
+            }
+        )
+    }
+    
+    private func handleRetry(
+        error: Error,
+        edits: [Edit],
+        workspaceURL: URL,
+        aiService: AIService,
+        attempt: Int,
+        isLinterError: Bool,
+        onProgress: @escaping (String) -> Void,
+        onComplete: @escaping ([URL]) -> Void,
+        onError: @escaping (Error) -> Void
+    ) {
+        if attempt >= self.maxRetries {
+            onError(RetryError.maxRetriesReached(originalError: error))
+            return
+        }
+        
+        let baseMsg: String
+        if isLinterError {
+            baseMsg = "Linter issues found, auto-fixing..."
+        } else {
+            baseMsg = "Edit failed, requesting AI to fix..."
+        }
+        onProgress("\(baseMsg) (Attempt \(attempt + 1)/\(self.maxRetries))")
+        
+        let retryContext = RetryContext(
+            originalEdits: edits,
+            error: error,
+            failedEdit: self.findFailedEdit(edits: edits, error: error),
+            previousAttempts: attempt,
+            isLinterError: isLinterError
+        )
+        
+        let retryPrompt = self.generateRetryPrompt(context: retryContext)
+        
+        aiService.sendMessage(
+            retryPrompt,
+            context: nil,
+            onResponse: { response in
+                if let correctedEdits = JSONEditSchemaService.shared.parseEdits(from: response) {
+                    self.applyWithRetryInternal(
+                        edits: correctedEdits,
+                        in: workspaceURL,
+                        aiService: aiService,
+                        attempt: attempt + 1,
+                        onProgress: onProgress,
+                        onComplete: onComplete,
+                        onError: onError
                     )
                 } else {
-                    // Max retries reached
-                    onError(RetryError.maxRetriesReached(originalError: error))
+                    onError(RetryError.couldNotParseCorrectedEdits)
                 }
+            },
+            onError: { aiError in
+                onError(RetryError.aiRetryFailed(aiError))
             }
         )
     }
