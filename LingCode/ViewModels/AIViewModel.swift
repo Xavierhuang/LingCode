@@ -27,7 +27,12 @@ class AIViewModel: ObservableObject {
     @Published var projectMode: Bool = false
     @Published var isSpeculating: Bool = false // Visual feedback for speculative context building
     
-    private let aiService = AIService.shared
+    // Use ModernAIService via ServiceContainer for async/await
+    private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+    // Keep reference to ModernAIService for configuration
+    private var modernAIService: ModernAIService? {
+        ServiceContainer.shared.modernAIService
+    }
     private let stepParser = AIStepParser.shared
     private let actionExecutor = ActionExecutor.shared
     private let projectGenerator = ProjectGeneratorService.shared
@@ -318,45 +323,48 @@ class AIViewModel: ObservableObject {
         // Parse edits from stream as they come
         var detectedEdits: [Edit]? = nil
         
-        aiService.streamMessage(
-            messageForRequest,
-            context: fullContext.isEmpty ? nil : fullContext,
-            images: images,
-            maxTokens: maxTokens,
-            systemPrompt: systemPromptForRequest,
-            onChunk: { chunk in
-                accumulatedResponse += chunk
+        // Use modern async/await streaming
+        Task { @MainActor in
+            do {
+                let stream = aiService.streamMessage(
+                    messageForRequest,
+                    context: fullContext.isEmpty ? nil : fullContext,
+                    images: images,
+                    maxTokens: maxTokens,
+                    systemPrompt: systemPromptForRequest
+                )
                 
-                // Try to parse edits from stream early
-                if detectedEdits == nil {
-                    detectedEdits = LatencyOptimizer.shared.parseEditsFromStream(accumulatedResponse)
-                }
-                
-                // Parse steps incrementally as we receive chunks
-                let parsed = self.stepParser.parseResponse(accumulatedResponse)
-                DispatchQueue.main.async {
+                // Process stream chunks
+                for try await chunk in stream {
+                    accumulatedResponse += chunk
+                    
+                    // Try to parse edits from stream early
+                    if detectedEdits == nil {
+                        detectedEdits = LatencyOptimizer.shared.parseEditsFromStream(accumulatedResponse)
+                    }
+                    
+                    // Parse steps incrementally as we receive chunks
+                    let parsed = self.stepParser.parseResponse(accumulatedResponse)
+                    
                     // Merge thinking steps instead of replacing - preserve existing thinking steps
                     if !parsed.steps.isEmpty {
                         var mergedSteps = self.thinkingSteps
                         for newStep in parsed.steps {
                             // Check for duplicates by content similarity, not just ID
-                            // A step is a duplicate if it has the same type and very similar content
                             let isDuplicate = mergedSteps.contains { existingStep in
                                 existingStep.type == newStep.type &&
                                 existingStep.content.trimmingCharacters(in: .whitespacesAndNewlines) == newStep.content.trimmingCharacters(in: .whitespacesAndNewlines)
                             }
                             
                             if !isDuplicate {
-                                // Check if this is an update to an existing step (same type, content is a superset)
+                                // Check if this is an update to an existing step
                                 if let existingIndex = mergedSteps.firstIndex(where: { existingStep in
                                     existingStep.type == newStep.type &&
                                     newStep.content.contains(existingStep.content) &&
                                     newStep.content.count > existingStep.content.count
                                 }) {
-                                    // Update existing step with new content
                                     mergedSteps[existingIndex] = newStep
                                 } else {
-                                    // New step, add it
                                     mergedSteps.append(newStep)
                                 }
                             }
@@ -373,15 +381,12 @@ class AIViewModel: ObservableObject {
                             ($0.filePath != nil && $0.filePath == parsedAction.filePath) ||
                             ($0.filePath == nil && $0.name == parsedAction.name)
                         }) {
-                            // Update existing action with streaming content
                             let existingAction = self.currentActions[existingIndex]
                             existingAction.fileContent = parsedAction.fileContent ?? existingAction.fileContent
-                            // Note: filePath is let constant, can't be modified
                             if existingAction.status == .pending {
                                 existingAction.status = .executing
                             }
                         } else {
-                            // Add new action
                             self.currentActions.append(parsedAction)
                         }
                     }
@@ -393,34 +398,29 @@ class AIViewModel: ObservableObject {
                         content: accumulatedResponse
                     )
                 }
-            },
-            onComplete: {
+                
+                // Stream completed successfully
                 assistantResponse = accumulatedResponse
                 
                 // Final parse
                 let parsed = self.stepParser.parseResponse(accumulatedResponse)
                 
-                // Merge thinking steps instead of replacing - preserve existing thinking steps
+                // Merge thinking steps
                 var mergedSteps = self.thinkingSteps
                 for newStep in parsed.steps {
-                    // Check for duplicates by content similarity, not just ID
-                    // A step is a duplicate if it has the same type and very similar content
                     let isDuplicate = mergedSteps.contains { existingStep in
                         existingStep.type == newStep.type &&
                         existingStep.content.trimmingCharacters(in: .whitespacesAndNewlines) == newStep.content.trimmingCharacters(in: .whitespacesAndNewlines)
                     }
                     
                     if !isDuplicate {
-                        // Check if this is an update to an existing step (same type, content is a superset)
                         if let existingIndex = mergedSteps.firstIndex(where: { existingStep in
                             existingStep.type == newStep.type &&
                             newStep.content.contains(existingStep.content) &&
                             newStep.content.count > existingStep.content.count
                         }) {
-                            // Update existing step with new content
                             mergedSteps[existingIndex] = newStep
                         } else {
-                            // New step, add it
                             mergedSteps.append(newStep)
                         }
                     }
@@ -440,7 +440,7 @@ class AIViewModel: ObservableObject {
                     content: assistantResponse
                 )
                 
-                // Check for missing referenced files (especially for website projects)
+                // Check for missing referenced files
                 if isProjectRequest {
                     self.checkAndRequestMissingFiles(
                         from: assistantResponse,
@@ -450,7 +450,7 @@ class AIViewModel: ObservableObject {
                     )
                 }
                 
-                // Automatically detect and show code changes (Cursor-like)
+                // Automatically detect and show code changes
                 self.detectAndShowCodeChanges(from: assistantResponse, projectURL: projectURL)
                 
                 // Execute code generation if enabled
@@ -460,41 +460,37 @@ class AIViewModel: ObservableObject {
                     self.isLoading = false
                     self.isGeneratingProject = false
                 }
-            },
-            onError: { error in
-                // Check if local mode is enabled - if so, don't fall back to cloud
+                
+            } catch {
+                // Handle errors
                 let localService = LocalOnlyService.shared
                 if localService.isLocalModeEnabled {
-                    // Local mode enabled - show error, don't fall back to cloud
-                    DispatchQueue.main.async {
-                        self.isLoading = false
-                        self.isGeneratingProject = false
-                        let errorService = ErrorHandlingService.shared
-                        var errorMsg = errorService.formatError(error)
-                        
-                        // Add helpful message for Ollama connection issues
-                        let nsError = error as NSError
-                        if nsError.domain == "LocalOnlyService" || nsError.domain == NSURLErrorDomain {
-                            if nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 { // NSURLErrorConnectionRefused
-                                errorMsg = "⚠️ Cannot connect to Ollama.\n\nMake sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again\n\nError: \(error.localizedDescription)"
-                            }
+                    // Local mode enabled - show error, don't fall back
+                    self.isLoading = false
+                    self.isGeneratingProject = false
+                    let errorService = ErrorHandlingService.shared
+                    var errorMsg = errorService.formatError(error)
+                    
+                    let nsError = error as NSError
+                    if nsError.domain == "LocalOnlyService" || nsError.domain == NSURLErrorDomain {
+                        if nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 {
+                            errorMsg = "⚠️ Cannot connect to Ollama.\n\nMake sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again\n\nError: \(error.localizedDescription)"
                         }
-                        
-                        self.errorMessage = errorMsg
-                        self.conversation.addMessage(AIMessage(
-                            role: .assistant,
-                            content: "❌ Error: \(errorMsg)"
-                        ))
                     }
-                    return
-                }
-                
-                // Fallback to non-streaming if streaming fails (only when NOT in local mode)
-                self.aiService.sendMessage(
-                    messageForRequest,
-                    context: fullContext.isEmpty ? nil : fullContext,
-                    images: images,
-                    onResponse: { response in
+                    
+                    self.errorMessage = errorMsg
+                    self.conversation.addMessage(AIMessage(
+                        role: .assistant,
+                        content: "❌ Error: \(errorMsg)"
+                    ))
+                } else {
+                    // Fallback to non-streaming if streaming fails
+                    do {
+                        let response = try await aiService.sendMessage(
+                            messageForRequest,
+                            context: fullContext.isEmpty ? nil : fullContext,
+                            images: images
+                        )
                         assistantResponse = response
                         
                         // Parse steps from response
@@ -517,18 +513,15 @@ class AIViewModel: ObservableObject {
                             self.isLoading = false
                             self.isGeneratingProject = false
                         }
-                    },
-                    onError: { error in
-                        DispatchQueue.main.async {
-                            self.isLoading = false
-                            self.isGeneratingProject = false
-                            let errorService = ErrorHandlingService.shared
-                            self.errorMessage = errorService.formatError(error)
-                        }
+                    } catch {
+                        self.isLoading = false
+                        self.isGeneratingProject = false
+                        let errorService = ErrorHandlingService.shared
+                        self.errorMessage = errorService.formatError(error)
                     }
-                )
+                }
             }
-        )
+        }
     }
     
     /// Detect if the message is requesting project generation
@@ -935,11 +928,19 @@ class AIViewModel: ObservableObject {
     }
     
     func setAPIKey(_ key: String, provider: AIProvider) {
-        aiService.setAPIKey(key, provider: provider)
+        // Update both old and new services for compatibility
+        AIService.shared.setAPIKey(key, provider: provider)
+        if let modernService = modernAIService {
+            modernService.setAPIKey(key, provider: provider)
+        }
     }
     
     func hasAPIKey() -> Bool {
-        return aiService.getAPIKey() != nil
+        // Check modern service first, fallback to old service
+        if let modernService = modernAIService {
+            return modernService.getAPIKey() != nil
+        }
+        return AIService.shared.getAPIKey() != nil
     }
     
     func explainCode(_ code: String) {
@@ -970,26 +971,30 @@ class AIViewModel: ObservableObject {
         Return the modified code only:
         """
         
-        aiService.sendMessage(prompt, context: nil) { response in
-            // Extract code from response
-            var code = response
-            
-            // Remove markdown code blocks if present
-            if code.contains("```") {
-                let parts = code.components(separatedBy: "```")
-                if parts.count >= 2 {
-                    code = parts[1]
-                    // Remove language identifier if present
-                    if let newlineIndex = code.firstIndex(of: "\n") {
-                        code = String(code[code.index(after: newlineIndex)...])
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [])
+                
+                // Extract code from response
+                var code = response
+                
+                // Remove markdown code blocks if present
+                if code.contains("```") {
+                    let parts = code.components(separatedBy: "```")
+                    if parts.count >= 2 {
+                        code = parts[1]
+                        // Remove language identifier if present
+                        if let newlineIndex = code.firstIndex(of: "\n") {
+                            code = String(code[code.index(after: newlineIndex)...])
+                        }
                     }
                 }
+                
+                completion(code.trimmingCharacters(in: .whitespacesAndNewlines))
+            } catch {
+                print("Inline edit error: \(error)")
+                completion(nil)
             }
-            
-            completion(code.trimmingCharacters(in: .whitespacesAndNewlines))
-        } onError: { error in
-            print("Inline edit error: \(error)")
-            completion(nil)
         }
     }
     

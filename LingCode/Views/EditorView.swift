@@ -364,31 +364,40 @@ struct EditorView: View {
         var responseText = ""
         var isStreamBlocked = false // SAFETY FLAG: Stops feeding garbage to the editor
         
-        AIService.shared.streamMessage(
-            editModePrompt,
-            context: context,
-            systemPrompt: systemPrompt,
-            onChunk: { chunk in
-                responseText += chunk
+        // Use ModernAIService with async/await
+        Task { @MainActor in
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                let stream = aiService.streamMessage(
+                    editModePrompt,
+                    context: context,
+                    images: [],
+                    maxTokens: nil,
+                    systemPrompt: systemPrompt
+                )
                 
-                // CRITICAL CRASH FIX: Guard against "## PLAN" output
-                // If we detect the AI is outputting a Plan (markdown), STOP updating the session.
-                // Sending 17k chars of markdown to the code editor crashes the ViewBridge.
-                if !isStreamBlocked {
-                    let fullText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // Check start of stream for forbidden headers
-                    if fullText.count < 500 && (fullText.hasPrefix("##") || fullText.hasPrefix("**Plan") || fullText.contains("## PLAN")) {
-                        print("⚠️ STREAM GUARD: Detected 'PLAN' output. Blocking stream to editor to prevent crash.")
-                        isStreamBlocked = true
-                        return
-                    }
+                // Process stream chunks
+                for try await chunk in stream {
+                    responseText += chunk
                     
-                    // Normal behavior
-                    session.appendStreamingText(chunk)
+                    // CRITICAL CRASH FIX: Guard against "## PLAN" output
+                    // If we detect the AI is outputting a Plan (markdown), STOP updating the session.
+                    // Sending 17k chars of markdown to the code editor crashes the ViewBridge.
+                    if !isStreamBlocked {
+                        let fullText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Check start of stream for forbidden headers
+                        if fullText.count < 500 && (fullText.hasPrefix("##") || fullText.hasPrefix("**Plan") || fullText.contains("## PLAN")) {
+                            print("⚠️ STREAM GUARD: Detected 'PLAN' output. Blocking stream to editor to prevent crash.")
+                            isStreamBlocked = true
+                            continue
+                        }
+                        
+                        // Normal behavior
+                        session.appendStreamingText(chunk)
+                    }
                 }
-            },
-            onComplete: {
-                // 1. Run validation in background to prevent UI freeze
+                
+                // Stream completed - run validation in background
                 Task.detached(priority: .userInitiated) {
                     let validation = EditOutputValidator.shared.validateEditOutput(responseText)
                     
@@ -425,8 +434,8 @@ struct EditorView: View {
                         }
                     }
                 }
-            },
-            onError: { error in
+            } catch {
+                // Handle errors
                 let nsError = error as NSError
                 let errorMessage: String
                 
@@ -453,7 +462,7 @@ struct EditorView: View {
                 session.model.status = .error(errorMessage)
                 session.model.errorMessage = errorMessage
             }
-        )
+        }
     }
     
     private func acceptEdits(from session: InlineEditSession, continueAfter: Bool = false) {

@@ -75,21 +75,21 @@ struct APITestView: View {
         }
         print("API Key: \(apiKey.prefix(20))...")
         
-        AIService.shared.sendMessage(
-            "Say 'Hello from LingCode!' if you can read this.",
-            context: nil,
-            onResponse: { response in
+        Task { @MainActor in
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                let response = try await aiService.sendMessage("Say 'Hello from LingCode!' if you can read this.", context: nil, images: [])
+                
                 isTesting = false
                 testResult = "✅ API is working!\n\nProvider: \(provider == .anthropic ? "Anthropic" : "OpenAI")\n\(provider == .anthropic ? "Model: \(model.displayName)\n" : "")Response: \(response)"
                 print("✅ Test successful!")
-            },
-            onError: { error in
+            } catch {
                 isTesting = false
                 let nsError = error as NSError
                 errorMessage = "❌ API Error: \(error.localizedDescription)\n\nProvider: \(provider == .anthropic ? "Anthropic" : "OpenAI")\n\(provider == .anthropic ? "Model: \(model.displayName)\n" : "")Error Code: \(nsError.code)\n\nMake sure:\n1. Your API key is correct\n2. You have internet connection\n3. The API service is available\n4. Check Console for detailed logs"
                 print("❌ Test failed: \(error.localizedDescription)")
             }
-        )
+        }
     }
 }
 

@@ -145,11 +145,12 @@ class GraphiteService {
         ]
         """
         
-        // Use AI to generate stacking plan
-        AIService.shared.sendMessage(
-            prompt,
-            context: nil,
-            onResponse: { response in
+        // Use ModernAIService to generate stacking plan
+        Task {
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [])
+                
                 // Parse AI response to extract stacking plan
                 if let plan = self.parseStackingPlan(from: response, changes: changes) {
                     completion(.success(plan))
@@ -158,13 +159,12 @@ class GraphiteService {
                     let fallbackPlan = self.createFallbackPlan(changes: changes)
                     completion(.success(fallbackPlan))
                 }
-            },
-            onError: { error in
+            } catch {
                 // Fallback to size-based grouping on AI error
                 let fallbackPlan = self.createFallbackPlan(changes: changes)
                 completion(.success(fallbackPlan))
             }
-        )
+        }
     }
     
     /// Create a stack from a stacking plan using Graphite CLI

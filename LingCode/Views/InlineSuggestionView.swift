@@ -35,7 +35,7 @@ class InlineSuggestionService: ObservableObject {
     @Published var isLoading: Bool = false
     
     private var debounceTimer: Timer?
-    private let aiService = AIService.shared
+    private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
     
     private init() {}
     
@@ -96,45 +96,40 @@ class InlineSuggestionService: ObservableObject {
         Complete the current line or add the next logical line.
         """
         
-        aiService.sendMessage(
-            prompt,
-            context: context,
-            onResponse: { [weak self] response in
-                DispatchQueue.main.async {
-                    self?.isLoading = false
-                    
-                    // Clean up the response
-                    var suggestion = response
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .replacingOccurrences(of: "```\(language ?? "")", with: "")
-                        .replacingOccurrences(of: "```", with: "")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    
-                    // Limit suggestion length
-                    if suggestion.count > 200 {
-                        if let firstNewline = suggestion.firstIndex(of: "\n") {
-                            suggestion = String(suggestion[..<firstNewline])
-                        } else {
-                            suggestion = String(suggestion.prefix(200))
-                        }
-                    }
-                    
-                    if !suggestion.isEmpty {
-                        self?.currentSuggestion = InlineSuggestion(
-                            text: suggestion,
-                            insertPosition: position,
-                            source: .ai
-                        )
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: context, images: [])
+                
+                isLoading = false
+                
+                // Clean up the response
+                var suggestion = response
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "```\(language ?? "")", with: "")
+                    .replacingOccurrences(of: "```", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // Limit suggestion length
+                if suggestion.count > 200 {
+                    if let firstNewline = suggestion.firstIndex(of: "\n") {
+                        suggestion = String(suggestion[..<firstNewline])
+                    } else {
+                        suggestion = String(suggestion.prefix(200))
                     }
                 }
-            },
-            onError: { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.isLoading = false
-                    self?.currentSuggestion = nil
+                
+                if !suggestion.isEmpty {
+                    currentSuggestion = InlineSuggestion(
+                        text: suggestion,
+                        insertPosition: position,
+                        source: .ai
+                    )
                 }
+            } catch {
+                isLoading = false
+                currentSuggestion = nil
             }
-        )
+        }
     }
 }
 

@@ -84,8 +84,8 @@ class AgentService: ObservableObject {
     @Published var pendingApproval: AgentDecision?
     @Published var pendingApprovalReason: String?
     
-    // Internal services
-    private let aiService = AIService.shared
+    // Internal services - use ModernAIService via ServiceContainer
+    private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
     private let terminalService = TerminalExecutionService.shared
     private let webSearch = WebSearchService.shared
     
@@ -99,15 +99,17 @@ class AgentService: ObservableObject {
         let task: AgentTask
         let projectURL: URL?
         let originalContext: String?
+        let images: [AttachedImage]
         let onStepUpdate: (AgentStep) -> Void
         let onComplete: (AgentTaskResult) -> Void
         let stepId: UUID
         
-        init(decision: AgentDecision, task: AgentTask, projectURL: URL?, originalContext: String?, onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void, stepId: UUID) {
+        init(decision: AgentDecision, task: AgentTask, projectURL: URL?, originalContext: String?, images: [AttachedImage], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void, stepId: UUID) {
             self.decision = decision
             self.task = task
             self.projectURL = projectURL
             self.originalContext = originalContext
+            self.images = images
             self.onStepUpdate = onStepUpdate
             self.onComplete = onComplete
             self.stepId = stepId
@@ -133,6 +135,7 @@ class AgentService: ObservableObject {
         _ taskDescription: String,
         projectURL: URL?,
         context: String?,
+        images: [AttachedImage] = [],
         onStepUpdate: @escaping (AgentStep) -> Void,
         onComplete: @escaping (AgentTaskResult) -> Void
     ) {
@@ -154,6 +157,7 @@ class AgentService: ObservableObject {
             task: task,
             projectURL: projectURL,
             originalContext: context,
+            images: images,
             onStepUpdate: onStepUpdate,
             onComplete: onComplete
         )
@@ -165,6 +169,7 @@ class AgentService: ObservableObject {
         task: AgentTask,
         projectURL: URL?,
         originalContext: String?,
+        images: [AttachedImage] = [],
         onStepUpdate: @escaping (AgentStep) -> Void,
         onComplete: @escaping (AgentTaskResult) -> Void
     ) {
@@ -224,19 +229,24 @@ class AgentService: ObservableObject {
         )
         addStep(thinkingStep, onUpdate: onStepUpdate)
         
-        // Use AIService to get response
-        var accumulatedResponse = ""
-        aiService.streamMessage(
-            prompt,
-            context: originalContext,
-            systemPrompt: "You are an autonomous coding agent. Always respond with valid JSON only.",
-            onChunk: { [weak self] chunk in
-                accumulatedResponse += chunk
-                // Update thinking step with partial response
-                self?.updateStep(thinkingStep.id, output: accumulatedResponse)
-            },
-            onComplete: { [weak self] in
-                guard let self = self else { return }
+        // Use ModernAIService with async/await
+        Task { @MainActor in
+            do {
+                var accumulatedResponse = ""
+                let stream = aiService.streamMessage(
+                    prompt,
+                    context: originalContext,
+                    images: images,
+                    maxTokens: nil,
+                    systemPrompt: "You are an autonomous coding agent. Always respond with valid JSON only."
+                )
+                
+                // Process stream chunks
+                for try await chunk in stream {
+                    accumulatedResponse += chunk
+                    // Update thinking step with partial response
+                    self.updateStep(thinkingStep.id, output: accumulatedResponse)
+                }
                 
                 // Remove "Thinking" placeholder
                 self.removeStep(thinkingStep.id)
@@ -251,7 +261,7 @@ class AgentService: ObservableObject {
                         error: "Invalid JSON response"
                     )
                     self.addStep(errorStep, onUpdate: onStepUpdate)
-                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
                     return
                 }
                 
@@ -282,26 +292,26 @@ class AgentService: ObservableObject {
                         task: task,
                         projectURL: projectURL,
                         originalContext: originalContext,
+                        images: images,
                         onStepUpdate: onStepUpdate,
                         onComplete: onComplete
                     )
                     
                 case .needsApproval(let reason):
                     // PAUSE and show approval UI
-                    DispatchQueue.main.async {
-                        self.pendingApproval = decision
-                        self.pendingApprovalReason = reason
-                        // Store context for resuming after approval
-                        self.pendingExecutionContext = PendingExecutionContext(
-                            decision: decision,
-                            task: task,
-                            projectURL: projectURL,
-                            originalContext: originalContext,
-                            onStepUpdate: onStepUpdate,
-                            onComplete: onComplete,
-                            stepId: nextStep.id
-                        )
-                    }
+                    self.pendingApproval = decision
+                    self.pendingApprovalReason = reason
+                    // Store context for resuming after approval
+                    self.pendingExecutionContext = PendingExecutionContext(
+                        decision: decision,
+                        task: task,
+                        projectURL: projectURL,
+                        originalContext: originalContext,
+                        images: images,
+                        onStepUpdate: onStepUpdate,
+                        onComplete: onComplete,
+                        stepId: nextStep.id
+                    )
                     
                 case .safe:
                     // Safe - execute immediately
@@ -326,17 +336,17 @@ class AgentService: ObservableObject {
                                 task: task,
                                 projectURL: projectURL,
                                 originalContext: originalContext,
+                                images: images,
                                 onStepUpdate: onStepUpdate,
                                 onComplete: onComplete
                             )
                         }
                     )
                 }
-            },
-            onError: { [weak self] error in
-                self?.finalize(success: false, error: error.localizedDescription, onComplete: onComplete)
+            } catch {
+                self.finalize(success: false, error: error.localizedDescription, onComplete: onComplete)
             }
-        )
+        }
     }
     
     // MARK: - Action Execution
@@ -527,6 +537,7 @@ class AgentService: ObservableObject {
                         task: context.task,
                         projectURL: context.projectURL,
                         originalContext: context.originalContext,
+                        images: context.images,
                         onStepUpdate: context.onStepUpdate,
                         onComplete: context.onComplete
                     )
@@ -544,6 +555,7 @@ class AgentService: ObservableObject {
                 task: context.task,
                 projectURL: context.projectURL,
                 originalContext: context.originalContext,
+                images: context.images,
                 onStepUpdate: context.onStepUpdate,
                 onComplete: context.onComplete
             )

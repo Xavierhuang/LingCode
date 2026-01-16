@@ -7,6 +7,9 @@
 
 import Foundation
 
+// Use shared Diagnostic from LSPDiagnosticsObserver
+// Note: Diagnostic is defined in LSPDiagnosticsObserver.swift as a top-level struct
+
 struct RefactorResult {
     let success: Bool
     let appliedEdits: [Edit]
@@ -14,19 +17,6 @@ struct RefactorResult {
     let testResults: TestResults?
     let repairAttempts: Int
     let error: Error?
-}
-
-struct Diagnostic {
-    let file: URL
-    let line: Int
-    let message: String
-    let severity: Severity
-    
-    enum Severity {
-        case error
-        case warning
-        case info
-    }
 }
 
 struct TestResults {
@@ -187,7 +177,7 @@ class SelfHealingRefactorService {
         completion: @escaping ([Edit]?) -> Void
     ) {
         // Build repair prompt
-        let errorMessages = errors.map { "\($0.file.lastPathComponent):\($0.line): \($0.message)" }.joined(separator: "\n")
+        let errorMessages = errors.map { "\($0.filePath.lastPathComponent):\($0.line): \($0.message)" }.joined(separator: "\n")
         
         // Build repair prompt (for future use with local model)
         _ = """
@@ -241,11 +231,71 @@ class SelfHealingRefactorService {
         completion(nil)
     }
     
-    /// Run diagnostics
+    /// Run diagnostics using swift build (SourceKit-LSP integration)
     private func runDiagnostics(in workspaceURL: URL) -> [Diagnostic] {
-        // Placeholder - would integrate with actual diagnostics service
-        // For now, return empty
-        return []
+        // Run swift build and capture stderr
+        let terminalService = TerminalExecutionService.shared
+        let result = terminalService.executeSync(
+            "swift build 2>&1",
+            workingDirectory: workspaceURL
+        )
+        
+        // Parse compiler output for errors
+        var diagnostics: [Diagnostic] = []
+        let lines = result.output.components(separatedBy: .newlines)
+        
+        for line in lines {
+            // Parse Swift compiler error format: "file.swift:line:column: error: message"
+            if let diagnostic = parseCompilerError(line, in: workspaceURL) {
+                diagnostics.append(diagnostic)
+            }
+        }
+        
+        return diagnostics
+    }
+    
+    /// Parse Swift compiler error line
+    private func parseCompilerError(_ line: String, in workspaceURL: URL) -> Diagnostic? {
+        // Pattern: "file.swift:line:column: error: message"
+        let pattern = #"^(.+?):(\d+):(\d+):\s*(error|warning|note):\s*(.+)$"#
+        
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
+              let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) else {
+            return nil
+        }
+        
+        guard let fileRange = Range(match.range(at: 1), in: line),
+              let lineRange = Range(match.range(at: 2), in: line),
+              let columnRange = Range(match.range(at: 3), in: line),
+              let severityRange = Range(match.range(at: 4), in: line),
+              let messageRange = Range(match.range(at: 5), in: line) else {
+            return nil
+        }
+        
+        let filePath = String(line[fileRange])
+        let lineNumber = Int(String(line[lineRange])) ?? 0
+        let columnNumber = Int(String(line[columnRange])) ?? 0
+        let severityString = String(line[severityRange])
+        let message = String(line[messageRange])
+        
+        // Resolve file path
+        let fileURL: URL
+        if filePath.hasPrefix("/") {
+            fileURL = URL(fileURLWithPath: filePath)
+        } else {
+            fileURL = workspaceURL.appendingPathComponent(filePath)
+        }
+        
+        let severity: Diagnostic.DiagnosticSeverity = severityString == "error" ? .error : .warning
+        
+        return Diagnostic(
+            filePath: fileURL,
+            line: lineNumber,
+            column: columnNumber,
+            severity: severity,
+            message: message,
+            code: nil
+        )
     }
     
     /// Run tests

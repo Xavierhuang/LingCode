@@ -88,10 +88,11 @@ class AutocompleteService {
         
         let prompt = "Complete this code. Only return the completion text, nothing else:\n\n\(context)\n\nComplete: \(prefix)"
         
-        AIService.shared.sendMessage(
-            prompt,
-            context: context,
-            onResponse: { response in
+        Task {
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                let response = try await aiService.sendMessage(prompt, context: context, images: [])
+                
                 let suggestions = response
                     .components(separatedBy: "\n")
                     .prefix(3)
@@ -103,11 +104,10 @@ class AutocompleteService {
                         )
                     }
                 completion(Array(suggestions))
-            },
-            onError: { _ in
+            } catch {
                 completion([])
             }
-        )
+        }
     }
 }
 

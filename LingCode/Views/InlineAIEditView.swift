@@ -91,10 +91,11 @@ struct InlineAIEditView: View {
             context += "\n\n" + relatedContext
         }
         
-        AIService.shared.sendMessage(
-            fullPrompt,
-            context: context,
-            onResponse: { response in
+        Task { @MainActor in
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                let response = try await aiService.sendMessage(fullPrompt, context: context, images: [])
+                
                 isLoading = false
                 
                 if viewModel.editorState.selectedText.isEmpty {
@@ -112,12 +113,11 @@ struct InlineAIEditView: View {
                 document.isModified = true
                 viewModel.updateDocumentContent(document.content)
                 isPresented = false
-            },
-            onError: { error in
+            } catch {
                 isLoading = false
                 errorMessage = error.localizedDescription
             }
-        )
+        }
     }
 }
 

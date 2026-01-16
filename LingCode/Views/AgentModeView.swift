@@ -6,9 +6,12 @@
 //
 
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct AgentModeView: View {
     @StateObject private var agentService = AgentService.shared
+    @StateObject private var imageContextService = ImageContextService.shared
     @State private var inputText: String = ""
     @State private var lastStepCount: Int = 0
     @Namespace private var bottomID
@@ -95,35 +98,59 @@ struct AgentModeView: View {
             Divider()
             
             // Input Area
-            HStack(spacing: 8) {
-                TextField("Describe the task...", text: $inputText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .lineLimit(1...3)
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color(NSColor.controlBackgroundColor))
-                    .cornerRadius(6)
-                    .onSubmit {
+            VStack(spacing: 8) {
+                // Attached Images
+                if !imageContextService.attachedImages.isEmpty {
+                    attachedImagesView
+                }
+                
+                HStack(spacing: 8) {
+                    // Image attachment button
+                    Button(action: {
+                        _ = imageContextService.addFromClipboard()
+                    }) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help("Attach image from clipboard")
+                    
+                    TextField("Describe the task...", text: $inputText, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .lineLimit(1...3)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(6)
+                        .onSubmit {
+                            if !inputText.isEmpty && !agentService.isRunning {
+                                startTask()
+                            }
+                        }
+                    
+                    Button(action: {
                         if !inputText.isEmpty && !agentService.isRunning {
                             startTask()
                         }
+                    }) {
+                        Image(systemName: "arrow.right.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(agentService.isRunning || inputText.isEmpty ? .secondary : .accentColor)
                     }
-                
-                Button(action: {
-                    if !inputText.isEmpty && !agentService.isRunning {
-                        startTask()
-                    }
-                }) {
-                    Image(systemName: "arrow.right.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(agentService.isRunning || inputText.isEmpty ? .secondary : .accentColor)
+                    .buttonStyle(PlainButtonStyle())
+                    .disabled(agentService.isRunning || inputText.isEmpty)
                 }
-                .buttonStyle(PlainButtonStyle())
-                .disabled(agentService.isRunning || inputText.isEmpty)
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
+            .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in
+                Task {
+                    _ = await handleImageDrop(providers: providers)
+                }
+                return true
+            }
         }
         .background(Color(NSColor.windowBackgroundColor))
         .onChange(of: agentService.pendingApproval) { oldValue, newValue in
@@ -150,6 +177,7 @@ struct AgentModeView: View {
     
     private func startTask() {
         let taskDescription = inputText
+        let images = imageContextService.attachedImages
         inputText = ""
         lastStepCount = 0
         
@@ -157,6 +185,7 @@ struct AgentModeView: View {
             taskDescription,
             projectURL: editorViewModel.rootFolderURL,
             context: editorViewModel.getContextForAI(),
+            images: images,
             onStepUpdate: { step in
                 // Step updated - view will automatically refresh via @Published
             },
@@ -166,8 +195,88 @@ struct AgentModeView: View {
                 } else {
                     print("❌ Agent task failed: \(result.error ?? "Unknown error")")
                 }
+                // Clear images after task completes
+                imageContextService.clearImages()
             }
         )
+    }
+    
+    // MARK: - Attached Images View
+    
+    private var attachedImagesView: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(imageContextService.attachedImages, id: \.id) { image in
+                    AttachedImageThumbnail(
+                        image: image,
+                        onRemove: {
+                            imageContextService.removeImage(image.id)
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal)
+        }
+        .frame(height: 70)
+    }
+    
+    // MARK: - Drag and Drop
+    
+    private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {
+        var handled = false
+        
+        for provider in providers {
+            // Check if it's a file URL (most common case)
+            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
+                await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, error in
+                        Task { @MainActor in
+                            if let error = error {
+                                print("Error loading file URL: \(error.localizedDescription)")
+                                continuation.resume()
+                                return
+                            }
+                            
+                            if let data = item as? Data,
+                               let url = URL(dataRepresentation: data, relativeTo: nil) {
+                                _ = imageContextService.addFromFile(url)
+                            } else if let url = item as? URL {
+                                _ = imageContextService.addFromFile(url)
+                            }
+                            continuation.resume()
+                        }
+                    }
+                }
+                handled = true
+            }
+            // Check if it's an image (for direct image drops)
+            else if provider.hasItemConformingToTypeIdentifier("public.image") {
+                await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: "public.image", options: nil) { item, error in
+                        Task { @MainActor in
+                            if let error = error {
+                                print("Error loading image: \(error.localizedDescription)")
+                                continuation.resume()
+                                return
+                            }
+                            
+                            if let url = item as? URL {
+                                _ = imageContextService.addFromFile(url)
+                            } else if let data = item as? Data,
+                                      let image = NSImage(data: data) {
+                                _ = imageContextService.addImage(image, source: .dragDrop)
+                            } else if let image = item as? NSImage {
+                                _ = imageContextService.addImage(image, source: .dragDrop)
+                            }
+                            continuation.resume()
+                        }
+                    }
+                }
+                handled = true
+            }
+        }
+        
+        return handled
     }
 }
 
@@ -383,6 +492,37 @@ struct LabeledRow: View {
                 .font(.caption)
                 .foregroundColor(.primary)
                 .textSelection(.enabled)
+        }
+    }
+}
+
+// MARK: - Attached Image Thumbnail
+
+struct AttachedImageThumbnail: View {
+    let image: AttachedImage
+    let onRemove: () -> Void
+    
+    private var nsImage: NSImage? {
+        guard let data = Data(base64Encoded: image.base64) else { return nil }
+        return NSImage(data: data)
+    }
+    
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            if let nsImage = nsImage {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 60, height: 60)
+                    .cornerRadius(4)
+            }
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.white)
+                    .background(Circle().fill(Color.black.opacity(0.6)))
+            }
+            .buttonStyle(PlainButtonStyle())
+            .offset(x: 4, y: -4)
         }
     }
 }

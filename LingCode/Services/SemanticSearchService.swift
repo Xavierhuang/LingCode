@@ -49,6 +49,9 @@ class SemanticSearchService: ObservableObject {
     private let fileManager = FileManager.default
     private var embedding: NLEmbedding?
     
+    // Vector database for embeddings
+    private let vectorDB = VectorDB.shared
+    
     // Background queue for indexing
     private let indexQueue = DispatchQueue(label: "com.lingcode.semantic.index", qos: .utility)
     
@@ -63,6 +66,7 @@ class SemanticSearchService: ObservableObject {
         
         indexQueue.async {
             var newIndex: [CodeChunk] = []
+            var embeddingsToStore: [CodeEmbedding] = []
             
             let enumerator = self.fileManager.enumerator(
                 at: workspaceURL,
@@ -77,32 +81,68 @@ class SemanticSearchService: ObservableObject {
                 if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
                     let chunks = self.chunkFile(content, fileURL: fileURL, workspace: workspaceURL)
                     newIndex.append(contentsOf: chunks)
+                    
+                    // Generate embeddings for chunks
+                    for chunk in chunks {
+                        if let embeddingVector = self.vectorDB.generateEmbedding(for: chunk.content) {
+                            let codeEmbedding = CodeEmbedding(
+                                id: chunk.id,
+                                filePath: chunk.filePath,
+                                startLine: chunk.startLine,
+                                endLine: chunk.endLine,
+                                content: chunk.content,
+                                embedding: embeddingVector,
+                                keywords: chunk.keywords
+                            )
+                            embeddingsToStore.append(codeEmbedding)
+                        }
+                    }
                 }
             }
+            
+            // Store embeddings in vector DB
+            self.vectorDB.store(embeddingsToStore)
             
             DispatchQueue.main.async {
                 self.index = newIndex
                 self.isIndexing = false
-                print("✅ Indexed \(newIndex.count) code chunks for semantic search")
+                print("✅ Indexed \(newIndex.count) code chunks with vector embeddings")
             }
         }
     }
     
-    /// 2. Find relevant code chunks for a query (new API)
+    /// 2. Find relevant code chunks for a query (new API with vector search)
     func search(query: String, limit: Int = 10) -> [CodeChunk] {
         guard !index.isEmpty else { return [] }
+        
+        // Use vector DB for semantic search
+        let vectorResults = vectorDB.search(query: query, limit: limit * 2) // Get more for hybrid scoring
+        
+        // Create a map of vector results for fast lookup
+        let vectorMap = Dictionary(uniqueKeysWithValues: vectorResults.map { ($0.id, $0) })
         
         // A. Keyword Boosting (Fast)
         let queryTerms = query.lowercased().split(separator: " ").map(String.init)
         
-        // B. Semantic Scoring
-        // In a full RAG system, we would do Dot Product of Vectors.
-        // Here we use a hybrid score of Keyword Match + Apple NLEmbedding distance.
-        
+        // B. Hybrid Scoring: Vector Similarity + Keyword Match
         let scoredChunks = index.map { chunk -> (CodeChunk, Double) in
             var score = 0.0
             
-            // 1. Keyword overlap
+            // 1. Vector similarity (primary signal)
+            if let vectorEmbedding = vectorMap[chunk.id] {
+                // Use similarity score from vector DB (0.0 to 1.0)
+                score += vectorEmbedding.similarity(to: vectorMap[chunk.id] ?? CodeEmbedding(
+                    id: "query",
+                    filePath: "",
+                    startLine: 0,
+                    endLine: 0,
+                    content: query,
+                    embedding: [],
+                    keywords: []
+                )) * 50.0 // Weight vector similarity heavily
+            }
+            
+            // 2. Keyword overlap
             let contentLower = chunk.content.lowercased()
             for term in queryTerms {
                 if contentLower.contains(term) {
@@ -110,14 +150,13 @@ class SemanticSearchService: ObservableObject {
                 }
             }
             
-            // 2. Filename match
+            // 3. Filename match
             if !queryTerms.isEmpty && chunk.filePath.lowercased().contains(queryTerms[0]) {
                 score += 20.0 // Very strong signal
             }
             
-            // 3. Simple Semantic (Conceptual) Match
-            // We use the embedding distance between query and chunk keywords
-            if let embedding = self.embedding {
+            // 4. Fallback: NLEmbedding distance (if vector DB doesn't have this chunk)
+            if vectorMap[chunk.id] == nil, let embedding = self.embedding {
                 let keywordsText = chunk.keywords.joined(separator: " ")
                 if !keywordsText.isEmpty {
                     let dist = embedding.distance(between: query, and: keywordsText)

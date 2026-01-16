@@ -118,23 +118,18 @@ struct WelcomeView: View {
         viewModel.aiViewModel.setAPIKey(apiKey, provider: selectedProvider)
         
         // Test the API key
-        AIService.shared.sendMessage(
-            "Hello",
-            context: nil,
-            onResponse: { _ in
-                DispatchQueue.main.async {
-                    isSettingUp = false
-                    isPresented = false
-                }
-            },
-            onError: { error in
-                DispatchQueue.main.async {
-                    isSettingUp = false
-                    // Show error but still allow to proceed
-                    isPresented = false
-                }
+        Task { @MainActor in
+            do {
+                let aiService: AIProviderProtocol = ServiceContainer.shared.ai
+                _ = try await aiService.sendMessage("Hello", context: nil, images: [])
+                isSettingUp = false
+                isPresented = false
+            } catch {
+                isSettingUp = false
+                // Show error but still allow to proceed
+                isPresented = false
             }
-        )
+        }
     }
 }
 

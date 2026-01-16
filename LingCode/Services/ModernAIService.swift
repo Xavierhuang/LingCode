@@ -424,6 +424,14 @@ class ModernAIService: AIProviderProtocol {
         saveAPIKey()
     }
     
+    func getAPIKey() -> String? {
+        return apiKey
+    }
+    
+    func getProvider() -> AIProvider {
+        return provider
+    }
+    
     func setAnthropicModel(_ model: AnthropicModel) {
         anthropicModel = model
         UserDefaults.standard.set(model.rawValue, forKey: "anthropic_model")
