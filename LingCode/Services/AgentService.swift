@@ -393,9 +393,37 @@ class AgentService: ObservableObject {
             }
             
             do {
+                // Create directory if needed
+                let directory = fullPath.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+                
+                // Write file
                 try code.write(to: fullPath, atomically: true, encoding: .utf8)
                 onOutput("File written: \(filePath)")
-                onComplete(true, "File written successfully")
+                
+                // IMPROVEMENT: Shadow Workspace - Validate compilation/lint before marking as success
+                // This matches Cursor's approach of validating code before showing it to the user
+                if let projectURL = projectURL {
+                    validateCodeAfterWrite(fileURL: fullPath, projectURL: projectURL) { validationResult in
+                        switch validationResult {
+                        case .success:
+                            onOutput("✅ Code validated successfully")
+                            onComplete(true, "File written and validated successfully")
+                        case .warnings(let messages):
+                            onOutput("⚠️ Code written with warnings:\n\(messages.joined(separator: "\n"))")
+                            onComplete(true, "File written with warnings")
+                        case .errors(let messages):
+                            onOutput("❌ Code written but has errors:\n\(messages.joined(separator: "\n"))")
+                            // Still mark as completed (file was written) but report errors
+                            onComplete(true, "File written but contains errors")
+                        case .skipped:
+                            // Validation not available or not applicable
+                            onComplete(true, "File written successfully")
+                        }
+                    }
+                } else {
+                    onComplete(true, "File written successfully")
+                }
             } catch {
                 onComplete(false, "Failed to write file: \(error.localizedDescription)")
             }
@@ -415,6 +443,84 @@ class AgentService: ObservableObject {
         default:
             onComplete(false, "Unknown action: \(decision.action)")
         }
+    }
+    
+    // MARK: - Shadow Workspace Validation
+    
+    /// IMPROVEMENT: Validate code after writing (Shadow Workspace pattern)
+    /// Matches Cursor's approach of validating code before marking as success
+    private enum ValidationResult {
+        case success
+        case warnings([String])
+        case errors([String])
+        case skipped
+    }
+    
+    private func validateCodeAfterWrite(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
+        // Use LinterService for validation
+        let linterService = LinterService.shared
+        
+        linterService.validate(files: [fileURL], in: projectURL) { lintError in
+            if let lintError = lintError {
+                // Linter found issues
+                switch lintError {
+                case .issues(let messages):
+                    // Check if any are errors vs warnings
+                    let errors = messages.filter { $0.lowercased().contains("error") }
+                    let warnings = messages.filter { !$0.lowercased().contains("error") }
+                    
+                    if !errors.isEmpty {
+                        completion(.errors(errors))
+                    } else if !warnings.isEmpty {
+                        completion(.warnings(warnings))
+                    } else {
+                        completion(.success)
+                    }
+                }
+            } else {
+                // No lint errors (or linter not available) - check if it's a Swift file and try compilation
+                if fileURL.pathExtension.lowercased() == "swift" {
+                    self.validateSwiftCompilation(fileURL: fileURL, projectURL: projectURL, completion: completion)
+                } else {
+                    // For non-Swift files, if no linter errors, consider it successful
+                    completion(.success)
+                }
+            }
+        }
+    }
+    
+    /// Validate Swift file compilation using swift build
+    private func validateSwiftCompilation(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
+        // Check if it's a Swift Package or Xcode project
+        let hasPackageSwift = FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("Package.swift").path)
+        let hasXcodeProject = FileManager.default.enumerator(at: projectURL, includingPropertiesForKeys: nil)?.contains { url in
+            (url as? URL)?.pathExtension == "xcodeproj"
+        } ?? false
+        
+        guard hasPackageSwift || hasXcodeProject else {
+            // Not a Swift project - skip validation
+            completion(.skipped)
+            return
+        }
+        
+        // Run swift build to check for compilation errors
+        let terminalService = TerminalExecutionService.shared
+        terminalService.execute(
+            "swift build 2>&1",
+            workingDirectory: projectURL,
+            environment: nil,
+            onOutput: { _ in },
+            onError: { _ in },
+            onComplete: { exitCode in
+                if exitCode == 0 {
+                    completion(.success)
+                } else {
+                    // Try to extract error messages from build output
+                    // For now, just report that there are compilation errors
+                    completion(.errors(["Compilation failed. Check build output for details."]))
+                }
+            }
+        )
     }
     
     // MARK: - Helpers

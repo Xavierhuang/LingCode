@@ -522,7 +522,6 @@ struct ComposerView: View {
         guard !composerInput.isEmpty else { return }
         
         isGenerating = true
-        let input = composerInput
         composerInput = ""
         
         // FIX: Enable project mode for Composer (enables tools)

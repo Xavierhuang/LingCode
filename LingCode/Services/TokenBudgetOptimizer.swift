@@ -199,42 +199,11 @@ class TokenBudgetOptimizer {
     }
     
     /// Fast token estimation
-    /// IMPROVEMENT: More accurate heuristic (closer to BPE tokenization)
-    /// TODO: Integrate Tiktoken for exact token counting
+    /// IMPROVEMENT: Uses BPE tokenizer for accurate token counting (replaces heuristic)
     func estimateTokens(_ text: String) -> Int {
-        // Better heuristic: account for whitespace, punctuation, and common patterns
-        // This is closer to actual BPE tokenization than simple char/4
-        
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return 0 }
-        
-        // Count words (more accurate for code)
-        let words = trimmed.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-        
-        // Base tokens from words
-        var tokens = words.count
-        
-        // Add tokens for punctuation and special characters
-        let punctuation = text.filter { ".,;:!?()[]{}\"'-".contains($0) }
-        tokens += punctuation.count / 2 // Punctuation often splits into separate tokens
-        
-        // Add tokens for operators and symbols
-        let operators = text.filter { "+-*/%=<>!&|^~".contains($0) }
-        tokens += operators.count
-        
-        // Code-specific: identifiers and keywords
-        // Long identifiers might be split into multiple tokens
-        for word in words {
-            if word.count > 10 {
-                // Long identifiers might be split (e.g., "getUserProfile" -> ["get", "User", "Profile"])
-                tokens += word.count / 8 // Approximate subword splitting
-            }
-        }
-        
-        // Minimum: at least char/4 (fallback for edge cases)
-        let minTokens = text.count / 4
-        return max(tokens, minTokens)
+        // Use BPETokenizer for accurate token counting
+        // This replaces the heuristic-based approach with proper BPE tokenization
+        return BPETokenizer.shared.estimateTokens(text)
     }
     
     /// Budget enforcement: drop lowest scored items

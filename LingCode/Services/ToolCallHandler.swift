@@ -35,7 +35,6 @@ class ToolCallHandler {
                 
                 // Decode tool input
                 if let inputData = Data(base64Encoded: base64Input),
-                   let inputString = String(data: inputData, encoding: .utf8),
                    let inputDict = try? JSONSerialization.jsonObject(with: inputData) as? [String: Any] {
                     
                     // Convert to AnyCodable

@@ -602,35 +602,9 @@ class ModernAIService: AIProviderProtocol {
     }
     
     /// FIX: Improved token estimation (ported from AIService)
-    /// Better heuristic for code-dense content
+    /// IMPROVEMENT: Uses BPE tokenizer for accurate token counting
     private func estimateTokens(_ text: String) -> Int {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return 0 }
-        
-        // Count words (more accurate base)
-        let words = trimmed.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-        
-        var tokens = words.count
-        
-        // Code-specific: punctuation and operators are often separate tokens
-        let punctuation = text.filter { ".,;:!?()[]{}\"'-".contains($0) }
-        tokens += punctuation.count / 2
-        
-        // Operators and symbols
-        let operators = text.filter { "+-*/%=<>!&|^~".contains($0) }
-        tokens += operators.count
-        
-        // Long identifiers might be split (BPE subword tokenization)
-        for word in words {
-            if word.count > 10 {
-                tokens += word.count / 8
-            }
-        }
-        
-        // Minimum fallback: at least char/4
-        let minTokens = text.count / 4
-        return max(tokens, minTokens)
+        return BPETokenizer.shared.estimateTokens(text)
     }
     
     /// FIX: Encode tool input to string for streaming
