@@ -121,7 +121,7 @@ struct WelcomeView: View {
         Task { @MainActor in
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-                _ = try await aiService.sendMessage("Hello", context: nil, images: [])
+                _ = try await aiService.sendMessage("Hello", context: nil, images: [], tools: nil)
                 isSettingUp = false
                 isPresented = false
             } catch {

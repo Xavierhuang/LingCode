@@ -98,7 +98,7 @@ class InlineSuggestionService: ObservableObject {
         
         Task { @MainActor in
             do {
-                let response = try await aiService.sendMessage(prompt, context: context, images: [])
+                let response = try await aiService.sendMessage(prompt, context: context, images: [], tools: nil)
                 
                 isLoading = false
                 

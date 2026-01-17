@@ -238,7 +238,8 @@ class AgentService: ObservableObject {
                     context: originalContext,
                     images: images,
                     maxTokens: nil,
-                    systemPrompt: "You are an autonomous coding agent. Always respond with valid JSON only."
+                    systemPrompt: "You are an autonomous coding agent. Always respond with valid JSON only.",
+                    tools: nil
                 )
                 
                 // Process stream chunks

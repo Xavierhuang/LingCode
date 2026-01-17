@@ -536,14 +536,16 @@ class RenameRefactorService {
         return references
     }
     
-    private func isInStringLiteral(at range: Range<String.Index>, in content: String) -> Bool {
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func isInStringLiteral(at range: Range<String.Index>, in content: String) -> Bool {
         // Simplified check - would use proper parsing
         let before = String(content[..<range.lowerBound])
         let quotes = before.filter { "\"'`".contains($0) }.count
         return quotes % 2 != 0
     }
     
-    private func isInComment(at range: Range<String.Index>, in content: String) -> Bool {
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func isInComment(at range: Range<String.Index>, in content: String) -> Bool {
         // Check if in single-line or multi-line comment
         let before = String(content[..<range.lowerBound])
         return before.contains("//") || before.contains("/*")

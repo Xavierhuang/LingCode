@@ -94,7 +94,7 @@ struct InlineAIEditView: View {
         Task { @MainActor in
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-                let response = try await aiService.sendMessage(fullPrompt, context: context, images: [])
+                let response = try await aiService.sendMessage(fullPrompt, context: context, images: [], tools: nil)
                 
                 isLoading = false
                 

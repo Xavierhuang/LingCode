@@ -78,7 +78,7 @@ struct APITestView: View {
         Task { @MainActor in
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-                let response = try await aiService.sendMessage("Say 'Hello from LingCode!' if you can read this.", context: nil, images: [])
+                let response = try await aiService.sendMessage("Say 'Hello from LingCode!' if you can read this.", context: nil, images: [], tools: nil)
                 
                 isTesting = false
                 testResult = "✅ API is working!\n\nProvider: \(provider == .anthropic ? "Anthropic" : "OpenAI")\n\(provider == .anthropic ? "Model: \(model.displayName)\n" : "")Response: \(response)"

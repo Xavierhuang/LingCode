@@ -302,13 +302,15 @@ class AIViewModel: ObservableObject {
             fullContext = editorContext + "\n\n" + fullContext
         }
         
-        var assistantResponse = ""
         let assistantMessage = AIMessage(role: .assistant, content: "")
         conversation.addMessage(assistantMessage)
         let assistantMessageIndex = conversation.messages.count - 1
         
         // Track response chunks for step-by-step parsing
         var accumulatedResponse = ""
+        
+        // FIX: Declare assistantResponse outside do block so it's accessible in catch block
+        var assistantResponse = ""
         
         // Add initial thinking step for all requests
         let initialStep = AIThinkingStep(
@@ -539,7 +541,8 @@ class AIViewModel: ObservableObject {
                         results: toolResults,
                         originalMessage: messageForRequest,
                         context: fullContext.isEmpty ? nil : fullContext,
-                        projectURL: projectURL
+                        projectURL: projectURL,
+                        assistantResponse: &assistantResponse
                     )
                 }
                 
@@ -630,7 +633,8 @@ class AIViewModel: ObservableObject {
                         let response = try await aiService.sendMessage(
                             messageForRequest,
                             context: fullContext.isEmpty ? nil : fullContext,
-                            images: images
+                            images: images,
+                            tools: nil
                         )
                         assistantResponse = response
                         
@@ -766,7 +770,8 @@ class AIViewModel: ObservableObject {
         results: [String: ToolResult],
         originalMessage: String,
         context: String?,
-        projectURL: URL?
+        projectURL: URL?,
+        assistantResponse: inout String
     ) async {
         // Build tool result messages for Anthropic format
         var toolResultContent: [[String: Any]] = []
@@ -1266,7 +1271,7 @@ class AIViewModel: ObservableObject {
         
         Task { @MainActor in
             do {
-                let response = try await aiService.sendMessage(prompt, context: nil, images: [])
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
                 
                 // Extract code from response
                 var code = response

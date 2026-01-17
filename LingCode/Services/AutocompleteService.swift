@@ -147,7 +147,7 @@ class AutocompleteService {
         Task {
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-                let response = try await aiService.sendMessage(prompt, context: context, images: [])
+                let response = try await aiService.sendMessage(prompt, context: context, images: [], tools: nil)
                 
                 let suggestions = response
                     .components(separatedBy: "\n")
