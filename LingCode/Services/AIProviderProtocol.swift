@@ -11,19 +11,22 @@ import Foundation
 /// Protocol for AI providers - enables dependency injection and testing
 protocol AIProviderProtocol {
     /// Stream a message and return chunks asynchronously
+    /// FIX: Added tools parameter for agent capabilities
     func streamMessage(
         _ message: String,
         context: String?,
         images: [AttachedImage],
         maxTokens: Int?,
-        systemPrompt: String?
+        systemPrompt: String?,
+        tools: [AITool]?
     ) -> AsyncThrowingStream<String, Error>
     
     /// Send a non-streaming message
     func sendMessage(
         _ message: String,
         context: String?,
-        images: [AttachedImage]
+        images: [AttachedImage],
+        tools: [AITool]?
     ) async throws -> String
     
     /// Get the last HTTP status code from the most recent request
@@ -42,6 +45,8 @@ enum AIError: Error, LocalizedError {
     case cancelled
     case emptyResponse
     case rateLimitExceeded
+    case timeout // FIX: Added for TTFT timeout
+    case modelNotFound // FIX: Added for future date model crash
     
     var errorDescription: String? {
         switch self {
@@ -59,6 +64,10 @@ enum AIError: Error, LocalizedError {
             return "Empty response received"
         case .rateLimitExceeded:
             return "Rate limit exceeded"
+        case .timeout:
+            return "Request timed out (no response received)"
+        case .modelNotFound:
+            return "Model not found or not yet available"
         }
     }
 }

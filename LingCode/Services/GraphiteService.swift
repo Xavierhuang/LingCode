@@ -149,7 +149,7 @@ class GraphiteService {
         Task {
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-                let response = try await aiService.sendMessage(prompt, context: nil, images: [])
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
                 
                 // Parse AI response to extract stacking plan
                 if let plan = self.parseStackingPlan(from: response, changes: changes) {

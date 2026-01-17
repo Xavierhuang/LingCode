@@ -222,10 +222,34 @@ class PatchGeneratorService {
             } else {
                 // Replace entire file
                 let newContent = patch.content.joined(separator: "\n")
-                // Safety check: Don't allow replacing with completely empty content unless explicitly deleting
-                guard !newContent.isEmpty || patch.content.isEmpty == false else {
+                
+                // FIX: Similarity Guard - prevent accidental deletion of large files
+                // If AI returns a partial file (e.g., just one function) but we interpret it as full replacement,
+                // we could delete the rest of the file. This guard prevents that.
+                let newLineCount = patch.content.count
+                let originalLineCount = existingLines.count
+                
+                // If new content is much smaller than original (less than 20% of original size),
+                // and original file is substantial (>50 lines), treat as suspicious
+                if originalLineCount > 50 && newLineCount > 0 {
+                    let similarityRatio = Double(newLineCount) / Double(originalLineCount)
+                    if similarityRatio < 0.2 {
+                        // This looks like a partial file, not a full replacement
+                        throw NSError(
+                            domain: "PatchGeneratorService",
+                            code: 3,
+                            userInfo: [
+                                NSLocalizedDescriptionKey: "Rejected: New content (\(newLineCount) lines) is much smaller than original (\(originalLineCount) lines). This may be a partial file. Please provide the complete file or use a range-based edit."
+                            ]
+                        )
+                    }
+                }
+                
+                // Safety check: Don't allow replacing with completely empty content
+                guard !newContent.isEmpty else {
                     throw NSError(domain: "PatchGeneratorService", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot replace file with empty content"])
                 }
+                
                 return newContent
             }
             

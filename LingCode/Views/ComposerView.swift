@@ -22,6 +22,7 @@ struct ComposerView: View {
     @State private var showMentionPopup = false
     @State private var activeMentions: [Mention] = []
     
+    
     struct ComposerFile: Identifiable {
         let id = UUID()
         var filePath: String
@@ -58,10 +59,43 @@ struct ComposerView: View {
             
             Divider()
             
+            // FIX: Tool call progress indicators
+            if !viewModel.toolCallProgresses.isEmpty {
+                ToolCallProgressListView(
+                    progresses: viewModel.toolCallProgresses,
+                    onApprove: { toolCallId in
+                        viewModel.approveToolCall(toolCallId)
+                    },
+                    onReject: { toolCallId in
+                        viewModel.rejectToolCall(toolCallId)
+                    }
+                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                
+                Divider()
+            }
+            
             // Input area
             composerInputArea
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .onAppear {
+            // FIX: Set up notification listener for tool file writes
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("ToolFileWritten"),
+                object: nil,
+                queue: .main
+            ) { notification in
+                if let userInfo = notification.userInfo,
+                   let filePath = userInfo["filePath"] as? String,
+                   let content = userInfo["content"] as? String {
+                    // Update or add file to Composer
+                    handleToolFileWrite(filePath: filePath, content: content)
+                }
+            }
+        }
     }
     
     // MARK: - Header
@@ -488,7 +522,11 @@ struct ComposerView: View {
         guard !composerInput.isEmpty else { return }
         
         isGenerating = true
+        let input = composerInput
         composerInput = ""
+        
+        // FIX: Enable project mode for Composer (enables tools)
+        viewModel.projectMode = true
         
         // Get context
         var context = editorViewModel.getContextForAI() ?? ""
@@ -502,7 +540,7 @@ struct ComposerView: View {
         )
         context += mentionContext
         
-        // Send to AI
+        // Send to AI with tools enabled (projectMode = true enables tools)
         viewModel.sendMessage(
             context: context,
             projectURL: editorViewModel.rootFolderURL,
@@ -565,6 +603,88 @@ struct ComposerView: View {
     private func discardAllFiles() {
         composerFiles.removeAll()
         selectedFileId = nil
+    }
+    
+    // MARK: - FIX: Tool Integration
+    
+    /// Handle file writes from tool calls
+    private func handleToolFileWrite(filePath: String, content: String) {
+        // Check if file already exists in composer
+        if let existingIndex = composerFiles.firstIndex(where: { $0.filePath == filePath }) {
+            // Update existing file
+            var updatedFile = composerFiles[existingIndex]
+            updatedFile.newContent = content
+            composerFiles[existingIndex] = updatedFile
+        } else {
+            // Add new file to composer
+            let fileName = (filePath as NSString).lastPathComponent
+            let language = detectLanguage(from: filePath)
+            
+            // Read original content if file exists
+            var originalContent = ""
+            if let projectURL = editorViewModel.rootFolderURL {
+                let fileURL = projectURL.appendingPathComponent(filePath)
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    originalContent = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+                }
+            }
+            
+            let newFile = ComposerFile(
+                filePath: filePath,
+                fileName: fileName,
+                originalContent: originalContent,
+                newContent: content,
+                language: language,
+                isExpanded: true,
+                changeSummary: calculateChangeSummary(original: originalContent, new: content)
+            )
+            
+            composerFiles.append(newFile)
+            
+            // Auto-select first file if none selected
+            if selectedFileId == nil {
+                selectedFileId = newFile.id
+            }
+        }
+    }
+    
+    /// Detect language from file path
+    private func detectLanguage(from filePath: String) -> String {
+        let ext = (filePath as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift": return "swift"
+        case "js", "jsx": return "javascript"
+        case "ts", "tsx": return "typescript"
+        case "py": return "python"
+        case "rs": return "rust"
+        case "go": return "go"
+        case "html": return "html"
+        case "css": return "css"
+        case "json": return "json"
+        case "md": return "markdown"
+        default: return "text"
+        }
+    }
+    
+    /// Calculate change summary for file
+    private func calculateChangeSummary(original: String, new: String) -> String {
+        let originalLines = original.components(separatedBy: .newlines).count
+        let newLines = new.components(separatedBy: .newlines).count
+        
+        if original.isEmpty {
+            return "+\(newLines) lines"
+        } else if new.isEmpty {
+            return "-\(originalLines) lines"
+        } else {
+            let diff = newLines - originalLines
+            if diff > 0 {
+                return "+\(diff) lines"
+            } else if diff < 0 {
+                return "\(diff) lines"
+            } else {
+                return "Modified"
+            }
+        }
     }
     
     // MARK: - Helpers

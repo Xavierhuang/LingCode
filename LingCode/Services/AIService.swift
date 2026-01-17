@@ -65,10 +65,37 @@ class AIService {
         loadModel()
     }
     
-    /// Estimate token count (simplified)
+    /// Estimate token count (improved heuristic for code)
+    /// FIX: Better estimation that accounts for code density (brackets, operators, etc.)
+    /// Code is token-dense, so simple char/4 underestimates. This is closer to BPE tokenization.
     private func estimateTokens(_ text: String) -> Int {
-        // Rough estimation: ~4 characters per token
-        return text.count / 4
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        
+        // Count words (more accurate base)
+        let words = trimmed.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        
+        var tokens = words.count
+        
+        // Code-specific: punctuation and operators are often separate tokens
+        let punctuation = text.filter { ".,;:!?()[]{}\"'-".contains($0) }
+        tokens += punctuation.count / 2
+        
+        // Operators and symbols
+        let operators = text.filter { "+-*/%=<>!&|^~".contains($0) }
+        tokens += operators.count
+        
+        // Long identifiers might be split (BPE subword tokenization)
+        for word in words {
+            if word.count > 10 {
+                tokens += word.count / 8
+            }
+        }
+        
+        // Minimum fallback: at least char/4
+        let minTokens = text.count / 4
+        return max(tokens, minTokens)
     }
     
     /// Cancel the current AI request
@@ -697,8 +724,10 @@ class AIService {
             var timeoutTimer: Timer?
             var receivedText: String = ""
             
-            // Timeout detection: If no chunks arrive within 30 seconds of HTTP 200, treat as failure
-            let chunkTimeout: TimeInterval = 30.0
+            // FIX: Aggressive TTFT (Time To First Token) timeout
+            // Reduced from 30s to 6s - if no token in 6 seconds, retry or fail fast
+            // This prevents users from waiting too long staring at a spinner
+            let chunkTimeout: TimeInterval = 6.0
             
             init(service: AIService, onChunk: @escaping (String) -> Void, onComplete: @escaping () -> Void, onError: @escaping (Error) -> Void) {
                 self.service = service

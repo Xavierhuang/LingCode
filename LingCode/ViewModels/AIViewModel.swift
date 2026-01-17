@@ -27,6 +27,13 @@ class AIViewModel: ObservableObject {
     @Published var projectMode: Bool = false
     @Published var isSpeculating: Bool = false // Visual feedback for speculative context building
     
+    // FIX: Tool call progress and permissions
+    @Published var toolCallProgresses: [ToolCallProgress] = []
+    @Published var toolPermissions: [ToolPermission] = ToolPermission.defaultPermissions
+    @Published var pendingToolCalls: [String: ToolCall] = [:] // Tool calls awaiting approval
+    private var toolResults: [String: ToolResult] = [:] // Collected tool results for feedback
+    private var collectedToolCalls: [ToolCall] = [] // Tool calls collected during streaming
+    
     // Use ModernAIService via ServiceContainer for async/await
     private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
     // Keep reference to ModernAIService for configuration
@@ -326,17 +333,140 @@ class AIViewModel: ObservableObject {
         // Use modern async/await streaming
         Task { @MainActor in
             do {
+                // FIX: Enable tools for agent mode (Composer mode)
+                let tools: [AITool]? = projectMode ? [
+                    .codebaseSearch(),
+                    .readFile(),
+                    .writeFile(),
+                    .runTerminalCommand(),
+                    .searchWeb(),
+                    .readDirectory()
+                ] : nil
+                
                 let stream = aiService.streamMessage(
                     messageForRequest,
                     context: fullContext.isEmpty ? nil : fullContext,
                     images: images,
                     maxTokens: maxTokens,
-                    systemPrompt: systemPromptForRequest
+                    systemPrompt: systemPromptForRequest,
+                    tools: tools // FIX: Enable tools in Composer mode
                 )
+                
+                // FIX: Tool call handler for agent capabilities
+                let toolHandler = ToolCallHandler.shared
+                toolHandler.clear()
+                self.collectedToolCalls.removeAll()
+                self.toolResults.removeAll()
+                self.toolCallProgresses.removeAll()
                 
                 // Process stream chunks
                 for try await chunk in stream {
-                    accumulatedResponse += chunk
+                    // FIX: Detect and handle tool calls
+                    let (text, toolCalls) = toolHandler.processChunk(chunk, projectURL: projectURL)
+                    
+                    if !text.isEmpty {
+                        accumulatedResponse += text
+                    }
+                    
+                    // FIX: Handle tool calls with progress indicators and permissions
+                    for toolCall in toolCalls {
+                        // Add to collected tool calls for result feedback
+                        collectedToolCalls.append(toolCall)
+                        
+                        // Check if tool requires approval
+                        let permission = toolPermissions.first { $0.toolName == toolCall.name }
+                        let requiresApproval = permission?.requiresApproval ?? false
+                        let autoApprove = permission?.autoApprove ?? false
+                        
+                        // Add progress indicator
+                        let progress = ToolCallProgress(
+                            id: toolCall.id,
+                            toolName: toolCall.name,
+                            status: requiresApproval && !autoApprove ? .pending : .executing,
+                            message: "",
+                            startTime: Date()
+                        )
+                        self.toolCallProgresses.append(progress)
+                        
+                        // If requires approval and not auto-approved, wait for user
+                        if requiresApproval && !autoApprove {
+                            pendingToolCalls[toolCall.id] = toolCall
+                            // Update progress to pending
+                            if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCall.id }) {
+                                toolCallProgresses[index] = ToolCallProgress(
+                                    id: toolCall.id,
+                                    toolName: toolCall.name,
+                                    status: .pending,
+                                    message: progress.displayMessage,
+                                    startTime: progress.startTime
+                                )
+                            }
+                            continue // Skip execution until approved
+                        }
+                        
+                        // Execute tool call
+                        Task { @MainActor in
+                            // Update progress to executing
+                            if let index = self.toolCallProgresses.firstIndex(where: { $0.id == toolCall.id }) {
+                                self.toolCallProgresses[index] = ToolCallProgress(
+                                    id: toolCall.id,
+                                    toolName: toolCall.name,
+                                    status: .executing,
+                                    message: progress.displayMessage,
+                                    startTime: progress.startTime
+                                )
+                            }
+                            
+                            do {
+                                let result = try await toolHandler.executeToolCall(toolCall, projectURL: projectURL)
+                                
+                                // Store result for feedback
+                                self.toolResults[toolCall.id] = result
+                                
+                                // Update progress to completed
+                                if let index = self.toolCallProgresses.firstIndex(where: { $0.id == toolCall.id }) {
+                                    self.toolCallProgresses[index] = ToolCallProgress(
+                                        id: toolCall.id,
+                                        toolName: toolCall.name,
+                                        status: result.isError ? .failed : .completed,
+                                        message: result.isError ? "Failed: \(result.content)" : "Completed",
+                                        startTime: progress.startTime
+                                    )
+                                }
+                                
+                                // If tool was write_file, update Composer files
+                                if toolCall.name == "write_file",
+                                   let filePathValue = toolCall.input["file_path"],
+                                   let filePath = filePathValue.value as? String,
+                                   let contentValue = toolCall.input["content"],
+                                   let content = contentValue.value as? String {
+                                    // Notify ComposerView of file change
+                                    NotificationCenter.default.post(
+                                        name: NSNotification.Name("ToolFileWritten"),
+                                        object: nil,
+                                        userInfo: ["filePath": filePath, "content": content]
+                                    )
+                                }
+                            } catch {
+                                // Update progress to failed
+                                if let index = self.toolCallProgresses.firstIndex(where: { $0.id == toolCall.id }) {
+                                    self.toolCallProgresses[index] = ToolCallProgress(
+                                        id: toolCall.id,
+                                        toolName: toolCall.name,
+                                        status: .failed,
+                                        message: "Error: \(error.localizedDescription)",
+                                        startTime: progress.startTime
+                                    )
+                                }
+                                
+                                self.toolResults[toolCall.id] = ToolResult(
+                                    toolUseId: toolCall.id,
+                                    content: "Error: \(error.localizedDescription)",
+                                    isError: true
+                                )
+                            }
+                        }
+                    }
                     
                     // Try to parse edits from stream early
                     if detectedEdits == nil {
@@ -402,8 +532,19 @@ class AIViewModel: ObservableObject {
                 // Stream completed successfully
                 assistantResponse = accumulatedResponse
                 
+                // FIX: Send tool results back to AI for chained tool calls
+                if !collectedToolCalls.isEmpty && !toolResults.isEmpty {
+                    await sendToolResultsToAI(
+                        toolCalls: collectedToolCalls,
+                        results: toolResults,
+                        originalMessage: messageForRequest,
+                        context: fullContext.isEmpty ? nil : fullContext,
+                        projectURL: projectURL
+                    )
+                }
+                
                 // Final parse
-                let parsed = self.stepParser.parseResponse(accumulatedResponse)
+                let parsed = self.stepParser.parseResponse(assistantResponse)
                 
                 // Merge thinking steps
                 var mergedSteps = self.thinkingSteps
@@ -611,6 +752,158 @@ class AIViewModel: ObservableObject {
         currentPlan = nil
         currentActions = []
         generationProgress = nil
+        toolCallProgresses.removeAll()
+        pendingToolCalls.removeAll()
+        toolResults.removeAll()
+        collectedToolCalls.removeAll()
+    }
+    
+    // MARK: - FIX: Tool Result Feedback
+    
+    /// Send tool results back to AI for chained tool calls
+    private func sendToolResultsToAI(
+        toolCalls: [ToolCall],
+        results: [String: ToolResult],
+        originalMessage: String,
+        context: String?,
+        projectURL: URL?
+    ) async {
+        // Build tool result messages for Anthropic format
+        var toolResultContent: [[String: Any]] = []
+        
+        for toolCall in toolCalls {
+            if let result = results[toolCall.id] {
+                toolResultContent.append([
+                    "type": "tool_result",
+                    "tool_use_id": toolCall.id,
+                    "content": result.content,
+                    "is_error": result.isError
+                ])
+            }
+        }
+        
+        guard !toolResultContent.isEmpty else { return }
+        
+        // Send follow-up message with tool results
+        do {
+            let tools: [AITool]? = projectMode ? [
+                .codebaseSearch(),
+                .readFile(),
+                .writeFile(),
+                .runTerminalCommand(),
+                .searchWeb(),
+                .readDirectory()
+            ] : nil
+            
+            let followUpMessage = "Continue with the tool results provided."
+            
+            let stream = aiService.streamMessage(
+                followUpMessage,
+                context: context,
+                images: [],
+                maxTokens: 4096,
+                systemPrompt: nil,
+                tools: tools
+            )
+            
+            // Process follow-up response
+            var followUpResponse = ""
+            for try await chunk in stream {
+                followUpResponse += chunk
+                
+                // Update conversation with follow-up response
+                if let lastIndex = conversation.messages.indices.last,
+                   conversation.messages[lastIndex].role == .assistant {
+                    conversation.messages[lastIndex] = AIMessage(
+                        id: conversation.messages[lastIndex].id,
+                        role: .assistant,
+                        content: assistantResponse + "\n\n[Tool Results Applied]\n" + followUpResponse
+                    )
+                }
+            }
+            
+            assistantResponse += "\n\n[Tool Results Applied]\n" + followUpResponse
+        } catch {
+            print("Failed to send tool results to AI: \(error)")
+        }
+    }
+    
+    // MARK: - FIX: Tool Approval
+    
+    /// Approve a pending tool call
+    func approveToolCall(_ toolCallId: String) {
+        guard let toolCall = pendingToolCalls[toolCallId] else { return }
+        
+        pendingToolCalls.removeValue(forKey: toolCallId)
+        
+        // Update progress to approved
+        if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCallId }) {
+            toolCallProgresses[index] = ToolCallProgress(
+                id: toolCallId,
+                toolName: toolCall.name,
+                status: .approved,
+                message: "Approved",
+                startTime: toolCallProgresses[index].startTime
+            )
+        }
+        
+        // Execute the tool call
+        Task { @MainActor in
+            let toolHandler = ToolCallHandler.shared
+            
+            // Update to executing
+            if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCallId }) {
+                toolCallProgresses[index] = ToolCallProgress(
+                    id: toolCallId,
+                    toolName: toolCall.name,
+                    status: .executing,
+                    message: toolCallProgresses[index].displayMessage,
+                    startTime: toolCallProgresses[index].startTime
+                )
+            }
+            
+            do {
+                let result = try await toolHandler.executeToolCall(toolCall, projectURL: editorViewModel?.rootFolderURL)
+                toolResults[toolCallId] = result
+                
+                // Update to completed
+                if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCallId }) {
+                    toolCallProgresses[index] = ToolCallProgress(
+                        id: toolCallId,
+                        toolName: toolCall.name,
+                        status: result.isError ? .failed : .completed,
+                        message: result.isError ? "Failed" : "Completed",
+                        startTime: toolCallProgresses[index].startTime
+                    )
+                }
+            } catch {
+                if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCallId }) {
+                    toolCallProgresses[index] = ToolCallProgress(
+                        id: toolCallId,
+                        toolName: toolCall.name,
+                        status: .failed,
+                        message: "Error: \(error.localizedDescription)",
+                        startTime: toolCallProgresses[index].startTime
+                    )
+                }
+            }
+        }
+    }
+    
+    /// Reject a pending tool call
+    func rejectToolCall(_ toolCallId: String) {
+        pendingToolCalls.removeValue(forKey: toolCallId)
+        
+        // Update progress to rejected
+        if let index = toolCallProgresses.firstIndex(where: { $0.id == toolCallId }) {
+            toolCallProgresses[index] = ToolCallProgress(
+                id: toolCallId,
+                toolName: toolCallProgresses[index].toolName,
+                status: .rejected,
+                message: "Rejected by user",
+                startTime: toolCallProgresses[index].startTime
+            )
+        }
     }
     
     func executeCodeGeneration(from response: String, projectURL: URL?) {
