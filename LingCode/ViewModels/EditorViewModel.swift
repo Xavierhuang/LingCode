@@ -368,7 +368,7 @@ class EditorViewModel: ObservableObject {
 
     // MARK: - Context for AI
     
-    func getContextForAI(query: String? = nil) -> String? {
+    func getContextForAI(query: String? = nil) async -> String? {
         // Use new Cursor-style context ranking with token budget optimization
         let rankingService = ContextRankingService.shared
         
@@ -393,7 +393,7 @@ class EditorViewModel: ObservableObject {
             return speculative
         }
         
-        let rankedContext = rankingService.buildContext(
+        let rankedContext = await rankingService.buildContext(
             activeFile: activeFile,
             selectedRange: selectedRange,
             diagnostics: diagnostics,

@@ -176,26 +176,28 @@ struct SimpleChatView: View {
     private func sendMessage() {
         guard !viewModel.currentInput.isEmpty || !activeMentions.isEmpty || !imageContextService.attachedImages.isEmpty else { return }
         
-        // Build context from mentions
-        var context = editorViewModel.getContextForAI() ?? ""
-        let mentionContext = MentionParser.shared.buildContextFromMentions(
-            activeMentions,
-            projectURL: editorViewModel.rootFolderURL,
-            selectedText: editorViewModel.editorState.selectedText,
-            terminalOutput: nil
-        )
-        context += mentionContext
-        
-        // Send message with images
-        viewModel.sendMessage(
-            context: context.isEmpty ? nil : context,
-            projectURL: editorViewModel.rootFolderURL,
-            images: imageContextService.attachedImages
-        )
-        
-        // Clear after sending
-        activeMentions.removeAll()
-        imageContextService.clearImages()
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            var context = await editorViewModel.getContextForAI() ?? ""
+            let mentionContext = MentionParser.shared.buildContextFromMentions(
+                activeMentions,
+                projectURL: editorViewModel.rootFolderURL,
+                selectedText: editorViewModel.editorState.selectedText,
+                terminalOutput: nil
+            )
+            context += mentionContext
+            
+            // Send message with images
+            viewModel.sendMessage(
+                context: context.isEmpty ? nil : context,
+                projectURL: editorViewModel.rootFolderURL,
+                images: imageContextService.attachedImages
+            )
+            
+            // Clear after sending
+            activeMentions.removeAll()
+            imageContextService.clearImages()
+        }
     }
     
     private func handleImageDrop(providers: [NSItemProvider]) async -> Bool {

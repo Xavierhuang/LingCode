@@ -1147,25 +1147,28 @@ struct CursorStreamingView: View {
             // Clear verification status for new request
             verificationStatus = nil
 
-            // Pass user message as query to detect website modifications and include existing files
-            var context = editorViewModel.getContextForAI(query: userRequest) ?? ""
+            // FIX: Build context asynchronously
+            Task { @MainActor in
+                // Pass user message as query to detect website modifications and include existing files
+                var context = await editorViewModel.getContextForAI(query: userRequest) ?? ""
 
-            // Build context from mentions
-            let mentionContext = MentionParser.shared.buildContextFromMentions(
-                activeMentions,
-                projectURL: editorViewModel.rootFolderURL,
-                selectedText: editorViewModel.editorState.selectedText,
-                terminalOutput: nil
-            )
-            context += mentionContext
+                // Build context from mentions
+                let mentionContext = MentionParser.shared.buildContextFromMentions(
+                    activeMentions,
+                    projectURL: editorViewModel.rootFolderURL,
+                    selectedText: editorViewModel.editorState.selectedText,
+                    terminalOutput: nil
+                )
+                context += mentionContext
 
-            // Agent mode always uses Edit Mode to ensure executable edits only
-            viewModel.sendMessage(
-                context: context,
-                projectURL: editorViewModel.rootFolderURL,
-                images: imageContextService.attachedImages,
-                forceEditMode: true
-            )
+                // Agent mode always uses Edit Mode to ensure executable edits only
+                viewModel.sendMessage(
+                    context: context,
+                    projectURL: editorViewModel.rootFolderURL,
+                    images: imageContextService.attachedImages,
+                    forceEditMode: true
+                )
+            }
 
             // Clear images and mentions after sending
             imageContextService.clearImages()

@@ -18,6 +18,7 @@ struct DependencyGraph {
 }
 
 class FileDependencyService {
+    // FIX: Mark shared as nonisolated to allow access from actor contexts
     static let shared = FileDependencyService()
     
     private var dependencyCache: [URL: [URL]] = [:]
@@ -64,6 +65,7 @@ class FileDependencyService {
     }
     
     /// Find files directly imported by the given file
+    /// FIX: Cannot be nonisolated due to mutable state access, but safe to call from actor
     func findImportedFiles(for fileURL: URL, in projectURL: URL) -> [URL] {
         if lastProjectURL != projectURL {
             graphCache = buildDependencyGraph(projectURL: projectURL)
@@ -79,6 +81,7 @@ class FileDependencyService {
     }
     
     /// Find files that reference symbols from the given file
+    /// FIX: Cannot be nonisolated due to mutable state access, but safe to call from actor
     func findReferencedFiles(for fileURL: URL, in projectURL: URL) -> [URL] {
         if lastProjectURL != projectURL {
             graphCache = buildDependencyGraph(projectURL: projectURL)

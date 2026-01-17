@@ -155,6 +155,12 @@ final class StreamingUpdateCoordinator: ObservableObject {
     /// FIX: Mark as @MainActor since it updates @Published property
     @MainActor
     private func interpolateTokens() {
+        // FIX: Safe string operations - check bounds before accessing
+        guard !interpolationBuffer.isEmpty else {
+            stopInterpolationTimer()
+            return
+        }
+        
         guard displayedText.count < interpolationBuffer.count else {
             // Caught up - stop interpolation
             stopInterpolationTimer()
@@ -162,7 +168,12 @@ final class StreamingUpdateCoordinator: ObservableObject {
         }
         
         // Append 2-3 characters per frame for smooth effect
+        // FIX: Safe string prefix - ensure targetLength is within bounds
         let targetLength = min(displayedText.count + charsPerFrame, interpolationBuffer.count)
+        guard targetLength > 0 && targetLength <= interpolationBuffer.count else {
+            return
+        }
+        
         let newText = String(interpolationBuffer.prefix(targetLength))
         
         // Update displayedText directly (we're already on main actor)

@@ -522,37 +522,42 @@ struct ComposerView: View {
         guard !composerInput.isEmpty else { return }
         
         isGenerating = true
+        let _ = composerInput // FIX: Capture input value but don't use it (cleared immediately)
         composerInput = ""
         
         // FIX: Enable project mode for Composer (enables tools)
         viewModel.projectMode = true
         
-        // Get context
-        var context = editorViewModel.getContextForAI() ?? ""
-        
-        // Build context from mentions
-        let mentionContext = MentionParser.shared.buildContextFromMentions(
-            activeMentions,
-            projectURL: editorViewModel.rootFolderURL,
-            selectedText: editorViewModel.editorState.selectedText,
-            terminalOutput: nil
-        )
-        context += mentionContext
-        
-        // Send to AI with tools enabled (projectMode = true enables tools)
-        viewModel.sendMessage(
-            context: context,
-            projectURL: editorViewModel.rootFolderURL,
-            images: imageContextService.attachedImages
-        )
-        
-        // Clear images and mentions after sending
-        imageContextService.clearImages()
-        activeMentions.removeAll()
-        
-        // Parse response for multiple files
-        // This will be handled by the streaming view parsing logic
-        // For now, we'll listen to viewModel changes
+        // Get context (async) - wrap in Task
+        Task {
+            var context = await editorViewModel.getContextForAI() ?? ""
+            
+            // Build context from mentions
+            let mentionContext = MentionParser.shared.buildContextFromMentions(
+                activeMentions,
+                projectURL: editorViewModel.rootFolderURL,
+                selectedText: editorViewModel.editorState.selectedText,
+                terminalOutput: nil
+            )
+            context += mentionContext
+            
+            // Send to AI with tools enabled (projectMode = true enables tools)
+            await MainActor.run {
+                viewModel.sendMessage(
+                    context: context,
+                    projectURL: editorViewModel.rootFolderURL,
+                    images: imageContextService.attachedImages
+                )
+                
+                // Clear images and mentions after sending
+                imageContextService.clearImages()
+                activeMentions.removeAll()
+            }
+            
+            // Parse response for multiple files
+            // This will be handled by the streaming view parsing logic
+            // For now, we'll listen to viewModel changes
+        }
     }
     
     private func applyFile(_ file: ComposerFile) {

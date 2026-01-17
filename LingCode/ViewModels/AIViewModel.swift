@@ -202,7 +202,7 @@ class AIViewModel: ObservableObject {
         
         // Build full context (editor context + optional extra context)
         // IMPORTANT: Do NOT include "plan/think out loud" instructions when we need strict edit output.
-        var fullContext = context ?? ""
+        let fullContext = context ?? ""
         
         let contextBuilder = CursorContextBuilder.shared
         
@@ -215,92 +215,10 @@ class AIViewModel: ObservableObject {
             
             // Clear it so we don't use stale data next time
             LatencyOptimizer.shared.clearSpeculativeContext()
-        } else {
-            print("🐢 COLD START: Building context manually...")
-            // Fallback to standard (slow) builder
-            if let editorVM = editorViewModel {
-                // Use ContextRankingService for comprehensive context (includes semantic search)
-                let activeFile = editorVM.editorState.activeDocument?.filePath
-                let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
-                
-                editorContext = ContextRankingService.shared.buildContext(
-                    activeFile: activeFile,
-                    selectedRange: selectedText,
-                    diagnostics: nil,
-                    projectURL: projectURL,
-                    query: userMessage
-                )
-                
-                // Also add Cursor-style context for compatibility (has some unique info like git diff)
-                let cursorContext = contextBuilder.buildContext(
-                    editorState: editorVM.editorState,
-                    cursorPosition: editorVM.editorState.cursorPosition,
-                    selectedText: editorVM.editorState.selectedText,
-                    projectURL: projectURL,
-                    includeDiagnostics: true,
-                    includeGitDiff: true,
-                    includeFileGraph: true
-                )
-                // Merge both contexts (ranked context is primary, cursor context supplements)
-                if !cursorContext.isEmpty {
-                    if editorContext.isEmpty {
-                        editorContext = cursorContext
-                    } else {
-                        // Append cursor context if it has unique information
-                        editorContext = editorContext + "\n\n" + cursorContext
-                    }
-                }
-            }
         }
+        // Note: Context building is now done inside the Task block to handle async properly
         
-        // Decide whether this request must use strict Edit Mode (no prose, edits only).
-        // This prevents the model from returning "PLAN" / markdown like in the raw dump.
-        // NOTE: Agent mode ALWAYS uses Edit Mode to ensure executable edits only.
-        let intent = IntentClassifier.shared.classify(userMessage)
-        let shouldUseEditMode: Bool = {
-            // Force Edit Mode if explicitly requested (e.g., Agent mode)
-            if forceEditMode {
-                return true
-            }
-            // For other modes, check intent and task type
-            switch intent {
-            case .simpleReplace, .rename:
-                return true
-            default:
-                break
-            }
-            // Also use Edit Mode for edit/refactor tasks.
-            return taskType == .inlineEdit || taskType == .refactor
-        }()
-        
-        // System prompt to send via the provider's real system prompt channel (NOT embedded in context).
-        let systemPromptForRequest: String? = {
-            if shouldUseEditMode {
-                return EditModePromptBuilder.shared.buildEditModeSystemPrompt()
-            }
-            return CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: editorContext.isEmpty ? nil : editorContext)
-        }()
-        
-        // User prompt for the request.
-        let messageForRequest: String = {
-            if shouldUseEditMode {
-                return EditModePromptBuilder.shared.buildEditModeUserPrompt(instruction: userMessage)
-            }
-            // Use appropriate prompt enhancement (this adds to user message, not system prompt)
-            if isProjectRequest {
-                return stepParser.enhancePromptForSteps(userMessage)
-            } else if isRunRequest {
-                return stepParser.enhancePromptForRun(userMessage, projectURL: projectURL)
-            } else {
-                return stepParser.enhancePromptForSteps(userMessage)
-            }
-        }()
-        
-        // Context channel: include editor context (file/selection/diagnostics) plus any extra caller context.
-        // For Cursor prompt we already append editorContext into system prompt; for Edit Mode we keep context here.
-        if shouldUseEditMode, !editorContext.isEmpty {
-            fullContext = editorContext + "\n\n" + fullContext
-        }
+        // Note: Prompt computation is moved into Task block to ensure context is built first
         
         let assistantMessage = AIMessage(role: .assistant, content: "")
         conversation.addMessage(assistantMessage)
@@ -332,8 +250,93 @@ class AIViewModel: ObservableObject {
         // Parse edits from stream as they come
         var detectedEdits: [Edit]? = nil
         
-        // Use modern async/await streaming
+        // FIX: Wrap async context building in Task since sendMessage is not async
         Task { @MainActor in
+            // Build context asynchronously if not already built
+            var finalEditorContext = editorContext
+            if finalEditorContext.isEmpty, let editorVM = editorViewModel {
+                let activeFile = editorVM.editorState.activeDocument?.filePath
+                let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+                
+                finalEditorContext = await ContextRankingService.shared.buildContext(
+                    activeFile: activeFile,
+                    selectedRange: selectedText,
+                    diagnostics: nil,
+                    projectURL: projectURL,
+                    query: userMessage
+                )
+                
+                // Also add Cursor-style context for compatibility
+                let cursorContext = contextBuilder.buildContext(
+                    editorState: editorVM.editorState,
+                    cursorPosition: editorVM.editorState.cursorPosition,
+                    selectedText: editorVM.editorState.selectedText,
+                    projectURL: projectURL,
+                    includeDiagnostics: true,
+                    includeGitDiff: true,
+                    includeFileGraph: true
+                )
+                if !cursorContext.isEmpty {
+                    if finalEditorContext.isEmpty {
+                        finalEditorContext = cursorContext
+                    } else {
+                        finalEditorContext = finalEditorContext + "\n\n" + cursorContext
+                    }
+                }
+            }
+            
+            // Compute prompts after context is built
+            let intent = IntentClassifier.shared.classify(userMessage)
+            let shouldUseEditMode: Bool = {
+                // Force Edit Mode if explicitly requested (e.g., Agent mode)
+                if forceEditMode {
+                    return true
+                }
+                // For other modes, check intent and task type
+                switch intent {
+                case .simpleReplace, .rename:
+                    return true
+                default:
+                    break
+                }
+                // Also use Edit Mode for edit/refactor tasks.
+                return taskType == .inlineEdit || taskType == .refactor
+            }()
+
+            // System prompt to send via the provider's real system prompt channel (NOT embedded in context).
+            let systemPromptForRequest: String? = {
+                if shouldUseEditMode {
+                    return EditModePromptBuilder.shared.buildEditModeSystemPrompt()
+                }
+                return CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: finalEditorContext.isEmpty ? nil : finalEditorContext)
+            }()
+
+            // User prompt for the request.
+            let messageForRequest: String = {
+                if shouldUseEditMode {
+                    return EditModePromptBuilder.shared.buildEditModeUserPrompt(instruction: userMessage)
+                }
+                // Use appropriate prompt enhancement (this adds to user message, not system prompt)
+                if isProjectRequest {
+                    return stepParser.enhancePromptForSteps(userMessage)
+                } else if isRunRequest {
+                    return stepParser.enhancePromptForRun(userMessage, projectURL: projectURL)
+                } else {
+                    return stepParser.enhancePromptForSteps(userMessage)
+                }
+            }()
+
+            // Context channel: include editor context (file/selection/diagnostics) plus any extra caller context.
+            let finalFullContext: String = {
+                var result = context ?? ""
+                if shouldUseEditMode, !finalEditorContext.isEmpty {
+                    result = finalEditorContext + "\n\n" + result
+                } else if !shouldUseEditMode, !finalEditorContext.isEmpty {
+                    result = finalEditorContext + "\n\n" + result
+                }
+                return result
+            }()
+            
             do {
                 // FIX: Enable tools for agent mode (Composer mode)
                 let tools: [AITool]? = projectMode ? [
@@ -347,7 +350,7 @@ class AIViewModel: ObservableObject {
                 
                 let stream = aiService.streamMessage(
                     messageForRequest,
-                    context: fullContext.isEmpty ? nil : fullContext,
+                    context: finalFullContext.isEmpty ? nil : finalFullContext,
                     images: images,
                     maxTokens: maxTokens,
                     systemPrompt: systemPromptForRequest,
@@ -1283,7 +1286,13 @@ class AIViewModel: ObservableObject {
                         code = parts[1]
                         // Remove language identifier if present
                         if let newlineIndex = code.firstIndex(of: "\n") {
-                            code = String(code[code.index(after: newlineIndex)...])
+                            // FIX: Safe string indexing - check bounds before accessing
+                            let nextIndex = code.index(after: newlineIndex)
+                            if nextIndex < code.endIndex {
+                                code = String(code[nextIndex...])
+                            } else {
+                                code = ""
+                            }
                         }
                     }
                 }

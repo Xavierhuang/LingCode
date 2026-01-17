@@ -150,9 +150,12 @@ struct CursorExperienceView: View {
     
     private func sendMessage() {
         guard !viewModel.currentInput.isEmpty else { return }
-        let context = editorViewModel.getContextForAI()
-        let projectURL = editorViewModel.rootFolderURL
-        viewModel.sendMessage(context: context, projectURL: projectURL)
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            let context = await editorViewModel.getContextForAI()
+            let projectURL = editorViewModel.rootFolderURL
+            viewModel.sendMessage(context: context, projectURL: projectURL)
+        }
     }
     
     // MARK: - Header

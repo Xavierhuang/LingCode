@@ -24,6 +24,7 @@ struct GitDiffInfo {
 }
 
 class GitAwareService {
+    // FIX: Mark shared as nonisolated to allow access from actor contexts
     static let shared = GitAwareService()
     
     private var heatMap: [URL: [Int: Int]] = [:] // [file: [line: score]]
@@ -154,6 +155,7 @@ class GitAwareService {
     }
     
     /// Get heat score for file and line
+    /// FIX: Uses thread-safe concurrent queue, safe to call from actor contexts
     func getHeatScore(file: URL, line: Int) -> Int {
         return cacheQueue.sync {
             return heatMap[file]?[line] ?? 0

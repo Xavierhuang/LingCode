@@ -204,20 +204,165 @@ class ModernAIService: AIProviderProtocol {
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         // FIX: Get model with fallback for future dates
-        let modelToUse = getAvailableModel()
+        var modelToUse = getAvailableModel()
         
-        // FIX: Use simplified approach - timeout is handled in streamAnthropicMessage
-        try await streamAnthropicMessage(
-            message: message,
-            context: context,
-            images: images,
-            apiKey: apiKey,
-            maxTokens: maxTokens,
-            systemPrompt: systemPrompt,
-            tools: tools,
-            model: modelToUse,
-            continuation: continuation
-        )
+        print("🔍 Selected model from enum: '\(anthropicModel.rawValue)'")
+        print("🔍 Converted to API model: '\(modelToUse)'")
+        
+        // FIX: Try primary model first, fallback to available model on 400/404 errors
+        do {
+            try await streamAnthropicMessage(
+                message: message,
+                context: context,
+                images: images,
+                apiKey: apiKey,
+                maxTokens: maxTokens,
+                systemPrompt: systemPrompt,
+                tools: tools,
+                model: modelToUse,
+                continuation: continuation
+            )
+        } catch {
+            // If model not found (400/404), try fallback model
+            if let aiError = error as? AIError,
+               case .serverError(let code, _) = aiError,
+               (code == 400 || code == 404),
+               modelToUse != AnthropicModel.haiku45.rawValue {
+                print("⚠️ Primary model '\(modelToUse)' not available, trying fallback...")
+                modelToUse = AnthropicModel.haiku45.rawValue
+                try await streamAnthropicMessage(
+                    message: message,
+                    context: context,
+                    images: images,
+                    apiKey: apiKey,
+                    maxTokens: maxTokens,
+                    systemPrompt: systemPrompt,
+                    tools: tools,
+                    model: modelToUse,
+                    continuation: continuation
+                )
+            } else {
+                // Re-throw other errors
+                throw error
+            }
+        }
+    }
+    
+    // MARK: - SSE Event Processing Helper
+    
+    /// Process a single SSE event (extracted from accumulated lines)
+    /// Returns true if continuation was finished (should stop processing)
+    private func processSSEEvent(
+        _ eventString: String,
+        continuation: AsyncThrowingStream<String, Error>.Continuation,
+        hasReceivedChunks: inout Bool,
+        firstChunkTime: inout Date?,
+        startTime: Date,
+        rawLines: [String],
+        httpResponse: HTTPURLResponse
+    ) -> Bool {
+        // FIX: SSE format has "event:" and "data:" on separate lines
+        // Extract the "data:" line from the accumulated event
+        let eventLines = eventString.components(separatedBy: .newlines)
+        var dataLine: String?
+        
+        for eventLine in eventLines {
+            let trimmed = eventLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("data: ") {
+                dataLine = trimmed
+                break
+            }
+        }
+        
+        guard let dataLine = dataLine else {
+            return false
+        }
+        
+        // FIX: Safe string indexing - use dropFirst which is safe
+        guard dataLine.count > 6 else {
+            return false
+        }
+        let jsonString = String(dataLine.dropFirst(6)) // Remove "data: " prefix
+        
+        if jsonString == "[DONE]" {
+            print("✅ Received [DONE] marker")
+            if !hasReceivedChunks {
+                print("❌ [DONE] received but no chunks were processed")
+                print("📋 All lines received: \(rawLines.joined(separator: "\n"))")
+                continuation.finish(throwing: AIError.emptyResponse)
+            } else {
+                continuation.finish()
+            }
+            return true
+        }
+        
+        guard let jsonData = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let type = json["type"] as? String else {
+            return false
+        }
+        
+        print("🔍 Parsed SSE event type: '\(type)'")
+        
+        // FIX: Handle tool use blocks (agent capabilities)
+        // Anthropic sends tool_use in content_block_start events
+        if type == "content_block_start",
+           let contentBlock = json["content_block"] as? [String: Any],
+           let blockType = contentBlock["type"] as? String,
+           blockType == "tool_use" {
+            // Extract tool use information
+            if let toolUseId = contentBlock["id"] as? String,
+               let toolName = contentBlock["name"] as? String,
+               let toolInput = contentBlock["input"] as? [String: Any] {
+                // Tool call detected - yield special marker for tool execution
+                continuation.yield("🔧 TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
+                hasReceivedChunks = true
+            }
+        } else if type == "content_block_delta",
+           let delta = json["delta"] as? [String: Any] {
+            // FIX: Handle both "text" and "text_delta" formats
+            // Anthropic API uses "text_delta" with a "text" field inside
+            let text: String?
+            if let textDelta = delta["text"] as? String {
+                // Direct text field (works for both formats)
+                text = textDelta
+            } else {
+                text = nil
+            }
+            
+            if let text = text, !text.isEmpty {
+                // FIX: Safe string prefix - use min to avoid index out of bounds
+                let previewLength = min(50, text.count)
+                let preview = String(text.prefix(previewLength))
+                print("📝 content_block_delta: text='\(preview)'")
+                if firstChunkTime == nil {
+                    firstChunkTime = Date()
+                    print("🎉 First chunk received at \(Date().timeIntervalSince(startTime))s")
+                }
+                hasReceivedChunks = true
+                continuation.yield(text)
+            } else {
+                print("⚠️ content_block_delta has no text or empty text")
+                print("   Delta structure: \(delta)")
+            }
+        } else if type == "message_stop" {
+            print("🛑 message_stop received")
+            if !hasReceivedChunks {
+                print("❌ message_stop but no chunks received")
+                print("📋 All events received: \(rawLines.joined(separator: "\n"))")
+                continuation.finish(throwing: AIError.emptyResponse)
+            } else {
+                continuation.finish()
+            }
+            return true
+        } else if type == "error",
+                  let error = json["error"] as? [String: Any],
+                  let message = error["message"] as? String {
+            continuation.finish(throwing: AIError.serverError(httpResponse.statusCode, message))
+            return true
+        }
+        
+        return false
     }
     
     private func streamAnthropicMessage(
@@ -288,6 +433,13 @@ class ModernAIService: AIProviderProtocol {
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
+        // DEBUG: Log the actual model being used
+        print("🔍 Making API request with model: '\(model)'")
+        if let bodyData = request.httpBody,
+           let bodyString = String(data: bodyData, encoding: .utf8) {
+            print("📤 Request body: \(bodyString)")
+        }
+        
         // Use URLSession.bytes(for:) for modern async streaming
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         
@@ -298,11 +450,47 @@ class ModernAIService: AIProviderProtocol {
         lastHTTPStatusCode = httpResponse.statusCode
         
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorMessage = httpResponse.statusCode == 429
-                ? "Rate limit exceeded"
-                : httpResponse.statusCode == 529 || httpResponse.statusCode == 503
-                ? "Service overloaded"
-                : "HTTP \(httpResponse.statusCode)"
+            // FIX: Read error response body for better error messages
+            var errorBody = ""
+            do {
+                // Try to read error response
+                var errorData = Data()
+                for try await chunk in bytes {
+                    errorData.append(chunk)
+                    if errorData.count > 10000 { break } // Limit read size
+                }
+                if let errorString = String(data: errorData, encoding: .utf8),
+                   let errorJson = try? JSONSerialization.jsonObject(with: errorData) as? [String: Any],
+                   let error = errorJson["error"] as? [String: Any],
+                   let message = error["message"] as? String {
+                    errorBody = message
+                } else if let errorString = String(data: errorData, encoding: .utf8) {
+                    errorBody = errorString
+                }
+            } catch {
+                // Ignore error reading body
+            }
+            
+            let errorMessage: String
+            if !errorBody.isEmpty {
+                errorMessage = errorBody
+            } else if httpResponse.statusCode == 429 {
+                errorMessage = "Rate limit exceeded. Please wait a moment and try again."
+            } else if httpResponse.statusCode == 529 || httpResponse.statusCode == 503 {
+                errorMessage = "Service overloaded. Please try again later."
+            } else if httpResponse.statusCode == 400 {
+                errorMessage = "Invalid request. The model may not be available. Try using Claude Sonnet 3.5 or Claude Haiku instead."
+            } else if httpResponse.statusCode == 404 {
+                errorMessage = "Model not found. The model '\(model)' may not be available yet. Try using Claude Sonnet 3.5 or Claude Haiku instead."
+            } else {
+                errorMessage = "HTTP \(httpResponse.statusCode). Please check your API key and model selection."
+            }
+            
+            print("❌ Anthropic API Error:")
+            print("   Status Code: \(httpResponse.statusCode)")
+            print("   Model: \(model)")
+            print("   Error: \(errorMessage)")
+            
             throw AIError.serverError(httpResponse.statusCode, errorMessage)
         }
         
@@ -310,81 +498,57 @@ class ModernAIService: AIProviderProtocol {
         let startTime = Date()
         var firstChunkTime: Date?
         var hasReceivedChunks = false
+        var continuationFinished = false // FIX: Track if continuation is already finished
+        var rawLines: [String] = [] // DEBUG: Collect raw lines for debugging
         
         // Parse SSE stream - process line by line, detect complete events
         var currentEvent = ""
+        var lineCount = 0
         
         for try await line in bytes.lines {
+            lineCount += 1
+            // DEBUG: Log first few lines to see what we're getting
+            if lineCount <= 10 {
+                print("📥 SSE Line \(lineCount): '\(line)'")
+            }
+            rawLines.append(line)
+            
             // FIX: Check TTFT timeout
             let elapsed = Date().timeIntervalSince(startTime)
             if !hasReceivedChunks && elapsed > 6.0 {
-                continuation.finish(throwing: AIError.timeout)
+                print("⏱️ TTFT timeout after \(elapsed)s, no chunks received")
+                print("📋 First 20 lines received: \(rawLines.prefix(20).joined(separator: "\n"))")
+                if !continuationFinished {
+                    continuation.finish(throwing: AIError.timeout)
+                    continuationFinished = true
+                }
                 return
             }
             if Task.isCancelled {
-                continuation.finish(throwing: AIError.cancelled)
+                if !continuationFinished {
+                    continuation.finish(throwing: AIError.cancelled)
+                    continuationFinished = true
+                }
                 return
             }
             
-            // Empty line indicates end of SSE event
-            if line.isEmpty {
-                // Process the accumulated event
-                let trimmed = currentEvent.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.hasPrefix("data: ") {
-                    let jsonString = String(trimmed.dropFirst(6))
-                    if jsonString == "[DONE]" {
-                        if !hasReceivedChunks {
-                            continuation.finish(throwing: AIError.emptyResponse)
-                        } else {
-                            continuation.finish()
-                        }
-                        return
-                    }
-                    
-                    if let jsonData = jsonString.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                       let type = json["type"] as? String {
-                        
-                        // FIX: Handle tool use blocks (agent capabilities)
-                        // Anthropic sends tool_use in content_block_start events
-                        if type == "content_block_start",
-                           let contentBlock = json["content_block"] as? [String: Any],
-                           let blockType = contentBlock["type"] as? String,
-                           blockType == "tool_use" {
-                            // Extract tool use information
-                            if let toolUseId = contentBlock["id"] as? String,
-                               let toolName = contentBlock["name"] as? String,
-                               let toolInput = contentBlock["input"] as? [String: Any] {
-                                // Tool call detected - yield special marker for tool execution
-                                continuation.yield("🔧 TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
-                                hasReceivedChunks = true
-                            }
-                        } else if type == "content_block_delta",
-                           let delta = json["delta"] as? [String: Any],
-                           let text = delta["text"] as? String,
-                           !text.isEmpty {
-                            if firstChunkTime == nil {
-                                firstChunkTime = Date()
-                            }
-                            hasReceivedChunks = true
-                            continuation.yield(text)
-                        } else if type == "message_stop" {
-                            if !hasReceivedChunks {
-                                continuation.finish(throwing: AIError.emptyResponse)
-                            } else {
-                                continuation.finish()
-                            }
-                            return
-                        } else if type == "error",
-                                  let error = json["error"] as? [String: Any],
-                                  let message = error["message"] as? String {
-                            continuation.finish(throwing: AIError.serverError(httpResponse.statusCode, message))
-                            return
-                        }
-                    }
+            // FIX: Process event when we see a new "event:" line or empty line
+            // This handles SSE format where events may not have empty lines between them
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isNewEvent = trimmedLine.hasPrefix("event: ")
+            let isEmpty = line.isEmpty
+            
+            if (isNewEvent || isEmpty) && !currentEvent.isEmpty {
+                // Process the accumulated event before starting a new one
+                let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse)
+                if shouldStop {
+                    continuationFinished = true
+                    return
                 }
                 currentEvent = ""
-            } else {
+            }
+            
+            if !isEmpty {
                 // Accumulate event lines
                 if !currentEvent.isEmpty {
                     currentEvent += "\n"
@@ -394,30 +558,33 @@ class ModernAIService: AIProviderProtocol {
         }
         
         // Process any remaining event
-        if !currentEvent.isEmpty {
-            let trimmed = currentEvent.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("data: ") {
-                let jsonString = String(trimmed.dropFirst(6))
-                if jsonString != "[DONE]" {
-                    if let jsonData = jsonString.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
-                       let type = json["type"] as? String,
-                       type == "content_block_delta",
-                       let delta = json["delta"] as? [String: Any],
-                       let text = delta["text"] as? String,
-                       !text.isEmpty {
-                        hasReceivedChunks = true
-                        continuation.yield(text)
-                    }
-                }
+        if !currentEvent.isEmpty && !continuationFinished {
+            let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse)
+            if shouldStop {
+                continuationFinished = true
+                return
             }
         }
         
-        // Stream ended
-        if !hasReceivedChunks {
-            continuation.finish(throwing: AIError.emptyResponse)
-        } else {
-            continuation.finish()
+        // Stream ended - only finish if not already finished
+        if !continuationFinished {
+            if !hasReceivedChunks {
+                print("❌ Stream ended with no chunks received")
+                print("   Model used: '\(model)'")
+                print("   HTTP Status: \(httpResponse.statusCode)")
+                print("   Total lines received: \(lineCount)")
+                print("   Raw lines (first 50):")
+                for (index, line) in rawLines.prefix(50).enumerated() {
+                    print("     [\(index)]: \(line)")
+                }
+                if rawLines.count > 50 {
+                    print("     ... and \(rawLines.count - 50) more lines")
+                }
+                continuation.finish(throwing: AIError.emptyResponse)
+            } else {
+                print("✅ Stream completed successfully with chunks")
+                continuation.finish()
+            }
         }
     }
     
@@ -570,34 +737,69 @@ class ModernAIService: AIProviderProtocol {
     }
     
     private func loadModel() {
-        if let modelString = UserDefaults.standard.string(forKey: "anthropic_model"),
-           let model = AnthropicModel(rawValue: modelString) {
-            anthropicModel = model
+        if let modelString = UserDefaults.standard.string(forKey: "anthropic_model") {
+            print("📦 Loading model from UserDefaults: '\(modelString)'")
+            // FIX: Migrate old dated model names to new alias names
+            let migratedString = migrateModelName(modelString)
+            print("🔄 Migrated to: '\(migratedString)'")
+            
+            if let model = AnthropicModel(rawValue: migratedString) {
+                anthropicModel = model
+                print("✅ Model loaded: '\(model.rawValue)' (display: '\(model.displayName)')")
+                // Save migrated model back to UserDefaults
+                if migratedString != modelString {
+                    UserDefaults.standard.set(migratedString, forKey: "anthropic_model")
+                    print("💾 Saved migrated model to UserDefaults")
+                }
+            } else {
+                print("⚠️ Could not find enum case for '\(migratedString)', using default")
+                // Fallback to default if migration result doesn't match enum
+                anthropicModel = .sonnet45
+            }
+        } else {
+            print("📦 No model in UserDefaults, using default: '\(anthropicModel.rawValue)'")
+        }
+    }
+    
+    /// FIX: Migrate old dated model names to new alias names
+    private func migrateModelName(_ modelString: String) -> String {
+        // Map old dated models to new aliases
+        switch modelString {
+        case "claude-sonnet-4-5-20250929":
+            return "claude-sonnet-4-5"
+        case "claude-haiku-4-5-20251001":
+            return "claude-haiku-4-5"
+        case "claude-opus-4-5-20251101":
+            return "claude-opus-4-5"
+        case "claude-opus-4-1-20250805":
+            return "claude-opus-4-5" // Migrate 4.1 to 4.5
+        default:
+            // If it's already an alias or unknown, return as-is
+            return modelString
         }
     }
     
     // MARK: - FIX: Model Fallback & Token Estimation
     
     /// FIX: Get available model with fallback for future dates
-    /// Prevents crash if model ID doesn't exist yet
+    /// Always returns alias model name (without date) for compatibility
     private func getAvailableModel() -> String {
         let modelID = anthropicModel.rawValue
+        print("🔍 getAvailableModel() called with enum value: '\(modelID)'")
         
-        // FIX: Check if model date is in the future (crash prevention)
-        // Extract date from model ID (format: claude-sonnet-4-5-20250929)
-        if let dateRange = modelID.range(of: #"\d{8}"#, options: .regularExpression) {
-            let dateString = String(modelID[dateRange])
-            if let year = Int(dateString.prefix(4)),
-               let month = Int(dateString.dropFirst(4).prefix(2)),
-               let day = Int(dateString.dropFirst(6)),
-               let modelDate = Calendar.current.date(from: DateComponents(year: year, month: month, day: day)),
-               modelDate > Date() {
-                // Model date is in future - use fallback
-                print("⚠️ Model \(modelID) has future date, using fallback")
-                return AnthropicModel.haiku45.rawValue // Use available model
+        // FIX: If model has a date, convert to alias
+        // This ensures we always use the alias which works even if dated version doesn't exist
+        if modelID.contains("-202") {
+            // Extract base model name (everything before the date)
+            if let dateIndex = modelID.range(of: "-202")?.lowerBound {
+                let baseModel = String(modelID[..<dateIndex])
+                print("⚠️ Model '\(modelID)' has date, using alias '\(baseModel)'")
+                return baseModel
             }
         }
         
+        // If already an alias or no date, return as-is
+        print("✅ Using model as-is: '\(modelID)'")
         return modelID
     }
     

@@ -86,12 +86,12 @@ struct InlineAIEditView: View {
         
         // Include related files context if enabled
         var context = document.content
-        if viewModel.includeRelatedFilesInContext,
-           let relatedContext = viewModel.getContextForAI() {
-            context += "\n\n" + relatedContext
-        }
         
         Task { @MainActor in
+            if viewModel.includeRelatedFilesInContext,
+               let relatedContext = await viewModel.getContextForAI() {
+                context += "\n\n" + relatedContext
+            }
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai
                 let response = try await aiService.sendMessage(fullPrompt, context: context, images: [], tools: nil)

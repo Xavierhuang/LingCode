@@ -288,32 +288,35 @@ struct AIChatView: View {
     }
     
     private func sendMessageWithContext() {
-        // Get user's message to find relevant files
-        let userQuery = viewModel.currentInput
-        var context = editorViewModel.getContextForAI(query: userQuery) ?? ""
-        
-        // Build context from mentions
-        let mentionContext = MentionParser.shared.buildContextFromMentions(
-            activeMentions,
-            projectURL: editorViewModel.rootFolderURL,
-            selectedText: editorViewModel.editorState.selectedText,
-            terminalOutput: nil
-        )
-        
-        context += mentionContext
-        
-        // Clear mentions after sending
-        activeMentions.removeAll()
-        
-        let projectURL = editorViewModel.rootFolderURL
-        viewModel.sendMessage(
-            context: context,
-            projectURL: projectURL,
-            images: imageContextService.attachedImages
-        )
-        
-        // Clear images after sending
-        imageContextService.clearImages()
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            // Get user's message to find relevant files
+            let userQuery = viewModel.currentInput
+            var context = await editorViewModel.getContextForAI(query: userQuery) ?? ""
+            
+            // Build context from mentions
+            let mentionContext = MentionParser.shared.buildContextFromMentions(
+                activeMentions,
+                projectURL: editorViewModel.rootFolderURL,
+                selectedText: editorViewModel.editorState.selectedText,
+                terminalOutput: nil
+            )
+            
+            context += mentionContext
+            
+            // Clear mentions after sending
+            activeMentions.removeAll()
+            
+            let projectURL = editorViewModel.rootFolderURL
+            viewModel.sendMessage(
+                context: context,
+                projectURL: projectURL,
+                images: imageContextService.attachedImages
+            )
+            
+            // Clear images after sending
+            imageContextService.clearImages()
+        }
     }
     
     // MARK: - Drag and Drop

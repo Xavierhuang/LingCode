@@ -409,7 +409,11 @@ class LocalOnlyService: ObservableObject {
         let semaphore = DispatchSemaphore(value: 0)
         var detectedModels: [LocalModelInfo] = []
         
-        let task = URLSession.shared.dataTask(with: ollamaURL) { data, response, error in
+        // FIX: Add timeout to prevent hanging
+        var request = URLRequest(url: ollamaURL)
+        request.timeoutInterval = 2.0 // 2 second timeout for quick check
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             
             // Silently handle connection errors (Ollama not running is expected)
@@ -550,6 +554,8 @@ class LocalOnlyService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // FIX: Add timeout to prevent hanging when Ollama is not running
+        request.timeoutInterval = 30.0 // 30 second timeout
         
         let requestBody: [String: Any] = [
             "model": model.name,
@@ -566,7 +572,28 @@ class LocalOnlyService: ObservableObject {
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                onError(error)
+                // FIX: Provide helpful error messages for connection failures
+                let nsError = error as NSError
+                var userMessage = "Failed to connect to Ollama"
+                
+                if nsError.code == NSURLErrorTimedOut {
+                    userMessage = "Ollama connection timed out. Make sure Ollama is running: 'ollama serve'"
+                } else if nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 || nsError.code == -1004 {
+                    // -1004 is "Could not connect to the server" (Connection refused)
+                    userMessage = "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                } else {
+                    userMessage = "Ollama error: \(error.localizedDescription)"
+                }
+                
+                let helpfulError = NSError(
+                    domain: "LocalOnlyService",
+                    code: 5,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: userMessage,
+                        NSUnderlyingErrorKey: error
+                    ]
+                )
+                onError(helpfulError)
                 return
             }
             

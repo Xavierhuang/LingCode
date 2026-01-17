@@ -21,22 +21,31 @@ enum AIProvider: String, Codable {
 }
 
 enum AnthropicModel: String, CaseIterable {
-    case sonnet45 = "claude-sonnet-4-5-20250929"
-    case haiku45 = "claude-haiku-4-5-20251001"
+    // FIX: Use API aliases (without dates) as primary identifiers
+    // These work even if the dated versions aren't available yet
+    case sonnet45 = "claude-sonnet-4-5"
+    case haiku45 = "claude-haiku-4-5"
+    case opus45 = "claude-opus-4-5"
+    // Keep dated versions as fallback options
+    case sonnet45Dated = "claude-sonnet-4-5-20250929"
+    case haiku45Dated = "claude-haiku-4-5-20251001"
+    case opus45Dated = "claude-opus-4-5-20251101"
     case opus41 = "claude-opus-4-1-20250805"
     
     var displayName: String {
         switch self {
-        case .sonnet45: return "Claude Sonnet 4.5"
-        case .haiku45: return "Claude Haiku 4.5"
+        case .sonnet45, .sonnet45Dated: return "Claude Sonnet 4.5"
+        case .haiku45, .haiku45Dated: return "Claude Haiku 4.5"
+        case .opus45, .opus45Dated: return "Claude Opus 4.5"
         case .opus41: return "Claude Opus 4.1"
         }
     }
     
     var description: String {
         switch self {
-        case .sonnet45: return "Smartest model for complex agents and coding"
-        case .haiku45: return "Fastest model with near-frontier intelligence"
+        case .sonnet45, .sonnet45Dated: return "Smartest model for complex agents and coding"
+        case .haiku45, .haiku45Dated: return "Fastest model with near-frontier intelligence"
+        case .opus45, .opus45Dated: return "Premium model combining maximum intelligence with practical performance"
         case .opus41: return "Exceptional model for specialized reasoning"
         }
     }
@@ -1043,9 +1052,35 @@ class AIService {
     }
     
     private func loadModel() {
-        if let modelString = UserDefaults.standard.string(forKey: "anthropic_model"),
-           let model = AnthropicModel(rawValue: modelString) {
-            anthropicModel = model
+        if let modelString = UserDefaults.standard.string(forKey: "anthropic_model") {
+            // FIX: Migrate old dated model names to new alias names
+            let migratedString = migrateModelName(modelString)
+            if let model = AnthropicModel(rawValue: migratedString) {
+                anthropicModel = model
+                // Save migrated model back to UserDefaults
+                if migratedString != modelString {
+                    UserDefaults.standard.set(migratedString, forKey: "anthropic_model")
+                    print("🔄 Migrated model from '\(modelString)' to '\(migratedString)'")
+                }
+            }
+        }
+    }
+    
+    /// FIX: Migrate old dated model names to new alias names
+    private func migrateModelName(_ modelString: String) -> String {
+        // Map old dated models to new aliases
+        switch modelString {
+        case "claude-sonnet-4-5-20250929":
+            return "claude-sonnet-4-5"
+        case "claude-haiku-4-5-20251001":
+            return "claude-haiku-4-5"
+        case "claude-opus-4-5-20251101":
+            return "claude-opus-4-5"
+        case "claude-opus-4-1-20250805":
+            return "claude-opus-4-5" // Migrate 4.1 to 4.5
+        default:
+            // If it's already an alias or unknown, return as-is
+            return modelString
         }
     }
 }

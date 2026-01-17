@@ -180,20 +180,22 @@ struct FluidAIView: View {
         appliedFiles.removeAll() // Reset for new request
         originalContents.removeAll()
         
-        // Build rich context with rules and codebase info
-        var context = editorViewModel.getContextForAI() ?? ""
-        
-        // Add project rules if available
-        if let rules = rulesService.getRulesForAI() {
-            context = rules + "\n\n" + context
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            var context = await editorViewModel.getContextForAI() ?? ""
+            
+            // Add project rules if available
+            if let rules = rulesService.getRulesForAI() {
+                context = rules + "\n\n" + context
+            }
+            
+            // Add codebase overview for smarter responses
+            if indexService.totalSymbolCount > 0 {
+                context = indexService.generateCodebaseOverview() + "\n\n" + context
+            }
+            
+            viewModel.sendMessage(context: context, projectURL: editorViewModel.rootFolderURL)
         }
-        
-        // Add codebase overview for smarter responses
-        if indexService.totalSymbolCount > 0 {
-            context = indexService.generateCodebaseOverview() + "\n\n" + context
-        }
-        
-        viewModel.sendMessage(context: context, projectURL: editorViewModel.rootFolderURL)
     }
     
     private func applyChange(_ action: AIAction) {

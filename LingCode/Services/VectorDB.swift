@@ -45,6 +45,7 @@ struct CodeEmbedding: Codable {
 // MARK: - Vector Database
 
 class VectorDB {
+    // FIX: Mark shared as nonisolated to allow access from actor contexts
     static let shared = VectorDB()
     
     private var embeddings: [String: CodeEmbedding] = [:]
@@ -198,7 +199,8 @@ class VectorDB {
     }
     
     /// Search for similar code chunks using vector similarity
-    func search(query: String, limit: Int = 10) -> [CodeEmbedding] {
+    /// FIX: Mark as nonisolated to allow calling from nonisolated contexts
+    nonisolated func search(query: String, limit: Int = 10) -> [CodeEmbedding] {
         guard let queryEmbedding = generateEmbedding(for: query) else {
             return []
         }

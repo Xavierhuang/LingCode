@@ -56,13 +56,16 @@ struct APITestView: View {
     }
     
     private func testAPI() {
-        guard let apiKey = AIService.shared.getAPIKey() else {
+        // FIX: Use ModernAIService directly to ensure we're using the same service as the app
+        let modernAIService = ServiceContainer.shared.modernAIService
+        
+        guard let apiKey = modernAIService.getAPIKey() else {
             errorMessage = "No API key configured. Please set your API key in Settings."
             return
         }
         
-        let provider = AIService.shared.getProvider()
-        let model = AIService.shared.getAnthropicModel()
+        let provider = modernAIService.getProvider()
+        let model = modernAIService.getAnthropicModel()
         
         isTesting = true
         testResult = ""
@@ -71,7 +74,8 @@ struct APITestView: View {
         print("🧪 Testing API...")
         print("Provider: \(provider == .anthropic ? "Anthropic" : "OpenAI")")
         if provider == .anthropic {
-            print("Model: \(model.rawValue)")
+            print("Model from enum: \(model.rawValue)")
+            print("Model display name: \(model.displayName)")
         }
         print("API Key: \(apiKey.prefix(20))...")
         
@@ -88,6 +92,7 @@ struct APITestView: View {
                 let nsError = error as NSError
                 errorMessage = "❌ API Error: \(error.localizedDescription)\n\nProvider: \(provider == .anthropic ? "Anthropic" : "OpenAI")\n\(provider == .anthropic ? "Model: \(model.displayName)\n" : "")Error Code: \(nsError.code)\n\nMake sure:\n1. Your API key is correct\n2. You have internet connection\n3. The API service is available\n4. Check Console for detailed logs"
                 print("❌ Test failed: \(error.localizedDescription)")
+                print("❌ Error details: \(error)")
             }
         }
     }

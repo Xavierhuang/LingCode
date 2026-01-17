@@ -48,7 +48,7 @@ class SpeculativeContextService: ObservableObject {
         
         // 2. Cold start (User typed too fast), build it now
         print("❄️ Speculative miss - Building Cold Context")
-        return ContextRankingService.shared.buildContext(
+        return await ContextRankingService.shared.buildContext(
             activeFile: activeFile,
             selectedRange: selectedRange,
             diagnostics: diagnostics,
@@ -108,9 +108,9 @@ class SpeculativeContextService: ObservableObject {
             self.isPreparing = true
         }
         
-        // Build context in background
-        DispatchQueue.global(qos: .userInitiated).async {
-            let context = ContextRankingService.shared.buildContext(
+        // Build context in background (async)
+        Task {
+            let context = await ContextRankingService.shared.buildContext(
                 activeFile: activeFile,
                 selectedRange: selectedRange,
                 diagnostics: diagnostics,
@@ -118,7 +118,7 @@ class SpeculativeContextService: ObservableObject {
                 query: query
             )
             
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.preparedContext = context
                 self.isPreparing = false
             }

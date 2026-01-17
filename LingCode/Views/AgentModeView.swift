@@ -181,24 +181,29 @@ struct AgentModeView: View {
         inputText = ""
         lastStepCount = 0
         
-        agentService.runTask(
-            taskDescription,
-            projectURL: editorViewModel.rootFolderURL,
-            context: editorViewModel.getContextForAI(),
-            images: images,
-            onStepUpdate: { step in
-                // Step updated - view will automatically refresh via @Published
-            },
-            onComplete: { result in
-                if result.success {
-                    print("✅ Agent task completed successfully")
-                } else {
-                    print("❌ Agent task failed: \(result.error ?? "Unknown error")")
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            let context = await editorViewModel.getContextForAI()
+            
+            agentService.runTask(
+                taskDescription,
+                projectURL: editorViewModel.rootFolderURL,
+                context: context,
+                images: images,
+                onStepUpdate: { step in
+                    // Step updated - view will automatically refresh via @Published
+                },
+                onComplete: { result in
+                    if result.success {
+                        print("✅ Agent task completed successfully")
+                    } else {
+                        print("❌ Agent task failed: \(result.error ?? "Unknown error")")
+                    }
+                    // Clear images after task completes
+                    imageContextService.clearImages()
                 }
-                // Clear images after task completes
-                imageContextService.clearImages()
-            }
-        )
+            )
+        }
     }
     
     // MARK: - Attached Images View
@@ -436,7 +441,7 @@ struct AgentApprovalDialog: View {
                 
                 VStack(alignment: .leading, spacing: 6) {
                     LabeledRow(label: "Type:", value: decision.action.capitalized)
-                    LabeledRow(label: "Description:", value: decision.description)
+                    LabeledRow(label: "Description:", value: decision.displayDescription)
                     
                     if let command = decision.command {
                         LabeledRow(label: "Command:", value: command)

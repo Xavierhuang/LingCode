@@ -365,33 +365,38 @@ struct EditorView: View {
         
         currentEditSession = session
         
-        var comprehensiveContext = viewModel.getContextForAI() ?? ""
-        if let projectURL = viewModel.rootFolderURL {
-            let fileManager = FileManager.default
-            if let enumerator = fileManager.enumerator(
-                at: projectURL,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) {
-                var projectFiles: [String] = []
-                for case let fileURL as URL in enumerator {
-                    guard !fileURL.hasDirectoryPath,
-                          let content = try? String(contentsOf: fileURL, encoding: .utf8),
-                          content.count > 0 else { continue }
-                    
-                    let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
-                    if !comprehensiveContext.contains(relativePath) {
-                        projectFiles.append("--- \(relativePath) ---\n\(content)\n")
+        // FIX: Build context asynchronously with parallel file reading
+        Task {
+            var comprehensiveContext = await viewModel.getContextForAI() ?? ""
+            if let projectURL = viewModel.rootFolderURL {
+                let fileManager = FileManager.default
+                if let enumerator = fileManager.enumerator(
+                    at: projectURL,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) {
+                    var projectFiles: [String] = []
+                    for case let fileURL as URL in enumerator {
+                        guard !fileURL.hasDirectoryPath,
+                              let content = try? String(contentsOf: fileURL, encoding: .utf8),
+                              content.count > 0 else { continue }
+                        
+                        let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
+                        if !comprehensiveContext.contains(relativePath) {
+                            projectFiles.append("--- \(relativePath) ---\n\(content)\n")
+                        }
+                    }
+                    if !projectFiles.isEmpty {
+                        comprehensiveContext += "\n\n--- ALL PROJECT FILES ---\n"
+                        comprehensiveContext += projectFiles.joined(separator: "\n")
                     }
                 }
-                if !projectFiles.isEmpty {
-                    comprehensiveContext += "\n\n--- ALL PROJECT FILES ---\n"
-                    comprehensiveContext += projectFiles.joined(separator: "\n")
-                }
+            }
+            
+            await MainActor.run {
+                streamAIResponse(for: session, instruction: fullInstruction, context: comprehensiveContext)
             }
         }
-        
-        streamAIResponse(for: session, instruction: fullInstruction, context: comprehensiveContext)
     }
     
     private func startStandardEditSession(instruction: String, document: Document) {
@@ -436,33 +441,38 @@ struct EditorView: View {
         
         currentEditSession = session
         
-        var comprehensiveContext = viewModel.getContextForAI() ?? ""
-        if let projectURL = viewModel.rootFolderURL {
-            let fileManager = FileManager.default
-            if let enumerator = fileManager.enumerator(
-                at: projectURL,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            ) {
-                var projectFiles: [String] = []
-                for case let fileURL as URL in enumerator {
-                    guard !fileURL.hasDirectoryPath,
-                          let content = try? String(contentsOf: fileURL, encoding: .utf8),
-                          content.count > 0 else { continue }
-                    
-                    let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
-                    if !comprehensiveContext.contains(relativePath) {
-                        projectFiles.append("--- \(relativePath) ---\n\(content)\n")
+        // FIX: Build context asynchronously with parallel file reading
+        Task {
+            var comprehensiveContext = await viewModel.getContextForAI() ?? ""
+            if let projectURL = viewModel.rootFolderURL {
+                let fileManager = FileManager.default
+                if let enumerator = fileManager.enumerator(
+                    at: projectURL,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) {
+                    var projectFiles: [String] = []
+                    for case let fileURL as URL in enumerator {
+                        guard !fileURL.hasDirectoryPath,
+                              let content = try? String(contentsOf: fileURL, encoding: .utf8),
+                              content.count > 0 else { continue }
+                        
+                        let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
+                        if !comprehensiveContext.contains(relativePath) {
+                            projectFiles.append("--- \(relativePath) ---\n\(content)\n")
+                        }
+                    }
+                    if !projectFiles.isEmpty {
+                        comprehensiveContext += "\n\n--- ALL PROJECT FILES ---\n"
+                        comprehensiveContext += projectFiles.joined(separator: "\n")
                     }
                 }
-                if !projectFiles.isEmpty {
-                    comprehensiveContext += "\n\n--- ALL PROJECT FILES ---\n"
-                    comprehensiveContext += projectFiles.joined(separator: "\n")
-                }
+            }
+            
+            await MainActor.run {
+                streamAIResponse(for: session, instruction: fullInstruction, context: comprehensiveContext)
             }
         }
-        
-        streamAIResponse(for: session, instruction: fullInstruction, context: comprehensiveContext)
     }
     
     private func streamAIResponse(for session: InlineEditSession, instruction: String, context: String?) {
@@ -697,8 +707,14 @@ struct EditorView: View {
         newSession.executionPlan = executionPlan
         currentEditSession = newSession
         
-        let comprehensiveContext = buildComprehensiveContext(baseContext: viewModel.getContextForAI())
-        streamAIResponse(for: newSession, instruction: instruction, context: comprehensiveContext)
+        // FIX: Build context asynchronously
+        Task {
+            let baseContext = await viewModel.getContextForAI() ?? ""
+            let comprehensiveContext = buildComprehensiveContext(baseContext: baseContext)
+            await MainActor.run {
+                streamAIResponse(for: newSession, instruction: instruction, context: comprehensiveContext)
+            }
+        }
     }
     
     private func buildInstructionFromPlan(_ plan: ExecutionPlan, fileState: FileStateInput) -> String {
@@ -769,11 +785,17 @@ struct EditorView: View {
             files: [fileState]
         )
         
-        streamAIResponse(
-            for: session,
-            instruction: continuationInstruction,
-            context: viewModel.getContextForAI()
-        )
+        // FIX: Build context asynchronously
+        Task {
+            let context = await viewModel.getContextForAI() ?? ""
+            await MainActor.run {
+                streamAIResponse(
+                    for: session,
+                    instruction: continuationInstruction,
+                    context: context
+                )
+            }
+        }
     }
     
     private func rejectEdits(from session: InlineEditSession) {
@@ -830,8 +852,14 @@ struct EditorView: View {
         let newSession = editorCoreAdapter.reuseIntent(intent: intent, files: [fileState])
         currentEditSession = newSession
         
-        let comprehensiveContext = buildComprehensiveContext(baseContext: viewModel.getContextForAI())
-        streamAIResponse(for: newSession, instruction: fullInstruction, context: comprehensiveContext)
+        // FIX: Build context asynchronously
+        Task {
+            let baseContext = await viewModel.getContextForAI() ?? ""
+            let comprehensiveContext = buildComprehensiveContext(baseContext: baseContext)
+            await MainActor.run {
+                streamAIResponse(for: newSession, instruction: fullInstruction, context: comprehensiveContext)
+            }
+        }
         newSession.model.recordTimelineEvent(.intentReused, description: "Reapplying: \(intent)")
     }
     
@@ -887,8 +915,15 @@ struct EditorView: View {
         )
         
         currentEditSession = newSession
-        let comprehensiveContext = buildComprehensiveContext(baseContext: viewModel.getContextForAI())
-        streamAIResponse(for: newSession, instruction: fullInstruction, context: comprehensiveContext)
+        
+        // FIX: Build context asynchronously
+        Task {
+            let baseContext = await viewModel.getContextForAI() ?? ""
+            let comprehensiveContext = buildComprehensiveContext(baseContext: baseContext)
+            await MainActor.run {
+                streamAIResponse(for: newSession, instruction: fullInstruction, context: comprehensiveContext)
+            }
+        }
         newSession.model.recordTimelineEvent(.intentReused, description: "Fixing syntax errors: \(intent)")
     }
 }

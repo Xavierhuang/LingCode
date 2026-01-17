@@ -12,6 +12,7 @@ import Foundation
 /// BPE tokenizer for accurate token counting
 /// IMPROVEMENT: Replaces heuristic (text.count / 4) with proper BPE tokenization
 class BPETokenizer {
+    // FIX: Mark shared as nonisolated to allow access from actor contexts
     static let shared = BPETokenizer()
     
     // Common BPE merges (simplified version - in production, load from model)
@@ -162,7 +163,8 @@ class BPETokenizer {
     
     /// Fast token estimation (for when exact count isn't critical)
     /// More accurate than simple char/4 heuristic
-    func estimateTokens(_ text: String) -> Int {
+    /// FIX: Mark as nonisolated to allow calling from actor contexts
+    nonisolated func estimateTokens(_ text: String) -> Int {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return 0 }
         

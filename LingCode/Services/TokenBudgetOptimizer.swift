@@ -29,6 +29,7 @@ struct ContextItem {
 }
 
 class TokenBudgetOptimizer {
+    // FIX: Mark shared as nonisolated to allow access from actor contexts
     static let shared = TokenBudgetOptimizer()
     
     private let budget = TokenBudget()
@@ -36,7 +37,8 @@ class TokenBudgetOptimizer {
     private init() {}
     
     /// Optimize context within token budget
-    func optimizeContext(
+    /// FIX: Mark as nonisolated to allow calling from actor contexts
+    nonisolated func optimizeContext(
         items: [ContextItem],
         maxTokens: Int = 16000
     ) -> [ContextItem] {

@@ -9,6 +9,9 @@
 import Foundation
 import Combine
 
+// FIX: Import AIError type for better error handling
+// AIError is defined in AIProviderProtocol.swift
+
 // MARK: - Models
 
 struct AgentTask: Identifiable {
@@ -63,12 +66,41 @@ struct AgentTaskResult {
 
 struct AgentDecision: Codable, Equatable {
     let action: String
-    let description: String
+    let description: String?
     let command: String?
     let query: String?
     let filePath: String?
     let code: String?
     let thought: String?
+    
+    // FIX: Computed property to provide a default description if missing
+    var displayDescription: String {
+        return description ?? defaultDescription
+    }
+    
+    private var defaultDescription: String {
+        switch action.lowercased() {
+        case "code":
+            if let filePath = filePath {
+                return "Updating code in \(filePath)"
+            }
+            return "Generating code"
+        case "terminal":
+            if let command = command {
+                return "Running command: \(command)"
+            }
+            return "Executing terminal command"
+        case "search":
+            if let query = query {
+                return "Searching: \(query)"
+            }
+            return "Performing web search"
+        case "done":
+            return "Task completed"
+        default:
+            return "Performing \(action)"
+        }
+    }
 }
 
 // MARK: - AgentService
@@ -91,7 +123,7 @@ class AgentService: ObservableObject {
     
     private var isCancelled = false
     private var iterationCount = 0
-    private let MAX_ITERATIONS = 20
+    private let MAX_ITERATIONS = AgentConfiguration.maxIterations
     
     // Store context for resuming after approval
     private class PendingExecutionContext {
@@ -243,7 +275,9 @@ class AgentService: ObservableObject {
                 )
                 
                 // Process stream chunks
+                var hasReceivedChunks = false
                 for try await chunk in stream {
+                    hasReceivedChunks = true
                     accumulatedResponse += chunk
                     // Update thinking step with partial response
                     self.updateStep(thinkingStep.id, output: accumulatedResponse)
@@ -251,6 +285,27 @@ class AgentService: ObservableObject {
                 
                 // Remove "Thinking" placeholder
                 self.removeStep(thinkingStep.id)
+                
+                // FIX: Check for empty response before parsing
+                if !hasReceivedChunks || accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let errorMessage: String
+                    let localService = LocalOnlyService.shared
+                    if localService.isLocalModeEnabled && !localService.isOllamaRunning {
+                        errorMessage = "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                    } else {
+                        errorMessage = "Empty response received from AI service. Please check your API configuration or try again."
+                    }
+                    
+                    let errorStep = AgentStep(
+                        type: .thinking,
+                        description: "AI service error",
+                        status: .failed,
+                        error: errorMessage
+                    )
+                    self.addStep(errorStep, onUpdate: onStepUpdate)
+                    self.finalize(success: false, error: errorMessage, onComplete: onComplete)
+                    return
+                }
                 
                 // Parse Decision
                 guard let decision = self.parseDecision(from: accumulatedResponse) else {
@@ -274,7 +329,7 @@ class AgentService: ObservableObject {
                 // 4. Create Actual Step
                 let nextStep = AgentStep(
                     type: self.mapType(decision.action),
-                    description: decision.description,
+                    description: decision.displayDescription,
                     status: .running,
                     output: decision.thought // Show thought process initially
                 )
@@ -345,7 +400,48 @@ class AgentService: ObservableObject {
                     )
                 }
             } catch {
-                self.finalize(success: false, error: error.localizedDescription, onComplete: onComplete)
+                // FIX: Provide better error messages for connection failures
+                let errorMessage: String
+                let nsError = error as NSError
+                
+                // Check if it's a connection error (Ollama not running)
+                if nsError.domain == NSURLErrorDomain {
+                    if nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 || nsError.code == -1004 {
+                        let localService = LocalOnlyService.shared
+                        if localService.isLocalModeEnabled && !localService.isOllamaRunning {
+                            errorMessage = "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                        } else {
+                            errorMessage = "Cannot connect to AI service. Please check your network connection or API configuration."
+                        }
+                    } else if nsError.code == NSURLErrorTimedOut {
+                        errorMessage = "Request timed out. The AI service may be overloaded. Please try again."
+                    } else {
+                        errorMessage = "Network error: \(error.localizedDescription)"
+                    }
+                } else if let aiError = error as? AIError {
+                    // Handle AIError types
+                    switch aiError {
+                    case .emptyResponse:
+                        errorMessage = "Empty response received from AI service. Please check your API configuration or try again."
+                    case .timeout:
+                        errorMessage = "Request timed out. The AI service may be overloaded. Please try again."
+                    case .rateLimitExceeded:
+                        errorMessage = "Rate limit exceeded. Please wait a moment and try again."
+                    default:
+                        errorMessage = aiError.localizedDescription
+                    }
+                } else {
+                    errorMessage = error.localizedDescription
+                }
+                
+                let errorStep = AgentStep(
+                    type: .thinking,
+                    description: "AI service error",
+                    status: .failed,
+                    error: errorMessage
+                )
+                self.addStep(errorStep, onUpdate: onStepUpdate)
+                self.finalize(success: false, error: errorMessage, onComplete: onComplete)
             }
         }
     }
@@ -565,20 +661,22 @@ class AgentService: ObservableObject {
         }
     }
     
+    /// FIX: Robust JSON parsing using stack-based extraction
+    /// Handles multiple JSON objects, explanations with braces, and markdown code blocks
     private func parseDecision(from response: String) -> AgentDecision? {
-        // Extract JSON from response (might be wrapped in markdown code blocks)
         var jsonString = response.trimmingCharacters(in: .whitespacesAndNewlines)
         
         // Remove markdown code blocks if present
-        if jsonString.hasPrefix("```") {
+        if jsonString.hasPrefix("```json") || jsonString.hasPrefix("```") {
             let lines = jsonString.components(separatedBy: .newlines)
-            jsonString = lines.dropFirst().dropLast().joined(separator: "\n")
+            if lines.count >= 3 {
+                jsonString = lines.dropFirst().dropLast().joined(separator: "\n")
+            }
         }
         
-        // Try to find JSON object
-        if let jsonStart = jsonString.range(of: "{"),
-           let jsonEnd = jsonString.range(of: "}", options: .backwards, range: jsonStart.upperBound..<jsonString.endIndex) {
-            jsonString = String(jsonString[jsonStart.lowerBound...jsonEnd.upperBound])
+        // Try to extract first complete JSON object using stack-based parsing
+        if let extracted = extractFirstCompleteJSON(from: jsonString) {
+            jsonString = extracted
         }
         
         guard let data = jsonString.data(using: .utf8) else { return nil }
@@ -590,6 +688,55 @@ class AgentService: ObservableObject {
             print("Failed to parse AgentDecision: \(error)")
             return nil
         }
+    }
+    
+    /// Extract the first complete, valid JSON object from text
+    /// Uses a stack to track brace depth and find the first complete object
+    private func extractFirstCompleteJSON(from text: String) -> String? {
+        var braceDepth = 0
+        var inString = false
+        var escapeNext = false
+        var startIndex: String.Index?
+        
+        for (index, char) in text.enumerated() {
+            let stringIndex = text.index(text.startIndex, offsetBy: index)
+            
+            if escapeNext {
+                escapeNext = false
+                continue
+            }
+            
+            if char == "\\" {
+                escapeNext = true
+                continue
+            }
+            
+            if char == "\"" {
+                inString.toggle()
+                continue
+            }
+            
+            if inString {
+                continue
+            }
+            
+            if char == "{" {
+                if braceDepth == 0 {
+                    startIndex = stringIndex
+                }
+                braceDepth += 1
+            } else if char == "}" {
+                braceDepth -= 1
+                if braceDepth == 0, let start = startIndex {
+                    // FIX: Use stringIndex directly (it points to the closing brace '}')
+                    // Don't use index(after:) which could be out of bounds if the brace is at the end
+                    // The range start...stringIndex includes both the opening '{' and closing '}'
+                    return String(text[start...stringIndex])
+                }
+            }
+        }
+        
+        return nil
     }
     
     private func mapType(_ action: String) -> AgentStepType {
@@ -619,7 +766,7 @@ class AgentService: ObservableObject {
         }
         
         if approved {
-            print("✅ Action Approved: \(decision.action) - \(decision.description)")
+            print("✅ Action Approved: \(decision.action) - \(decision.displayDescription)")
             // Execute the stored decision
             executeDecision(
                 decision,

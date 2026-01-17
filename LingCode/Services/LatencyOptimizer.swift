@@ -156,7 +156,7 @@ class LatencyOptimizer {
         // - Related files
         // - Recent files
         // - Tests and interfaces
-        let context = ContextRankingService.shared.buildContext(
+        let context = await ContextRankingService.shared.buildContext(
             activeFile: activeFile,
             selectedRange: selectedText,
             diagnostics: nil, // Diagnostics can be fetched if needed, but skip for speed

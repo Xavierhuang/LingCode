@@ -163,8 +163,11 @@ struct PremiumAIView: View {
     }
     
     private func sendMessage() {
-        let context = editorViewModel.getContextForAI()
-        viewModel.sendMessage(context: context, projectURL: editorViewModel.rootFolderURL)
+        // FIX: Build context asynchronously
+        Task { @MainActor in
+            let context = await editorViewModel.getContextForAI()
+            viewModel.sendMessage(context: context, projectURL: editorViewModel.rootFolderURL)
+        }
     }
     
     private func openFile(_ action: AIAction) {

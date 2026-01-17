@@ -65,14 +65,15 @@ class ModelSelectionService {
     }
     
     /// Get model identifier for API calls
+    /// FIX: Use API aliases (without dates) as they work even if dated versions aren't available
     func getModelIdentifier(_ model: SelectedModel) -> String {
         switch model {
         case .claudeSonnet:
-            return "claude-sonnet-4-5-20250929"
+            return "claude-sonnet-4-5" // API alias works even if dated version doesn't exist
         case .claudeOpus:
-            return "claude-opus-4-1-20250805"
+            return "claude-opus-4-5" // Updated to 4.5, using alias
         case .claudeHaiku:
-            return "claude-haiku-4-5-20251001"
+            return "claude-haiku-4-5" // API alias works even if dated version doesn't exist
         case .gpt4:
             return "gpt-4"
         case .gpt4Turbo:
