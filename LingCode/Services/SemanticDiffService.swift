@@ -76,7 +76,7 @@ class SemanticDiffService {
     
     /// Create AST snapshot for file
     func createSnapshot(for fileURL: URL) -> ASTSnapshot {
-        let ast = ASTIndex.shared.getSymbols(for: fileURL)
+        let ast = ASTIndex.shared.getSymbolsSync(for: fileURL)
         let contentHash = computeContentHash(for: fileURL)
         
         let snapshot = ASTSnapshot(
@@ -240,7 +240,7 @@ class SemanticDiffService {
         // For now, create temporary file and parse
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? content.write(to: tempURL, atomically: true, encoding: .utf8)
-        let ast = ASTIndex.shared.getSymbols(for: tempURL)
+        let ast = ASTIndex.shared.getSymbolsSync(for: tempURL)
         try? FileManager.default.removeItem(at: tempURL)
         return ast
     }

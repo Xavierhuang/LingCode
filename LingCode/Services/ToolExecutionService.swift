@@ -67,6 +67,8 @@ class ToolExecutionService {
             return try await executeWebSearch(toolCall)
         case "read_directory":
             return try await executeReadDirectory(toolCall)
+        case "done":
+            return try await executeDone(toolCall)
         default:
             return ToolResult(
                 toolUseId: toolCall.id,
@@ -79,6 +81,7 @@ class ToolExecutionService {
     // MARK: - Tool Implementations
     
     /// Execute read_file tool
+    /// Execute read_file tool with smart directory detection
     private func executeReadFile(_ toolCall: ToolCall) async throws -> ToolResult {
         guard let filePathValue = toolCall.input["file_path"],
               let filePath = filePathValue.value as? String else {
@@ -90,12 +93,35 @@ class ToolExecutionService {
         }
         
         let fileURL = resolveFilePath(filePath)
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
         
+        // 1. Check if path exists
+        guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) else {
+            return ToolResult(
+                toolUseId: toolCall.id,
+                content: "Error: File or directory not found at \(filePath)",
+                isError: true
+            )
+        }
+        
+        // 2. SMART FIX: If it's a directory, delegate to read_directory logic automatically
+        if isDirectory.boolValue {
+            // Create a fake tool call to reuse the directory logic
+            let dirToolCall = ToolCall(
+                id: toolCall.id,
+                name: "read_directory",
+                input: ["directory_path": AnyCodable(filePath), "recursive": AnyCodable(false)]
+            )
+            return try await executeReadDirectory(dirToolCall)
+        }
+        
+        // 3. Normal File Reading
         do {
             let content = try fileService.readFile(at: fileURL)
             return ToolResult(
                 toolUseId: toolCall.id,
-                content: "File content:\n```\n\(content)\n```",
+                content: "File content for '\(filePath)':\n```\n\(content)\n```",
                 isError: false
             )
         } catch {
@@ -129,17 +155,28 @@ class ToolExecutionService {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             }
             
+            // FIX: Read original content for change highlighting (if file exists)
+            let fileExisted = FileManager.default.fileExists(atPath: fileURL.path)
+            let originalContent: String?
+            if fileExisted {
+                originalContent = try? fileService.readFile(at: fileURL)
+            } else {
+                originalContent = nil
+            }
+            
             // Write file
             try fileService.saveFile(content: content, to: fileURL)
             
             // FIX: Notify ComposerView of file write (for multi-file editing UI)
+            // Also include original content for change highlighting
             NotificationCenter.default.post(
                 name: NSNotification.Name("ToolFileWritten"),
                 object: nil,
                 userInfo: [
                     "filePath": filePath,
                     "content": content,
-                    "fileURL": fileURL
+                    "fileURL": fileURL,
+                    "originalContent": originalContent ?? ""
                 ]
             )
             
@@ -333,6 +370,24 @@ class ToolExecutionService {
                 isError: true
             )
         }
+    }
+    
+    /// Execute done tool - marks task as complete
+    private func executeDone(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let summaryValue = toolCall.input["summary"],
+              let summary = summaryValue.value as? String else {
+            return ToolResult(
+                toolUseId: toolCall.id,
+                content: "Error: Missing 'summary' parameter",
+                isError: true
+            )
+        }
+        
+        return ToolResult(
+            toolUseId: toolCall.id,
+            content: summary,
+            isError: false
+        )
     }
     
     // MARK: - Helper Methods

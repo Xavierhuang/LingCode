@@ -20,7 +20,8 @@ let package = Package(
     ],
     dependencies: [
         // SwiftSyntax (for Swift parsing)
-        .package(url: "https://github.com/apple/swift-syntax.git", from: "509.0.0"),
+        // NOTE: Version must match Xcode project requirement (602.0.0)
+        .package(url: "https://github.com/apple/swift-syntax.git", from: "602.0.0"),
         
         // SwiftTreeSitter (Core wrapper)
         .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", from: "0.8.0"),

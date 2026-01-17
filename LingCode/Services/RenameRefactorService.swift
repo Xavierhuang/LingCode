@@ -64,8 +64,8 @@ class RenameRefactorService {
     
     /// Resolve symbol at cursor position
     func resolveSymbol(at cursorOffset: Int, in fileURL: URL) -> ResolvedSymbol? {
-        // Get AST symbols for file
-        let symbols = ASTIndex.shared.getSymbols(for: fileURL)
+        // Get AST symbols for file (sync version for backward compatibility)
+        let symbols = ASTIndex.shared.getSymbolsSync(for: fileURL)
         
         // Find symbol at cursor
         for symbol in symbols {

@@ -20,8 +20,8 @@ import EditorParsers
 
 // MARK: - Unified Symbol Model
 
-struct ASTSymbol {
-    enum Kind {
+struct ASTSymbol: Sendable {
+    enum Kind: Sendable, Equatable {
         case function
         case classSymbol
         case method
@@ -32,6 +32,25 @@ struct ASTSymbol {
         case structSymbol
         case protocolSymbol
         case `extension`
+        
+        // Explicit nonisolated Equatable conformance for Swift 6
+        nonisolated static func == (lhs: Kind, rhs: Kind) -> Bool {
+            switch (lhs, rhs) {
+            case (.function, .function),
+                 (.classSymbol, .classSymbol),
+                 (.method, .method),
+                 (.variable, .variable),
+                 (.import, .import),
+                 (.property, .property),
+                 (.enumSymbol, .enumSymbol),
+                 (.structSymbol, .structSymbol),
+                 (.protocolSymbol, .protocolSymbol),
+                 (.extension, .extension):
+                return true
+            default:
+                return false
+            }
+        }
     }
     
     let name: String
@@ -370,79 +389,75 @@ class SwiftSyntaxASTParser {
     }
 }
 
-// MARK: - AST Index with Caching (Updated to use SwiftSyntax)
+// MARK: - AST Index with Caching (Actor-Based for Deadlock Prevention)
 
-class ASTIndex {
+/// Production-grade AST Index
+/// Uses Actor isolation to prevent data races and deadlocks
+/// CRITICAL FIX: Converted from DispatchQueue to Actor to eliminate deadlock in reparse()
+actor ASTIndex {
     static let shared = ASTIndex()
     
     private var symbolCache: [URL: [ASTSymbol]] = [:]
     private var parseCache: [URL: (hash: String, symbols: [ASTSymbol])] = [:]
-    private let cacheQueue = DispatchQueue(label: "com.lingcode.astindex", attributes: .concurrent)
     private let parser = SwiftSyntaxASTParser.shared
     
     private init() {}
     
     /// Get symbols for file (with caching)
-    /// PERFORMANCE: Uses background queue to prevent main thread blocking
+    /// CRITICAL FIX: Now async to prevent deadlocks and UI freezing
     /// 
-    /// ⚠️ WARNING: This is synchronous and will block the calling thread during parsing.
-    /// - Safe when called from background queues (e.g., CodebaseIndexService)
-    /// - Will freeze UI if called directly from main thread on cache miss
-    /// 
-    /// For UI calls, use `getSymbolsAsync(for:completion:)` instead.
+    /// Since this is an actor, this blocks other 'getSymbols' calls 
+    /// but DOES NOT block the UI (Main Actor).
     func getSymbols(for fileURL: URL) -> [ASTSymbol] {
-        // Fast path: Check cache (thread-safe read)
-        return cacheQueue.sync {
-            if let cached = symbolCache[fileURL] {
-                return cached
-            }
-            
-            // Parse file
-            guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
-                return []
-            }
-            
-            // Check hash for incremental reparse
-            let hash = String(content.hashValue)
-            if let cached = parseCache[fileURL], cached.hash == hash {
-                symbolCache[fileURL] = cached.symbols
-                return cached.symbols
-            }
-            
-            // PERFORMANCE: Parsing happens on background queue (cacheQueue)
-            // SwiftSyntax parsing can take 10-100ms for large files
-            // This prevents UI freezing when indexing thousands of files
-            let symbols: [ASTSymbol]
-            if fileURL.pathExtension.lowercased() == "swift" {
-                // Swift: Use SwiftSyntax (production-grade)
-                symbols = parser.parseSwiftFile(fileURL)
-            } else {
-                // Non-Swift: Try Tree-sitter first, fallback to regex
-                // Tree-sitter provides AST-based parsing for Python/JS/TS/Go
-                symbols = parser.parseWithRegex(content: content, fileURL: fileURL)
-            }
-            
-            // Cache results
-            symbolCache[fileURL] = symbols
-            parseCache[fileURL] = (hash: hash, symbols: symbols)
-            
-            return symbols
-        }
-    }
-    
-    /// Async version for UI calls - prevents main thread blocking
-    /// Use this when calling from SwiftUI views or main thread contexts
-    func getSymbolsAsync(for fileURL: URL, completion: @escaping ([ASTSymbol]) -> Void) {
-        // Fast path: Check cache synchronously (read-only, safe)
+        // Check cache (fast RAM access)
         if let cached = symbolCache[fileURL] {
-            completion(cached)
-            return
+            return cached
         }
         
-        // Heavy work on background queue
-        cacheQueue.async {
-            let symbols = self.getSymbols(for: fileURL)
-            DispatchQueue.main.async {
+        // Parse file
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            return []
+        }
+        
+        // Incremental Check
+        let hash = String(content.hashValue)
+        if let cached = parseCache[fileURL], cached.hash == hash {
+            symbolCache[fileURL] = cached.symbols
+            return cached.symbols
+        }
+        
+        // Parse
+        // Note: Since this is an actor, this blocks other 'getSymbols' calls 
+        // but DOES NOT block the UI (Main Actor).
+        // For extremely large files, you might want to detach this task,
+        // but for standard files, running on the actor is fine.
+        let symbols: [ASTSymbol]
+        
+        #if canImport(SwiftSyntax)
+        if fileURL.pathExtension.lowercased() == "swift" {
+            // SwiftSyntax is pure Swift, so we can call it directly
+            symbols = parser.parseSwiftFile(fileURL)
+        } else {
+            // Non-Swift: Use Tree-sitter or regex fallback
+            symbols = parser.parseWithRegex(content: content, fileURL: fileURL)
+        }
+        #else
+        symbols = parser.parseWithRegex(content: content, fileURL: fileURL)
+        #endif
+        
+        // Cache results
+        symbolCache[fileURL] = symbols
+        parseCache[fileURL] = (hash: hash, symbols: symbols)
+        
+        return symbols
+    }
+    
+    /// Async version for UI calls - maintains backward compatibility
+    /// Use this when calling from SwiftUI views or main thread contexts
+    func getSymbolsAsync(for fileURL: URL, completion: @escaping ([ASTSymbol]) -> Void) {
+        Task {
+            let symbols = await self.getSymbols(for: fileURL)
+            await MainActor.run {
                 completion(symbols)
             }
         }
@@ -450,41 +465,44 @@ class ASTIndex {
     
     /// Modern async/await version for UI calls
     /// Use this in SwiftUI views with Task { } blocks
-    @available(macOS 12.0, *)
     func getSymbolsAsync(for fileURL: URL) async -> [ASTSymbol] {
-        // Fast path: Check cache
-        if let cached = symbolCache[fileURL] {
-            return cached
-        }
-        
-        // Heavy work on background
-        return await withCheckedContinuation { continuation in
-            cacheQueue.async {
-                let symbols = self.getSymbols(for: fileURL)
-                continuation.resume(returning: symbols)
-            }
-        }
+        return await self.getSymbols(for: fileURL)
     }
-    
     
     /// Incremental reparse (invalidate and reparse)
+    /// CRITICAL FIX: No longer causes deadlock - actor handles serialization automatically
     func reparse(fileURL: URL, editRange: Range<Int>, newText: String) {
-        cacheQueue.async(flags: .barrier) {
-            // Invalidate cache
-            self.symbolCache.removeValue(forKey: fileURL)
-            self.parseCache.removeValue(forKey: fileURL)
-            
-            // Reparse
-            _ = self.getSymbols(for: fileURL)
-        }
+        // Invalidate cache
+        symbolCache.removeValue(forKey: fileURL)
+        parseCache.removeValue(forKey: fileURL)
+        
+        // Trigger re-parse immediately (optional)
+        _ = getSymbols(for: fileURL)
     }
     
-    /// Invalidate cache for file
+    /// Force invalidation
     func invalidate(for fileURL: URL) {
-        cacheQueue.async(flags: .barrier) {
-            self.symbolCache.removeValue(forKey: fileURL)
-            self.parseCache.removeValue(forKey: fileURL)
+        symbolCache.removeValue(forKey: fileURL)
+        parseCache.removeValue(forKey: fileURL)
+    }
+}
+
+// MARK: - Compatibility Extension for Synchronous Access
+
+extension ASTIndex {
+    /// Helper to allow synchronous access ONLY if absolutely necessary (discouraged)
+    /// Use this only when you cannot make the calling code async
+    nonisolated func getSymbolsSync(for fileURL: URL) -> [ASTSymbol] {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: [ASTSymbol] = []
+        
+        Task {
+            result = await self.getSymbols(for: fileURL)
+            semaphore.signal()
         }
+        
+        semaphore.wait()
+        return result
     }
 }
 

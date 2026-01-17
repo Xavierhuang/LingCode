@@ -56,6 +56,71 @@ class EditorViewModel: ObservableObject {
             self?.objectWillChange.send()
         }
         
+        // FIX: Listen for file creation/update notifications to refresh file tree AND open files
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("FileCreated"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            self.refreshFileTree()
+            
+            // FIX: Open file in editor with highlighting (like Cursor does)
+            if let userInfo = notification.userInfo,
+               let fileURL = userInfo["fileURL"] as? URL,
+               let originalContent = userInfo["originalContent"] as? String {
+                // Small delay to ensure file write is complete
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                    print("🟢 [EditorViewModel] Opening newly created file: \(fileURL.lastPathComponent)")
+                    self.openFile(at: fileURL, originalContent: originalContent)
+                }
+            }
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("FileUpdated"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            self.refreshFileTree()
+            
+            // FIX: Open file in editor with change highlighting (like Cursor does)
+            if let userInfo = notification.userInfo,
+               let fileURL = userInfo["fileURL"] as? URL,
+               let originalContent = userInfo["originalContent"] as? String {
+                // Small delay to ensure file write is complete
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                    print("🟢 [EditorViewModel] Opening updated file with highlighting: \(fileURL.lastPathComponent)")
+                    self.openFile(at: fileURL, originalContent: originalContent)
+                }
+            }
+        }
+        
+        // Also listen for ToolFileWritten (from ToolExecutionService)
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("ToolFileWritten"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            self.refreshFileTree()
+            
+            // FIX: Open file in editor when tool writes it
+            if let userInfo = notification.userInfo,
+               let fileURL = userInfo["fileURL"] as? URL {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                    print("🟢 [EditorViewModel] Opening file written by tool: \(fileURL.lastPathComponent)")
+                    // Try to get original content if available
+                    let originalContent = userInfo["originalContent"] as? String
+                    self.openFile(at: fileURL, originalContent: originalContent)
+                }
+            }
+        }
+        
         // Load settings from persistence
         loadSettings()
         

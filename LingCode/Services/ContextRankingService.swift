@@ -258,10 +258,29 @@ actor ContextRankingService {
             fileLists.append((file, 30, "Symbol referenced"))
         }
         
-        // Recently edited files (score: 20)
-        let recentFiles = getRecentlyEditedFiles(in: projectURL, limit: 3)
+        // Recently edited files with recency/frequency scoring
+        let recentFiles = getRecentlyEditedFiles(in: projectURL, limit: 5)
         for file in recentFiles {
-            fileLists.append((file, 20, "Recently edited"))
+            // Base score for recency
+            var score = 20
+            
+            // Add frequency score (how often file is edited/referenced)
+            let gitHeat = GitAwareService.shared.getHeatScore(file: file, line: 1)
+            score += min(gitHeat / 10, 30) // Cap frequency boost at 30
+            
+            // Add recency boost (more recent = higher score)
+            if let modDate = try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date {
+                let hoursSinceEdit = Date().timeIntervalSince(modDate) / 3600
+                if hoursSinceEdit < 1 {
+                    score += 15 // Edited in last hour
+                } else if hoursSinceEdit < 24 {
+                    score += 10 // Edited in last day
+                } else if hoursSinceEdit < 168 {
+                    score += 5 // Edited in last week
+                }
+            }
+            
+            fileLists.append((file, score, "Recently edited (recency + frequency)"))
         }
         
         // Filter out vendor files

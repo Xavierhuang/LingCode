@@ -259,7 +259,8 @@ class ModernAIService: AIProviderProtocol {
         firstChunkTime: inout Date?,
         startTime: Date,
         rawLines: [String],
-        httpResponse: HTTPURLResponse
+        httpResponse: HTTPURLResponse,
+        currentToolUse: inout (id: String, name: String, partialJson: String)?
     ) -> Bool {
         // FIX: SSE format has "event:" and "data:" on separate lines
         // Extract the "data:" line from the accumulated event
@@ -305,45 +306,76 @@ class ModernAIService: AIProviderProtocol {
         print("🔍 Parsed SSE event type: '\(type)'")
         
         // FIX: Handle tool use blocks (agent capabilities)
-        // Anthropic sends tool_use in content_block_start events
+        // Anthropic sends tool_use in content_block_start events, but input is streamed as deltas
         if type == "content_block_start",
            let contentBlock = json["content_block"] as? [String: Any],
            let blockType = contentBlock["type"] as? String,
            blockType == "tool_use" {
-            // Extract tool use information
+            // Extract tool use information - input may be empty here, will come in deltas
             if let toolUseId = contentBlock["id"] as? String,
-               let toolName = contentBlock["name"] as? String,
-               let toolInput = contentBlock["input"] as? [String: Any] {
-                // Tool call detected - yield special marker for tool execution
-                continuation.yield("🔧 TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
-                hasReceivedChunks = true
+               let toolName = contentBlock["name"] as? String {
+                print("🔍 [ModernAIService] Tool use started: \(toolName) (ID: \(toolUseId))")
+                // Start tracking this tool use - input will come in deltas
+                currentToolUse = (id: toolUseId, name: toolName, partialJson: "")
+                // Check if input is already complete (non-streaming case)
+                if let toolInput = contentBlock["input"] as? [String: Any], !toolInput.isEmpty {
+                    print("🔍 [ModernAIService] Tool input provided in start event")
+                    continuation.yield("🔧 TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
+                    hasReceivedChunks = true
+                    currentToolUse = nil // Clear tracking
+                }
             }
         } else if type == "content_block_delta",
            let delta = json["delta"] as? [String: Any] {
-            // FIX: Handle both "text" and "text_delta" formats
-            // Anthropic API uses "text_delta" with a "text" field inside
-            let text: String?
-            if let textDelta = delta["text"] as? String {
-                // Direct text field (works for both formats)
-                text = textDelta
-            } else {
-                text = nil
-            }
             
-            if let text = text, !text.isEmpty {
-                // FIX: Safe string prefix - use min to avoid index out of bounds
-                let previewLength = min(50, text.count)
-                let preview = String(text.prefix(previewLength))
-                print("📝 content_block_delta: text='\(preview)'")
-                if firstChunkTime == nil {
-                    firstChunkTime = Date()
-                    print("🎉 First chunk received at \(Date().timeIntervalSince(startTime))s")
+            // Check if this is an input_json_delta (tool input streaming)
+            if let deltaType = delta["type"] as? String, deltaType == "input_json_delta",
+               let partialJson = delta["partial_json"] as? String {
+                // Accumulate partial JSON for tool input
+                if var toolUse = currentToolUse {
+                    toolUse.partialJson += partialJson
+                    currentToolUse = toolUse
+                    print("🔍 [ModernAIService] Accumulating tool input JSON: \(partialJson.prefix(50))...")
                 }
-                hasReceivedChunks = true
-                continuation.yield(text)
             } else {
-                print("⚠️ content_block_delta has no text or empty text")
-                print("   Delta structure: \(delta)")
+                // Regular text delta
+                let text: String?
+                if let textDelta = delta["text"] as? String {
+                    text = textDelta
+                } else {
+                    text = nil
+                }
+                
+                if let text = text, !text.isEmpty {
+                    let previewLength = min(50, text.count)
+                    let preview = String(text.prefix(previewLength))
+                    print("📝 content_block_delta: text='\(preview)'")
+                    if firstChunkTime == nil {
+                        firstChunkTime = Date()
+                        print("🎉 First chunk received at \(Date().timeIntervalSince(startTime))s")
+                    }
+                    hasReceivedChunks = true
+                    continuation.yield(text)
+                } else {
+                    print("⚠️ content_block_delta has no text or empty text")
+                    print("   Delta structure: \(delta)")
+                }
+            }
+        } else if type == "content_block_stop" {
+            // Tool input is complete - emit tool call marker
+            if var toolUse = currentToolUse, !toolUse.partialJson.isEmpty {
+                print("🔍 [ModernAIService] Tool input complete, parsing JSON")
+                // Parse the accumulated JSON
+                if let jsonData = toolUse.partialJson.data(using: .utf8),
+                   let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    print("🟢 [ModernAIService] Emitting tool call: \(toolUse.name)")
+                    continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                    hasReceivedChunks = true
+                } else {
+                    print("🔴 [ModernAIService] Failed to parse accumulated tool input JSON")
+                    print("🔴 [ModernAIService] JSON string: \(toolUse.partialJson)")
+                }
+                currentToolUse = nil
             }
         } else if type == "message_stop" {
             print("🛑 message_stop received")
@@ -376,6 +408,8 @@ class ModernAIService: AIProviderProtocol {
         model: String,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
+        // Track tool use blocks and accumulate their input JSON
+        var currentToolUse: (id: String, name: String, partialJson: String)? = nil
         var fullMessage = message
         if let context = context {
             fullMessage = "Context:\n\(context)\n\nQuestion: \(message)"
@@ -419,14 +453,20 @@ class ModernAIService: AIProviderProtocol {
         // FIX: Add tools support for agent capabilities
         if let tools = tools, !tools.isEmpty {
             body["tools"] = tools.map { tool in
-                // Convert inputSchema to JSON-serializable format
                 var toolDict: [String: Any] = [
                     "name": tool.name,
                     "description": tool.description
                 ]
-                // Convert AnyCodable values to Any for JSONSerialization
-                let schemaDict = tool.inputSchema.mapValues { $0.value }
-                toolDict["input_schema"] = schemaDict
+                
+                // CRITICAL FIX: Recursively unwrap the schema
+                // This prevents the "Invalid type in JSON write" crash
+                if let inputSchema = recursiveUnwrap(tool.inputSchema) as? [String: Any] {
+                    toolDict["input_schema"] = inputSchema
+                } else {
+                    // Fallback to empty object if unwrap fails
+                    toolDict["input_schema"] = [:]
+                }
+                
                 return toolDict
             }
         }
@@ -540,7 +580,7 @@ class ModernAIService: AIProviderProtocol {
             
             if (isNewEvent || isEmpty) && !currentEvent.isEmpty {
                 // Process the accumulated event before starting a new one
-                let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse)
+                let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse, currentToolUse: &currentToolUse)
                 if shouldStop {
                     continuationFinished = true
                     return
@@ -559,10 +599,20 @@ class ModernAIService: AIProviderProtocol {
         
         // Process any remaining event
         if !currentEvent.isEmpty && !continuationFinished {
-            let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse)
+            let shouldStop = processSSEEvent(currentEvent, continuation: continuation, hasReceivedChunks: &hasReceivedChunks, firstChunkTime: &firstChunkTime, startTime: startTime, rawLines: rawLines, httpResponse: httpResponse, currentToolUse: &currentToolUse)
             if shouldStop {
                 continuationFinished = true
                 return
+            }
+        }
+        
+        // FIX: If we have a pending tool use with accumulated JSON, emit it now
+        if var toolUse = currentToolUse, !toolUse.partialJson.isEmpty {
+            print("🔍 [ModernAIService] Stream ended, emitting final tool call with accumulated JSON")
+            if let jsonData = toolUse.partialJson.data(using: .utf8),
+               let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                hasReceivedChunks = true
             }
         }
         
@@ -817,5 +867,40 @@ class ModernAIService: AIProviderProtocol {
         }
         // Base64 encode to avoid newline issues in stream
         return Data(string.utf8).base64EncodedString()
+    }
+    
+    // MARK: - Helper: Recursive Unwrap for AnyCodable
+    
+    /// FIX: Recursively unwraps AnyCodable and arrays/dictionaries containing AnyCodable
+    /// into pure JSON primitives (String, Number, Bool, Array, Dictionary).
+    /// This prevents the "Invalid type in JSON write (__SwiftValue)" crash.
+    private func recursiveUnwrap(_ value: Any) -> Any {
+        // Handle AnyCodable wrapper
+        if let anyCodable = value as? AnyCodable {
+            return recursiveUnwrap(anyCodable.value)
+        }
+        
+        // Handle dictionaries - recursively unwrap all values
+        if let dict = value as? [String: Any] {
+            return dict.mapValues { recursiveUnwrap($0) }
+        }
+        
+        // Handle arrays - recursively unwrap all elements
+        if let array = value as? [Any] {
+            return array.map { recursiveUnwrap($0) }
+        }
+        
+        // Handle dictionaries with AnyCodable values directly
+        if let dict = value as? [String: AnyCodable] {
+            return dict.mapValues { recursiveUnwrap($0) }
+        }
+        
+        // Handle arrays with AnyCodable elements directly
+        if let array = value as? [AnyCodable] {
+            return array.map { recursiveUnwrap($0) }
+        }
+        
+        // Return primitive types as-is (String, Int, Double, Bool, etc.)
+        return value
     }
 }

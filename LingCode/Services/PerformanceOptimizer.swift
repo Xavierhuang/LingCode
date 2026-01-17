@@ -169,7 +169,7 @@ class PerformanceOptimizer {
     /// Parse AST with background priority
     func parseASTInBackground(for fileURL: URL, completion: @escaping ([ASTSymbol]) -> Void) {
         Task(priority: .utility) {
-            let symbols = ASTIndex.shared.getSymbols(for: fileURL)
+            let symbols = await ASTIndex.shared.getSymbols(for: fileURL)
             await MainActor.run {
                 completion(symbols)
             }

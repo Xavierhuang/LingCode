@@ -205,4 +205,22 @@ extension AITool {
             ]
         )
     }
+    
+    /// Tool for marking task as complete and generating a summary
+    static func done() -> AITool {
+        return AITool(
+            name: "done",
+            description: "Mark the task as complete and generate a summary of what was accomplished",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "summary": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("A summary of what was accomplished, including files created/modified, key changes, and any important notes")
+                    ])
+                ]),
+                "required": AnyCodable(["summary"])
+            ]
+        )
+    }
 }

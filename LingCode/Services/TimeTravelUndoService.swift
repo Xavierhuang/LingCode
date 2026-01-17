@@ -62,7 +62,7 @@ class TimeTravelUndoService {
         
         // Capture AST for each affected file
         for fileURL in affectedFiles {
-            let ast = ASTIndex.shared.getSymbols(for: fileURL)
+            let ast = ASTIndex.shared.getSymbolsSync(for: fileURL)
             asts[fileURL] = ast
         }
         

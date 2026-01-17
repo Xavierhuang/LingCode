@@ -171,7 +171,7 @@ class CodebaseIndexService: ObservableObject {
         
         // For Swift files, use SwiftSyntax via ASTIndex
         if language == "swift" {
-            let astSymbols = ASTIndex.shared.getSymbols(for: fileURL)
+            let astSymbols = ASTIndex.shared.getSymbolsSync(for: fileURL)
             return astSymbols.map { astSymbol in
                 IndexedSymbol(
                     id: UUID(),
@@ -188,7 +188,7 @@ class CodebaseIndexService: ObservableObject {
         // For other languages, use Tree-sitter via ASTIndex (production-grade AST parsing)
         // Tree-sitter supports: Python, JavaScript, TypeScript, Go
         // Falls back to regex if Tree-sitter is not available
-        let astSymbols = ASTIndex.shared.getSymbols(for: fileURL)
+        let astSymbols = ASTIndex.shared.getSymbolsSync(for: fileURL)
         return astSymbols.map { astSymbol in
             IndexedSymbol(
                 id: UUID(),
