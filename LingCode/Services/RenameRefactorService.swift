@@ -551,7 +551,8 @@ class RenameRefactorService {
         return before.contains("//") || before.contains("/*")
     }
     
-    private func isShadowed(
+    /// FIX: Mark as nonisolated since it's called from nonisolated context
+    nonisolated private func isShadowed(
         at range: Range<Int>,
         symbol: ResolvedSymbol,
         in content: String,

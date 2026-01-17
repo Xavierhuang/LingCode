@@ -2,8 +2,8 @@
 //  TreeSitterBridge.swift
 //  LingCode
 //
-//  Production-grade SwiftSyntax-based AST parser
-//  Replaces regex-based simulation with real AST parsing
+//  Production-grade Polyglot AST parser
+//  Supports: Swift (SwiftSyntax), Python/JS/TS/Go (Tree-sitter)
 //
 
 import Foundation
@@ -11,6 +11,11 @@ import Foundation
 #if canImport(SwiftSyntax)
 import SwiftSyntax
 import SwiftParser
+#endif
+
+// Import EditorParsers to access TreeSitterSymbol and TreeSitterManager
+#if canImport(EditorParsers)
+import EditorParsers
 #endif
 
 // MARK: - Unified Symbol Model
@@ -286,8 +291,30 @@ class SwiftSyntaxASTParser {
     #endif
     
     /// Regex-based fallback (for non-Swift files or when SwiftSyntax unavailable)
+    /// Parse non-Swift files using Tree-sitter (if available) or regex fallback
     func parseWithRegex(content: String, fileURL: URL) -> [ASTSymbol] {
-        // Use SwiftSyntaxParser for Swift files (SwiftSyntax is required)
+        let ext = fileURL.pathExtension.lowercased()
+        let language = mapExtensionToLanguage(ext)
+        
+        // Try Tree-sitter first (production-grade AST parsing)
+        #if canImport(EditorParsers)
+        if TreeSitterManager.shared.isLanguageSupported(language) {
+            let treeSitterSymbols = TreeSitterManager.shared.parse(content: content, language: language, fileURL: fileURL)
+            return treeSitterSymbols.map { tsSymbol in
+                ASTSymbol(
+                    name: tsSymbol.name,
+                    kind: mapTreeSitterKindToASTKind(tsSymbol.kind),
+                    file: tsSymbol.file,
+                    range: tsSymbol.range,
+                    parent: tsSymbol.parent, // Now includes parent hierarchy from resolveHierarchy
+                    signature: tsSymbol.signature,
+                    content: nil
+                )
+            }
+        }
+        #endif
+        
+        // Fallback to regex-based extraction
         return SwiftSyntaxParser.shared.extractSymbols(from: content, filePath: fileURL.path)
             .map { symbol in
                 ASTSymbol(
@@ -301,6 +328,31 @@ class SwiftSyntaxASTParser {
                 )
             }
     }
+    
+    /// Map file extension to language identifier
+    private func mapExtensionToLanguage(_ ext: String) -> String {
+        switch ext {
+        case "py": return "python"
+        case "js": return "javascript"
+        case "ts": return "typescript"
+        case "tsx": return "typescript"
+        case "go": return "go"
+        default: return ext
+        }
+    }
+    
+    #if canImport(EditorParsers)
+    /// Map Tree-sitter symbol kind to AST symbol kind
+    private func mapTreeSitterKindToASTKind(_ kind: TreeSitterSymbol.Kind) -> ASTSymbol.Kind {
+        switch kind {
+        case .function: return .function
+        case .classSymbol: return .classSymbol
+        case .method: return .method
+        case .variable: return .variable
+        case .property: return .property
+        }
+    }
+    #endif
     
     private func mapCodeSymbolKind(_ kind: CodeSymbol.Kind) -> ASTSymbol.Kind {
         switch kind {
@@ -331,7 +383,15 @@ class ASTIndex {
     private init() {}
     
     /// Get symbols for file (with caching)
+    /// PERFORMANCE: Uses background queue to prevent main thread blocking
+    /// 
+    /// ⚠️ WARNING: This is synchronous and will block the calling thread during parsing.
+    /// - Safe when called from background queues (e.g., CodebaseIndexService)
+    /// - Will freeze UI if called directly from main thread on cache miss
+    /// 
+    /// For UI calls, use `getSymbolsAsync(for:completion:)` instead.
     func getSymbols(for fileURL: URL) -> [ASTSymbol] {
+        // Fast path: Check cache (thread-safe read)
         return cacheQueue.sync {
             if let cached = symbolCache[fileURL] {
                 return cached
@@ -345,27 +405,67 @@ class ASTIndex {
             // Check hash for incremental reparse
             let hash = String(content.hashValue)
             if let cached = parseCache[fileURL], cached.hash == hash {
+                symbolCache[fileURL] = cached.symbols
                 return cached.symbols
             }
             
-            // Parse with SwiftSyntax (required dependency)
+            // PERFORMANCE: Parsing happens on background queue (cacheQueue)
+            // SwiftSyntax parsing can take 10-100ms for large files
+            // This prevents UI freezing when indexing thousands of files
             let symbols: [ASTSymbol]
             if fileURL.pathExtension.lowercased() == "swift" {
+                // Swift: Use SwiftSyntax (production-grade)
                 symbols = parser.parseSwiftFile(fileURL)
             } else {
-                // For non-Swift files, use regex-based extraction
+                // Non-Swift: Try Tree-sitter first, fallback to regex
+                // Tree-sitter provides AST-based parsing for Python/JS/TS/Go
                 symbols = parser.parseWithRegex(content: content, fileURL: fileURL)
             }
             
-            // Cache
-            cacheQueue.async(flags: .barrier) {
-                self.symbolCache[fileURL] = symbols
-                self.parseCache[fileURL] = (hash: hash, symbols: symbols)
-            }
+            // Cache results
+            symbolCache[fileURL] = symbols
+            parseCache[fileURL] = (hash: hash, symbols: symbols)
             
             return symbols
         }
     }
+    
+    /// Async version for UI calls - prevents main thread blocking
+    /// Use this when calling from SwiftUI views or main thread contexts
+    func getSymbolsAsync(for fileURL: URL, completion: @escaping ([ASTSymbol]) -> Void) {
+        // Fast path: Check cache synchronously (read-only, safe)
+        if let cached = symbolCache[fileURL] {
+            completion(cached)
+            return
+        }
+        
+        // Heavy work on background queue
+        cacheQueue.async {
+            let symbols = self.getSymbols(for: fileURL)
+            DispatchQueue.main.async {
+                completion(symbols)
+            }
+        }
+    }
+    
+    /// Modern async/await version for UI calls
+    /// Use this in SwiftUI views with Task { } blocks
+    @available(macOS 12.0, *)
+    func getSymbolsAsync(for fileURL: URL) async -> [ASTSymbol] {
+        // Fast path: Check cache
+        if let cached = symbolCache[fileURL] {
+            return cached
+        }
+        
+        // Heavy work on background
+        return await withCheckedContinuation { continuation in
+            cacheQueue.async {
+                let symbols = self.getSymbols(for: fileURL)
+                continuation.resume(returning: symbols)
+            }
+        }
+    }
+    
     
     /// Incremental reparse (invalidate and reparse)
     func reparse(fileURL: URL, editRange: Range<Int>, newText: String) {

@@ -411,11 +411,14 @@ class AgentService: ObservableObject {
                             onComplete(true, "File written and validated successfully")
                         case .warnings(let messages):
                             onOutput("⚠️ Code written with warnings:\n\(messages.joined(separator: "\n"))")
+                            // Warnings are acceptable - mark as success
                             onComplete(true, "File written with warnings")
                         case .errors(let messages):
                             onOutput("❌ Code written but has errors:\n\(messages.joined(separator: "\n"))")
-                            // Still mark as completed (file was written) but report errors
-                            onComplete(true, "File written but contains errors")
+                            // REFINEMENT: Mark as failed so agent loop perceives it as failure to fix
+                            // This triggers the LLM's "fix it" logic more aggressively
+                            // UI will show red X instead of green checkmark, visually cueing user
+                            onComplete(false, "File written but contains errors")
                         case .skipped:
                             // Validation not available or not applicable
                             onComplete(true, "File written successfully")

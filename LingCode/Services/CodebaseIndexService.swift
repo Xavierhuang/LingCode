@@ -185,10 +185,21 @@ class CodebaseIndexService: ObservableObject {
             }
         }
         
-        // For other languages, use TreeSitterBridge if available, fallback to regex
-        // TODO: Integrate Tree-sitter parsers for JS/TS/Python when available
-        // For now, use improved regex as fallback
-        return extractSymbolsWithRegex(from: content, language: language, filePath: filePath)
+        // For other languages, use Tree-sitter via ASTIndex (production-grade AST parsing)
+        // Tree-sitter supports: Python, JavaScript, TypeScript, Go
+        // Falls back to regex if Tree-sitter is not available
+        let astSymbols = ASTIndex.shared.getSymbols(for: fileURL)
+        return astSymbols.map { astSymbol in
+            IndexedSymbol(
+                id: UUID(),
+                name: astSymbol.name,
+                kind: mapASTKindToIndexedKind(astSymbol.kind),
+                filePath: filePath,
+                line: astSymbol.range.lowerBound,
+                signature: astSymbol.signature,
+                documentation: nil
+            )
+        }
     }
     
     private func mapASTKindToIndexedKind(_ kind: ASTSymbol.Kind) -> IndexedSymbol.SymbolKind {

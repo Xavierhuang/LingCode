@@ -3,9 +3,12 @@
 //  LingCode
 //
 //  Created by Weijia Huang on 11/23/25.
+//  Updated for Phase 6: AST-Based Intelligent Outline
 //
 
 import SwiftUI
+
+// MARK: - UI Models
 
 struct Symbol: Identifiable {
     let id = UUID()
@@ -14,6 +17,7 @@ struct Symbol: Identifiable {
     let line: Int
     let children: [Symbol]
     
+    // Mapped strictly to SF Symbols
     enum SymbolKind: String {
         case file = "doc"
         case module = "shippingbox"
@@ -41,184 +45,31 @@ struct Symbol: Identifiable {
         case event = "bolt"
         case `operator` = "plus.forwardslash.minus"
         case typeParameter = "t.square"
+        case `extension` = "puzzlepiece"
     }
 }
 
-class SymbolParser {
-    static let shared = SymbolParser()
-    
-    private init() {}
-    
-    func parseSymbols(from content: String, language: String?) -> [Symbol] {
-        guard let language = language?.lowercased() else { return [] }
-        
-        switch language {
-        case "swift":
-            return parseSwiftSymbols(from: content)
-        case "python":
-            return parsePythonSymbols(from: content)
-        case "javascript", "typescript":
-            return parseJSSymbols(from: content)
-        default:
-            return parseGenericSymbols(from: content)
-        }
-    }
-    
-    private func parseSwiftSymbols(from content: String) -> [Symbol] {
-        var symbols: [Symbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Class
-            if trimmed.range(of: #"class\s+(\w+)"#, options: .regularExpression) != nil {
-                let name = extractName(from: trimmed, after: "class ")
-                symbols.append(Symbol(name: name, kind: .classSymbol, line: index + 1, children: []))
-            }
-            // Struct
-            else if trimmed.range(of: #"struct\s+(\w+)"#, options: .regularExpression) != nil {
-                let name = extractName(from: trimmed, after: "struct ")
-                symbols.append(Symbol(name: name, kind: .structSymbol, line: index + 1, children: []))
-            }
-            // Enum
-            else if trimmed.range(of: #"enum\s+(\w+)"#, options: .regularExpression) != nil {
-                let name = extractName(from: trimmed, after: "enum ")
-                symbols.append(Symbol(name: name, kind: .enumSymbol, line: index + 1, children: []))
-            }
-            // Protocol
-            else if trimmed.range(of: #"protocol\s+(\w+)"#, options: .regularExpression) != nil {
-                let name = extractName(from: trimmed, after: "protocol ")
-                symbols.append(Symbol(name: name, kind: .interface, line: index + 1, children: []))
-            }
-            // Function
-            else if trimmed.range(of: #"func\s+(\w+)"#, options: .regularExpression) != nil {
-                let name = extractName(from: trimmed, after: "func ")
-                symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-            }
-            // Property
-            else if trimmed.hasPrefix("var ") || trimmed.hasPrefix("let ") {
-                let prefix = trimmed.hasPrefix("var ") ? "var " : "let "
-                let name = extractName(from: trimmed, after: prefix)
-                let kind: Symbol.SymbolKind = trimmed.hasPrefix("let ") ? .constant : .variable
-                symbols.append(Symbol(name: name, kind: kind, line: index + 1, children: []))
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func parsePythonSymbols(from content: String) -> [Symbol] {
-        var symbols: [Symbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Class
-            if trimmed.hasPrefix("class ") {
-                let name = extractName(from: trimmed, after: "class ")
-                    .components(separatedBy: "(").first ?? ""
-                    .replacingOccurrences(of: ":", with: "")
-                symbols.append(Symbol(name: name, kind: .classSymbol, line: index + 1, children: []))
-            }
-            // Function
-            else if trimmed.hasPrefix("def ") {
-                let name = extractName(from: trimmed, after: "def ")
-                    .components(separatedBy: "(").first ?? ""
-                symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func parseJSSymbols(from content: String) -> [Symbol] {
-        var symbols: [Symbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Class
-            if trimmed.hasPrefix("class ") {
-                let name = extractName(from: trimmed, after: "class ")
-                    .components(separatedBy: " ").first ?? ""
-                symbols.append(Symbol(name: name, kind: .classSymbol, line: index + 1, children: []))
-            }
-            // Function
-            else if trimmed.hasPrefix("function ") {
-                let name = extractName(from: trimmed, after: "function ")
-                    .components(separatedBy: "(").first ?? ""
-                symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-            }
-            // Arrow function with const
-            else if trimmed.hasPrefix("const ") && trimmed.contains("=>") {
-                let name = extractName(from: trimmed, after: "const ")
-                    .components(separatedBy: " ").first ?? ""
-                symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-            }
-            // Export
-            else if trimmed.hasPrefix("export ") {
-                // Handle exports
-                if trimmed.contains("class ") {
-                    let name = extractName(from: trimmed, after: "class ")
-                        .components(separatedBy: " ").first ?? ""
-                    symbols.append(Symbol(name: name, kind: .classSymbol, line: index + 1, children: []))
-                } else if trimmed.contains("function ") {
-                    let name = extractName(from: trimmed, after: "function ")
-                        .components(separatedBy: "(").first ?? ""
-                    symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-                }
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func parseGenericSymbols(from content: String) -> [Symbol] {
-        // Generic parser for unknown languages
-        var symbols: [Symbol] = []
-        let lines = content.components(separatedBy: .newlines)
-        
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Look for function-like patterns
-            if let range = trimmed.range(of: #"\b(\w+)\s*\("#, options: .regularExpression) {
-                let match = String(trimmed[range])
-                let name = match.replacingOccurrences(of: "(", with: "").trimmingCharacters(in: .whitespaces)
-                if !["if", "for", "while", "switch", "catch"].contains(name) {
-                    symbols.append(Symbol(name: name + "()", kind: .function, line: index + 1, children: []))
-                }
-            }
-        }
-        
-        return symbols
-    }
-    
-    private func extractName(from line: String, after prefix: String) -> String {
-        guard let range = line.range(of: prefix) else { return "" }
-        let afterPrefix = String(line[range.upperBound...])
-        let components = afterPrefix.components(separatedBy: CharacterSet.alphanumerics.inverted)
-        return components.first ?? ""
-    }
-}
+// MARK: - Outline View
 
 struct SymbolOutlineView: View {
     @ObservedObject var viewModel: EditorViewModel
     @State private var symbols: [Symbol] = []
     @State private var searchText: String = ""
+    @State private var isLoading: Bool = false
     
     var filteredSymbols: [Symbol] {
         if searchText.isEmpty {
             return symbols
         }
+        // Simple recursive search could be added here,
+        // currently filters top-level only or flat list if you flatten it.
+        // For outline, usually filtering the visible nodes is enough.
         return symbols.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
     
     var body: some View {
         VStack(spacing: 0) {
+            // Header
             HStack {
                 Image(systemName: "list.bullet.rectangle")
                 Text("Outline")
@@ -235,6 +86,7 @@ struct SymbolOutlineView: View {
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
             
+            // Search
             TextField("Filter symbols...", text: $searchText)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal)
@@ -242,7 +94,16 @@ struct SymbolOutlineView: View {
             
             Divider()
             
-            if symbols.isEmpty {
+            // Content
+            if isLoading {
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text("Indexing...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if symbols.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 32))
@@ -255,25 +116,7 @@ struct SymbolOutlineView: View {
             } else {
                 List {
                     ForEach(filteredSymbols) { symbol in
-                        Button(action: {
-                            goToSymbol(symbol)
-                        }) {
-                            HStack {
-                                Image(systemName: symbol.kind.rawValue)
-                                    .foregroundColor(colorForKind(symbol.kind))
-                                    .frame(width: 20)
-                                
-                                Text(symbol.name)
-                                    .font(.system(.body, design: .monospaced))
-                                
-                                Spacer()
-                                
-                                Text(":\(symbol.line)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .buttonStyle(PlainButtonStyle())
+                        SymbolRow(symbol: symbol, onSelect: goToSymbol)
                     }
                 }
                 .listStyle(.sidebar)
@@ -283,27 +126,152 @@ struct SymbolOutlineView: View {
         .onAppear {
             refreshSymbols()
         }
-        .onChange(of: viewModel.editorState.activeDocumentId) { _, _ in
+        // React to file switching
+        .onChange(of: viewModel.editorState.activeDocumentId) { oldValue, newValue in
             refreshSymbols()
         }
+        // React to save events (optional, if you have a publisher for it)
     }
     
     private func refreshSymbols() {
-        guard let document = viewModel.editorState.activeDocument else {
+        guard let document = viewModel.editorState.activeDocument,
+              let fileURL = document.filePath else {
             symbols = []
             return
         }
         
-        symbols = SymbolParser.shared.parseSymbols(from: document.content, language: document.language)
+        isLoading = true
+        
+        // Use production-grade AST indexing
+        Task {
+            // This runs on background thread via ASTIndex actor/queue
+            let astSymbols = await ASTIndex.shared.getSymbolsAsync(for: fileURL)
+            
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    symbols = buildSymbolHierarchy(from: astSymbols)
+                    isLoading = false
+                }
+            }
+        }
+    }
+    
+    /// Convert ASTSymbols to UI Symbols with hierarchy
+    private func buildSymbolHierarchy(from astSymbols: [ASTSymbol]) -> [Symbol] {
+        // Map parent_name -> [Children]
+        var symbolMap: [String: [ASTSymbol]] = [:]
+        var rootSymbols: [ASTSymbol] = []
+        
+        for astSymbol in astSymbols {
+            if let parent = astSymbol.parent, !parent.isEmpty {
+                if symbolMap[parent] == nil {
+                    symbolMap[parent] = []
+                }
+                symbolMap[parent]?.append(astSymbol)
+            } else {
+                rootSymbols.append(astSymbol)
+            }
+        }
+        
+        // Recursive converter
+        func convertASTSymbol(_ astSymbol: ASTSymbol) -> Symbol {
+            // Potential Limitation: Parent lookup by name can collision if nested types share names.
+            // Acceptable for V1.
+            let children = symbolMap[astSymbol.name]?.map { convertASTSymbol($0) } ?? []
+            
+            return Symbol(
+                name: astSymbol.name,
+                kind: mapASTKindToSymbolKind(astSymbol.kind),
+                line: astSymbol.range.lowerBound + 1, // Convert 0-based to 1-based line index
+                children: children.sorted { $0.line < $1.line }
+            )
+        }
+        
+        // Return sorted roots
+        return rootSymbols
+            .sorted { $0.range.lowerBound < $1.range.lowerBound }
+            .map { convertASTSymbol($0) }
+    }
+    
+    private func mapASTKindToSymbolKind(_ kind: ASTSymbol.Kind) -> Symbol.SymbolKind {
+        switch kind {
+        case .classSymbol: return .classSymbol
+        case .structSymbol: return .structSymbol
+        case .enumSymbol: return .enumSymbol
+        case .protocolSymbol: return .interface
+        case .function: return .function
+        case .method: return .method
+        case .variable: return .variable
+        case .property: return .property
+        case .extension: return .extension
+        case .import: return .module
+        }
     }
     
     private func goToSymbol(_ symbol: Symbol) {
-        // TODO: Navigate to line
+        // Dispatch event to EditorView
         NotificationCenter.default.post(
             name: NSNotification.Name("GoToLine"),
             object: nil,
             userInfo: ["line": symbol.line]
         )
+    }
+}
+
+// MARK: - Symbol Row
+
+struct SymbolRow: View {
+    let symbol: Symbol
+    let onSelect: (Symbol) -> Void
+    @State private var isExpanded: Bool = true
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                // Expand/Collapse Chevron
+                if !symbol.children.isEmpty {
+                    Button(action: {
+                        withAnimation(.snappy) {
+                            isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .frame(width: 12, height: 12)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                } else {
+                    Spacer().frame(width: 12)
+                }
+                
+                // Clickable Row Content
+                Button(action: { onSelect(symbol) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: symbol.kind.rawValue)
+                            .foregroundColor(colorForKind(symbol.kind))
+                            .font(.system(size: 11))
+                        
+                        Text(symbol.name)
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        
+                        Spacer()
+                    }
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .padding(.vertical, 2)
+            
+            // Recursive Children
+            if isExpanded && !symbol.children.isEmpty {
+                ForEach(symbol.children) { child in
+                    SymbolRow(symbol: child, onSelect: onSelect)
+                        .padding(.leading, 16) // Indentation
+                }
+            }
+        }
     }
     
     private func colorForKind(_ kind: Symbol.SymbolKind) -> Color {
@@ -313,9 +281,9 @@ struct SymbolOutlineView: View {
         case .variable, .property, .field: return .blue
         case .constant: return .cyan
         case .enumSymbol, .enumMember: return .green
-        case .interface: return .yellow
+        case .interface, .extension: return .yellow
+        case .module: return .red
         default: return .gray
         }
     }
 }
-
