@@ -27,6 +27,18 @@ import TreeSitterTypeScript
 import TreeSitterGo
 #endif
 
+#if canImport(TreeSitterRust)
+import TreeSitterRust
+#endif
+
+#if canImport(TreeSitterCpp)
+import TreeSitterCpp
+#endif
+
+#if canImport(TreeSitterJava)
+import TreeSitterJava
+#endif
+
 // MARK: - Tree-Sitter Language Manager
 
 public class TreeSitterManager {
@@ -77,6 +89,40 @@ public class TreeSitterManager {
             let goParser = Parser()
             try goParser.setLanguage(goLanguage)
             parsers["go"] = goParser
+            #endif
+            
+            // NOTE: Rust, C++, and Java parsers can be added when dependencies are available
+            // Add to Package.swift:
+            // .package(url: "https://github.com/tree-sitter/tree-sitter-rust", from: "0.21.0"),
+            // .package(url: "https://github.com/tree-sitter/tree-sitter-cpp", from: "0.21.0"),
+            // .package(url: "https://github.com/tree-sitter/tree-sitter-java", from: "0.21.0")
+            
+            #if canImport(TreeSitterRust)
+            // Rust
+            let rustLanguage = Language(language: tree_sitter_rust())
+            let rustParser = Parser()
+            try rustParser.setLanguage(rustLanguage)
+            parsers["rust"] = rustParser
+            parsers["rs"] = rustParser
+            #endif
+            
+            #if canImport(TreeSitterCpp)
+            // C++
+            let cppLanguage = Language(language: tree_sitter_cpp())
+            let cppParser = Parser()
+            try cppParser.setLanguage(cppLanguage)
+            parsers["cpp"] = cppParser
+            parsers["cxx"] = cppParser
+            parsers["cc"] = cppParser
+            parsers["c++"] = cppParser
+            #endif
+            
+            #if canImport(TreeSitterJava)
+            // Java
+            let javaLanguage = Language(language: tree_sitter_java())
+            let javaParser = Parser()
+            try javaParser.setLanguage(javaLanguage)
+            parsers["java"] = javaParser
             #endif
             
             isInitialized = true
@@ -255,6 +301,267 @@ public class TreeSitterManager {
             (type_declaration (type_spec name: (type_identifier) @name)) @class
             (method_declaration name: (field_identifier) @name) @method
             """
+        case "rust", "rs":
+            return """
+            (function_item name: (identifier) @name) @function
+            (struct_item name: (type_identifier) @name) @class
+            (impl_item (type_identifier) @name) @class
+            (trait_item name: (type_identifier) @name) @class
+            (enum_item name: (type_identifier) @name) @class
+            """
+        case "cpp", "cxx", "cc", "c++":
+            return """
+            (function_definition declarator: (function_declarator declarator: (identifier) @name)) @function
+            (class_specifier name: (type_identifier) @name) @class
+            (struct_specifier name: (type_identifier) @name) @class
+            (namespace_definition name: (identifier) @name) @class
+            """
+        case "java":
+            return """
+            (method_declaration name: (identifier) @name) @method
+            (class_declaration name: (identifier) @name) @class
+            (interface_declaration name: (identifier) @name) @class
+            (constructor_declaration name: (identifier) @name) @function
+            """
+        default:
+            return nil
+        }
+    }
+    
+    /// Extract relationships (instantiation, method calls, etc.) using AST queries
+    /// This replaces string matching with 100% AST-based extraction
+    public func extractRelationships(content: String, language: String, fileURL: URL, knownClasses: Set<String>) -> [TreeSitterRelationship] {
+        let normalized = language.lowercased()
+        guard let parser = parsers[normalized] else {
+            return []
+        }
+        
+        // Parse the code
+        guard let tree = try? parser.parse(content) else {
+            return []
+        }
+        
+        // Get relationship query for this language
+        guard let querySExpr = getRelationshipQueryForLanguage(normalized),
+              let languagePtr = parser.language,
+              let queryData = querySExpr.data(using: .utf8),
+              let query = try? Query(language: languagePtr, data: queryData) else {
+            return []
+        }
+        
+        // Execute Query
+        let cursor = query.execute(node: tree.rootNode, in: tree)
+        var relationships: [TreeSitterRelationship] = []
+        
+        for match in cursor {
+            var targetSymbol: String? = nil
+            var relationshipType: TreeSitterRelationship.RelationshipType? = nil
+            var context: String? = nil
+            
+            for capture in match.captures {
+                let captureName = capture.name
+                let node = capture.node
+                
+                // Extract target symbol from captures
+                if captureName == "class" || captureName == "target" || captureName == "type" {
+                    let symbol = extractStringFromByteRange(content: content, byteRange: node.byteRange)
+                    // Only include if it's a known class (from AST symbols)
+                    if knownClasses.contains(symbol) {
+                        targetSymbol = symbol
+                    }
+                }
+                
+                // Determine relationship type from capture name
+                switch captureName {
+                case "instantiation", "new_call":
+                    relationshipType = .instantiation
+                case "method_call", "call":
+                    relationshipType = .methodCall
+                case "property_access", "attribute":
+                    relationshipType = .propertyAccess
+                case "type_ref", "type_annotation":
+                    relationshipType = .typeReference
+                default:
+                    break
+                }
+                
+                // Extract context (full expression) from definition capture
+                if captureName == "definition" || captureName == "expression" {
+                    context = extractStringFromByteRange(content: content, byteRange: node.byteRange)
+                }
+            }
+            
+            // Only add if we have both target symbol and relationship type
+            if let target = targetSymbol, let type = relationshipType {
+                relationships.append(TreeSitterRelationship(
+                    targetSymbol: target,
+                    relationshipType: type,
+                    context: context ?? "",
+                    file: fileURL
+                ))
+            }
+        }
+        
+        return relationships
+    }
+    
+    /// Get relationship extraction queries for each language
+    /// These queries target specific AST nodes (call_expression, new_expression, etc.)
+    private func getRelationshipQueryForLanguage(_ lang: String) -> String? {
+        switch lang {
+        case "python":
+            // Python: target call nodes with attribute expressions (obj.method()) and direct calls (ClassName())
+            return """
+            ; Instantiation: ClassName() or ClassName(...)
+            (call
+              function: (identifier) @class
+              (#match? @class "^[A-Z]")) @instantiation
+            
+            ; Method calls: obj.method() where obj is of known class type
+            (call
+              function: (attribute
+                object: (_) @obj
+                attribute: (identifier) @method)) @method_call
+            
+            ; Property access: obj.property
+            (attribute
+              object: (_) @obj
+              attribute: (identifier) @property) @property_access
+            
+            ; Type annotations: var: ClassName
+            (type: (identifier) @type) @type_ref
+            """
+            
+        case "javascript", "js":
+            // JavaScript: target new_expression and call_expression nodes
+            return """
+            ; Instantiation: new ClassName()
+            (new_expression
+              constructor: (identifier) @class
+              (#match? @class "^[A-Z]")) @instantiation
+            
+            ; Method calls: obj.method()
+            (call_expression
+              function: (member_expression
+                object: (_) @obj
+                property: (property_identifier) @method)) @method_call
+            
+            ; Property access: obj.property
+            (member_expression
+              object: (_) @obj
+              property: (property_identifier) @property) @property_access
+            
+            ; Type annotations (JSDoc): @type {ClassName}
+            (jsdoc_type (type_identifier) @type) @type_ref
+            """
+            
+        case "typescript", "ts", "tsx":
+            // TypeScript: similar to JS but with type annotations
+            return """
+            ; Instantiation: new ClassName()
+            (new_expression
+              constructor: (identifier) @class
+              (#match? @class "^[A-Z]")) @instantiation
+            
+            ; Method calls: obj.method()
+            (call_expression
+              function: (member_expression
+                object: (_) @obj
+                property: (property_identifier) @method)) @method_call
+            
+            ; Property access: obj.property
+            (member_expression
+              object: (_) @obj
+              property: (property_identifier) @property) @property_access
+            
+            ; Type annotations: var: ClassName
+            (type_annotation (type_identifier) @type) @type_ref
+            """
+            
+        case "go":
+            // Go: target call_expression and composite_literal nodes
+            return """
+            ; Instantiation: &ClassName{} or ClassName{}
+            (composite_literal
+              type: (type_identifier) @class) @instantiation
+            
+            ; Method calls: obj.Method()
+            (call_expression
+              function: (selector_expression
+                operand: (_) @obj
+                field: (field_identifier) @method)) @method_call
+            
+            ; Property access: obj.Field
+            (selector_expression
+              operand: (_) @obj
+              field: (field_identifier) @property) @property_access
+            
+            ; Type annotations: var x ClassName
+            (type_identifier) @type @type_ref
+            """
+            
+        case "rust", "rs":
+            // Rust: target call expressions, struct initialization, method calls
+            return """
+            ; Instantiation: StructName { ... } or StructName::new()
+            (call_expression
+              function: (scoped_identifier
+                path: (identifier) @class
+                name: (identifier) @method)) @instantiation
+            
+            ; Method calls: obj.method()
+            (call_expression
+              function: (field_expression
+                field: (field_identifier) @method)) @method_call
+            
+            ; Property access: obj.field
+            (field_expression
+              field: (field_identifier) @property) @property_access
+            
+            ; Type annotations: let x: TypeName
+            (type_identifier) @type @type_ref
+            """
+            
+        case "cpp", "cxx", "cc", "c++":
+            // C++: target new expressions, function calls, member access
+            return """
+            ; Instantiation: new ClassName() or ClassName(...)
+            (new_expression
+              type: (type_identifier) @class) @instantiation
+            
+            ; Method calls: obj->method() or obj.method()
+            (call_expression
+              function: (field_expression
+                field: (field_identifier) @method)) @method_call
+            
+            ; Property access: obj->field or obj.field
+            (field_expression
+              field: (field_identifier) @property) @property_access
+            
+            ; Type annotations: TypeName var
+            (type_identifier) @type @type_ref
+            """
+            
+        case "java":
+            // Java: target new expressions, method calls, field access
+            return """
+            ; Instantiation: new ClassName()
+            (object_creation_expression
+              type: (type_identifier) @class) @instantiation
+            
+            ; Method calls: obj.method()
+            (method_invocation
+              object: (_) @obj
+              name: (identifier) @method) @method_call
+            
+            ; Field access: obj.field
+            (field_access
+              field: (identifier) @property) @property_access
+            
+            ; Type annotations: ClassName var
+            (type_identifier) @type @type_ref
+            """
+            
         default:
             return nil
         }
@@ -287,6 +594,22 @@ public struct TreeSitterSymbol {
         self.signature = signature
         self.parent = parent
     }
+}
+
+// MARK: - Tree-sitter Relationship Model
+
+public struct TreeSitterRelationship {
+    public enum RelationshipType {
+        case instantiation
+        case methodCall
+        case propertyAccess
+        case typeReference
+    }
+    
+    public let targetSymbol: String
+    public let relationshipType: RelationshipType
+    public let context: String
+    public let file: URL
 }
 
 extension TreeSitterManager {

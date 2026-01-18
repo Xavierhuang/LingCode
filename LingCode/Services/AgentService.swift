@@ -914,8 +914,17 @@ class AgentService: ObservableObject {
                         case .errors(let messages):
                             let errorDetails = messages.joined(separator: "\n")
                             onOutput("❌ Code written but has errors:\n\(errorDetails)")
-                            // SELF-HEALING: Mark as failed with detailed error messages for agent to fix
-                            onComplete(false, "File written but contains errors:\n\(errorDetails)")
+                            
+                            // CONTEXTUAL SELF-HEALING: Attach GraphRAG context for failing symbols
+                            Task { @MainActor in
+                                let contextualError = await self.enrichErrorWithGraphRAG(
+                                    errors: messages,
+                                    fileURL: fullPath,
+                                    projectURL: projectURL
+                                )
+                                // SELF-HEALING: Mark as failed with detailed error messages + GraphRAG context
+                                onComplete(false, contextualError)
+                            }
                         case .skipped:
                             // Validation not available or not applicable
                             onComplete(true, "File written successfully")
@@ -1003,6 +1012,90 @@ class AgentService: ObservableObject {
         }
     }
     
+    // MARK: - Contextual Self-Healing
+    
+    /// Enrich error messages with GraphRAG context for failing symbols
+    /// This provides the agent with related files/symbols automatically, avoiding re-reads
+    private func enrichErrorWithGraphRAG(
+        errors: [String],
+        fileURL: URL,
+        projectURL: URL
+    ) async -> String {
+        // Extract symbol names from error messages
+        let symbolNames = extractSymbolNames(from: errors)
+        
+        guard !symbolNames.isEmpty else {
+            // No symbols found, return original error
+            return "File written but contains errors:\n\(errors.joined(separator: "\n"))"
+        }
+        
+        // Query GraphRAG for related files/symbols
+        var graphRAGContext: [String] = []
+        let graphRAG = GraphRAGService.shared
+        
+        for symbolName in symbolNames {
+            let relationships = await graphRAG.findRelatedFiles(
+                for: symbolName,
+                in: projectURL,
+                relationshipTypes: [.inheritance, .instantiation, .methodCall, .typeReference]
+            )
+            
+            if !relationships.isEmpty {
+                let relatedFiles = Set(relationships.map { $0.sourceFile.lastPathComponent })
+                graphRAGContext.append("""
+                📊 GraphRAG Context for '\(symbolName)':
+                - Related files: \(relatedFiles.joined(separator: ", "))
+                - Relationship types: \(Set(relationships.map { String(describing: $0.relationshipType) }).joined(separator: ", "))
+                """)
+            }
+        }
+        
+        // Build enriched error message
+        var enrichedError = "File written but contains errors:\n\(errors.joined(separator: "\n"))"
+        
+        if !graphRAGContext.isEmpty {
+            enrichedError += "\n\n🔍 CONTEXTUAL INFORMATION (from GraphRAG - no need to re-read files):\n"
+            enrichedError += graphRAGContext.joined(separator: "\n\n")
+            enrichedError += "\n\n💡 Use this context to understand how these symbols are used in the codebase."
+        }
+        
+        return enrichedError
+    }
+    
+    /// Extract symbol names from error messages using common patterns
+    private func extractSymbolNames(from errors: [String]) -> [String] {
+        var symbols: Set<String> = []
+        
+        // Common error patterns:
+        // - "Cannot find 'SymbolName' in scope"
+        // - "Use of unresolved identifier 'SymbolName'"
+        // - "Type 'SymbolName' has no member 'method'"
+        // - "Value of type 'SymbolName' has no member"
+        
+        let patterns = [
+            #"Cannot find '([A-Za-z_][A-Za-z0-9_]*)'"#,
+            #"unresolved identifier '([A-Za-z_][A-Za-z0-9_]*)'"#,
+            #"Type '([A-Za-z_][A-Za-z0-9_]*)' has no member"#,
+            #"Value of type '([A-Za-z_][A-Za-z0-9_]*)' has no member"#,
+            #"'([A-Za-z_][A-Za-z0-9_]*)' is not a member type"#,
+            #"Initializer for type '([A-Za-z_][A-Za-z0-9_]*)' requires"#
+        ]
+        
+        for error in errors {
+            for pattern in patterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+                   let match = regex.firstMatch(in: error, options: [], range: NSRange(location: 0, length: error.utf16.count)),
+                   match.numberOfRanges > 1,
+                   let symbolRange = Range(match.range(at: 1), in: error) {
+                    let symbol = String(error[symbolRange])
+                    symbols.insert(symbol)
+                }
+            }
+        }
+        
+        return Array(symbols)
+    }
+    
     // MARK: - Shadow Workspace Validation
     
     private enum ValidationResult {
@@ -1013,6 +1106,61 @@ class AgentService: ObservableObject {
     }
     
     private func validateCodeAfterWrite(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
+        // SHADOW WORKSPACE: Run validation in temporary directory
+        // This allows running tests/builds safely without affecting the project
+        let shadowService = ShadowWorkspaceService.shared
+        
+        // Create shadow workspace if it doesn't exist
+        guard let shadowWorkspaceURL = shadowService.getShadowWorkspace(for: projectURL) ?? 
+                                      shadowService.createShadowWorkspace(for: projectURL) else {
+            // Fallback to direct validation if shadow workspace creation fails
+            print("⚠️ [AgentService] Failed to create shadow workspace, using direct validation")
+            validateCodeDirectly(fileURL: fileURL, projectURL: projectURL, completion: completion)
+            return
+        }
+        
+        // Read the modified file content
+        guard let modifiedContent = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            print("🔴 [AgentService] Failed to read modified file content")
+            completion(.errors(["Failed to read modified file content"]))
+            return
+        }
+        
+        // Calculate relative path
+        let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
+        
+        // Prepare shadow workspace (copy dependencies and modified file)
+        do {
+            try shadowService.prepareShadowWorkspaceForValidation(
+                modifiedFileURL: fileURL,
+                projectURL: projectURL,
+                shadowWorkspaceURL: shadowWorkspaceURL
+            )
+            
+            // Write modified content to shadow workspace
+            try shadowService.writeToShadowWorkspace(
+                content: modifiedContent,
+                relativePath: relativePath,
+                shadowWorkspaceURL: shadowWorkspaceURL
+            )
+            
+            // Run validation in shadow workspace
+            let shadowFileURL = shadowWorkspaceURL.appendingPathComponent(relativePath)
+            validateCodeInShadowWorkspace(
+                fileURL: shadowFileURL,
+                shadowWorkspaceURL: shadowWorkspaceURL,
+                originalProjectURL: projectURL,
+                completion: completion
+            )
+        } catch {
+            print("🔴 [AgentService] Failed to prepare shadow workspace: \(error)")
+            // Fallback to direct validation
+            validateCodeDirectly(fileURL: fileURL, projectURL: projectURL, completion: completion)
+        }
+    }
+    
+    /// Validate code directly in project (fallback method)
+    private func validateCodeDirectly(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
         // Use LinterService for validation
         let linterService = LinterService.shared
         
@@ -1043,6 +1191,88 @@ class AgentService: ObservableObject {
                 }
             }
         }
+    }
+    
+    /// Validate code in shadow workspace
+    private func validateCodeInShadowWorkspace(
+        fileURL: URL,
+        shadowWorkspaceURL: URL,
+        originalProjectURL: URL,
+        completion: @escaping (ValidationResult) -> Void
+    ) {
+        // Use LinterService for validation in shadow workspace
+        let linterService = LinterService.shared
+        
+        linterService.validate(files: [fileURL], in: shadowWorkspaceURL) { lintError in
+            if let lintError = lintError {
+                // Linter found issues
+                switch lintError {
+                case .issues(let messages):
+                    // Check if any are errors vs warnings
+                    let errors = messages.filter { $0.lowercased().contains("error") }
+                    let warnings = messages.filter { !$0.lowercased().contains("error") }
+                    
+                    if !errors.isEmpty {
+                        completion(.errors(errors))
+                    } else if !warnings.isEmpty {
+                        completion(.warnings(warnings))
+                    } else {
+                        completion(.success)
+                    }
+                }
+            } else {
+                // No lint errors (or linter not available) - check if it's a Swift file and try compilation
+                if fileURL.pathExtension.lowercased() == "swift" {
+                    self.validateSwiftCompilationInShadow(
+                        fileURL: fileURL,
+                        shadowWorkspaceURL: shadowWorkspaceURL,
+                        originalProjectURL: originalProjectURL,
+                        completion: completion
+                    )
+                } else {
+                    // For non-Swift files, if no linter errors, consider it successful
+                    completion(.success)
+                }
+            }
+        }
+    }
+    
+    /// Validate Swift file compilation using swift build in shadow workspace
+    private func validateSwiftCompilationInShadow(
+        fileURL: URL,
+        shadowWorkspaceURL: URL,
+        originalProjectURL: URL,
+        completion: @escaping (ValidationResult) -> Void
+    ) {
+        // Check if it's a Swift Package or Xcode project
+        let hasPackageSwift = FileManager.default.fileExists(atPath: shadowWorkspaceURL.appendingPathComponent("Package.swift").path)
+        let hasXcodeProject = FileManager.default.enumerator(at: originalProjectURL, includingPropertiesForKeys: nil)?.contains { url in
+            (url as? URL)?.pathExtension == "xcodeproj"
+        } ?? false
+        
+        guard hasPackageSwift || hasXcodeProject else {
+            // Not a Swift project - skip validation
+            completion(.skipped)
+            return
+        }
+        
+        // Run swift build in shadow workspace
+        let terminalService = TerminalExecutionService.shared
+        terminalService.execute(
+            "swift build 2>&1",
+            workingDirectory: shadowWorkspaceURL,
+            environment: nil,
+            onOutput: { _ in },
+            onError: { _ in },
+            onComplete: { exitCode in
+                if exitCode == 0 {
+                    completion(.success)
+                } else {
+                    // Try to extract error messages from build output
+                    completion(.errors(["Compilation failed in shadow workspace. Check build output for details."]))
+                }
+            }
+        )
     }
     
     /// Validate Swift file compilation using swift build

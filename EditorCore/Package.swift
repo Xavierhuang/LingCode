@@ -30,7 +30,11 @@ let package = Package(
         .package(url: "https://github.com/tree-sitter/tree-sitter-python", from: "0.21.0"),
         .package(url: "https://github.com/tree-sitter/tree-sitter-javascript", from: "0.21.0"),
         .package(url: "https://github.com/tree-sitter/tree-sitter-typescript", from: "0.21.0"),
-        .package(url: "https://github.com/tree-sitter/tree-sitter-go", from: "0.21.0")
+        .package(url: "https://github.com/tree-sitter/tree-sitter-go", from: "0.21.0"),
+        // Additional languages (uncomment when ready to add)
+        // .package(url: "https://github.com/tree-sitter/tree-sitter-rust", from: "0.21.0"),
+        // .package(url: "https://github.com/tree-sitter/tree-sitter-cpp", from: "0.21.0"),
+        // .package(url: "https://github.com/tree-sitter/tree-sitter-java", from: "0.21.0")
     ],
     targets: [
         .target(
@@ -50,6 +54,10 @@ let package = Package(
                 .product(name: "TreeSitterJavaScript", package: "tree-sitter-javascript"),
                 .product(name: "TreeSitterTypeScript", package: "tree-sitter-typescript"),
                 .product(name: "TreeSitterGo", package: "tree-sitter-go"),
+                // Additional languages (uncomment when dependencies are added above)
+                // .product(name: "TreeSitterRust", package: "tree-sitter-rust"),
+                // .product(name: "TreeSitterCpp", package: "tree-sitter-cpp"),
+                // .product(name: "TreeSitterJava", package: "tree-sitter-java"),
             ],
             path: "Sources/EditorParsers"
         ),

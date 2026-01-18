@@ -65,10 +65,12 @@ actor GraphRAGService {
     
     /// Find all files related to a symbol through GraphRAG relationships
     /// Returns files that inherit from, instantiate, catch errors, or reference the symbol
+    /// IMPROVEMENT: Now includes cross-language relationships
     func findRelatedFiles(
         for symbolName: String,
         in projectURL: URL,
-        relationshipTypes: Set<CodeRelationship.RelationshipType> = Set(CodeRelationship.RelationshipType.allCases)
+        relationshipTypes: Set<CodeRelationship.RelationshipType> = Set(CodeRelationship.RelationshipType.allCases),
+        includeCrossLanguage: Bool = true
     ) async -> [CodeRelationship] {
         // Rebuild graph if project changed
         if lastProjectURL != projectURL {
@@ -81,18 +83,59 @@ actor GraphRAGService {
         }
         
         // Check cache first
-        let cacheKey = "\(symbolName):\(relationshipTypes.hashValue)"
+        let cacheKey = "\(symbolName):\(relationshipTypes.hashValue):\(includeCrossLanguage)"
         if let cached = relationshipCache[cacheKey] {
             return cached
         }
         
         // Find relationships matching the symbol and types
-        let relationships = graph.relationships.filter { rel in
+        var relationships = graph.relationships.filter { rel in
             rel.targetSymbol == symbolName && relationshipTypes.contains(rel.relationshipType)
+        }
+        
+        // CROSS-LANGUAGE RESOLUTION: Find relationships in other languages
+        if includeCrossLanguage {
+            let crossLanguageRelations = await CrossLanguageResolver.shared.findCrossLanguageRelationships(
+                for: symbolName,
+                in: projectURL,
+                sourceLanguage: detectLanguageForSymbol(symbolName, in: projectURL)
+            )
+            
+            // Convert cross-language relationships to CodeRelationship
+            for crossRel in crossLanguageRelations {
+                relationships.append(CodeRelationship(
+                    sourceFile: crossRel.sourceFile,
+                    targetSymbol: crossRel.targetSymbol,
+                    relationshipType: .typeReference, // Cross-language is typically type reference
+                    context: "Cross-language: \(crossRel.sourceLanguage) -> \(crossRel.targetLanguage) (confidence: \(Int(crossRel.confidence * 100))%)"
+                ))
+            }
         }
         
         relationshipCache[cacheKey] = relationships
         return relationships
+    }
+    
+    /// Detect language for a symbol by finding its file
+    private func detectLanguageForSymbol(_ symbolName: String, in projectURL: URL) -> String {
+        // Try to find the symbol in the graph cache first
+        if let graph = graphCache {
+            for rel in graph.relationships where rel.targetSymbol == symbolName {
+                let ext = rel.sourceFile.pathExtension.lowercased()
+                return mapExtensionToLanguage(ext)
+            }
+        }
+        
+        // Fallback: Try CodebaseIndexService
+        let indexService = CodebaseIndexService.shared
+        let symbols = indexService.searchSymbols(prefix: symbolName)
+        
+        if let symbol = symbols.first(where: { $0.name == symbolName }),
+           let file = indexService.getFileSummary(path: symbol.filePath) {
+            return file.language
+        }
+        
+        return "unknown"
     }
     
     /// Build relationship graph by analyzing AST for inheritance, instantiation, error handling
@@ -213,19 +256,60 @@ actor GraphRAGService {
         if TreeSitterManager.shared.isLanguageSupported(language) {
             let treeSitterSymbols = TreeSitterManager.shared.parse(content: content, language: language, fileURL: fileURL)
             
-            // Extract relationships from Tree-sitter AST
-            relationships.append(contentsOf: extractRelationshipsFromTreeSitterSymbols(
-                symbols: treeSitterSymbols,
-                fileURL: fileURL,
-                content: content
+        // Extract relationships from Tree-sitter AST using 100% AST-based queries
+        // This eliminates string matching and provides precise relationship extraction
+        let classSymbols = Set(treeSitterSymbols.filter { $0.kind == .classSymbol }.map { $0.name })
+        
+        // Use TreeSitterManager's new extractRelationships method for AST-based extraction
+        let treeSitterRelationships = TreeSitterManager.shared.extractRelationships(
+            content: content,
+            language: language,
+            fileURL: fileURL,
+            knownClasses: classSymbols
+        )
+        
+        // Convert TreeSitterRelationship to CodeRelationship
+        for tsRel in treeSitterRelationships {
+            let relationshipType: CodeRelationship.RelationshipType
+            switch tsRel.relationshipType {
+            case .instantiation:
+                relationshipType = .instantiation
+            case .methodCall:
+                relationshipType = .methodCall
+            case .propertyAccess:
+                relationshipType = .propertyAccess
+            case .typeReference:
+                relationshipType = .typeReference
+            }
+            
+            relationships.append(CodeRelationship(
+                sourceFile: fileURL,
+                targetSymbol: tsRel.targetSymbol,
+                relationshipType: relationshipType,
+                context: tsRel.context
             ))
+        }
+        
+        // Also extract inheritance relationships from symbols (parent field)
+        for symbol in treeSitterSymbols {
+            if let parent = symbol.parent, !parent.isEmpty {
+                relationships.append(CodeRelationship(
+                    sourceFile: fileURL,
+                    targetSymbol: parent,
+                    relationshipType: .inheritance,
+                    context: symbol.signature ?? symbol.name
+                ))
+            }
+        }
         }
         #endif
         
         return relationships
     }
     
-    /// Extract relationships from Tree-sitter symbols
+    /// Extract relationships from Tree-sitter symbols using 100% AST-based queries
+    /// IMPROVEMENT: Now uses TreeSitterQuery (SCM) for precise AST node targeting
+    /// Eliminates string matching entirely - 100% AST-based extraction
     #if canImport(EditorParsers)
     private func extractRelationshipsFromTreeSitterSymbols(
         symbols: [TreeSitterSymbol],
@@ -233,15 +317,12 @@ actor GraphRAGService {
         content: String
     ) -> [CodeRelationship] {
         var relationships: [CodeRelationship] = []
-        let lines = content.components(separatedBy: .newlines)
         
         // Group symbols by type for efficient lookup
-        // TreeSitterSymbol.Kind uses .classSymbol for both classes and structs
         let classSymbols = Set(symbols.filter { $0.kind == .classSymbol }.map { $0.name })
         
-        // Extract inheritance relationships from AST
+        // Extract inheritance relationships from AST (parent field)
         for symbol in symbols {
-            // Check for inheritance (parent field indicates inheritance)
             if let parent = symbol.parent, !parent.isEmpty {
                 relationships.append(CodeRelationship(
                     sourceFile: fileURL,
@@ -252,51 +333,37 @@ actor GraphRAGService {
             }
         }
         
-        // Extract instantiation and method calls from content using AST context
-        // NOTE: This uses a hybrid approach (AST symbols + string matching) as a fallback
-        // for non-Swift languages. This is more accurate than pure regex because we:
-        // 1. Only check against known class/struct symbols (from AST)
-        // 2. Use AST context to filter candidates
-        //
-        // FUTURE IMPROVEMENT: For production-grade accuracy, implement TreeSitterQuery (SCM files)
-        // for each language to directly target AST nodes:
-        // - Python: target `call` nodes with `attribute` expressions
-        // - JavaScript/TypeScript: target `new_expression` and `call_expression` nodes
-        // - Go: target `call_expression` and `composite_literal` nodes
-        // This would eliminate string matching entirely and provide 100% AST-based extraction.
-        //
-        // Example TreeSitterQuery for Python instantiation:
-        // (call function: (attribute object: (identifier) @obj attribute: (identifier) @method))
-        // (call function: (identifier) @class (#match? @class "^[A-Z]"))
-        //
-        // For now, this hybrid approach is acceptable and provides good accuracy for most use cases.
-        for (index, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-        // Check for instantiation patterns (AST-aware, but uses string matching as fallback)
-        for className in classSymbols {
-                // Pattern: let x = ClassName() or var x = ClassName()
-                // FUTURE: Replace with TreeSitterQuery targeting instantiation_expression nodes
-                if trimmed.contains("= \(className)(") || trimmed.contains(": \(className)") {
-                    relationships.append(CodeRelationship(
-                        sourceFile: fileURL,
-                        targetSymbol: className,
-                        relationshipType: .instantiation,
-                        context: trimmed
-                    ))
-                }
-                
-                // Pattern: object.method() where object is of type ClassName
-                // FUTURE: Replace with TreeSitterQuery targeting call_expression nodes
-                if trimmed.contains("\(className.lowercased()).") || trimmed.contains("\(className).") {
-                    relationships.append(CodeRelationship(
-                        sourceFile: fileURL,
-                        targetSymbol: className,
-                        relationshipType: .methodCall,
-                        context: trimmed
-                    ))
-                }
+        // Extract instantiation, method calls, property access, and type references
+        // using 100% AST-based TreeSitterQuery (SCM files)
+        // This replaces the old string matching approach with precise AST node targeting
+        let language = mapExtensionToLanguage(fileURL.pathExtension)
+        let treeSitterRelationships = TreeSitterManager.shared.extractRelationships(
+            content: content,
+            language: language,
+            fileURL: fileURL,
+            knownClasses: classSymbols
+        )
+        
+        // Convert TreeSitterRelationship to CodeRelationship
+        for tsRel in treeSitterRelationships {
+            let relationshipType: CodeRelationship.RelationshipType
+            switch tsRel.relationshipType {
+            case .instantiation:
+                relationshipType = .instantiation
+            case .methodCall:
+                relationshipType = .methodCall
+            case .propertyAccess:
+                relationshipType = .propertyAccess
+            case .typeReference:
+                relationshipType = .typeReference
             }
+            
+            relationships.append(CodeRelationship(
+                sourceFile: fileURL,
+                targetSymbol: tsRel.targetSymbol,
+                relationshipType: relationshipType,
+                context: tsRel.context
+            ))
         }
         
         return relationships

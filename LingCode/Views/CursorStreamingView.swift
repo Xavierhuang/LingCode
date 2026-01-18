@@ -949,7 +949,7 @@ struct CursorStreamingView: View {
         ShadowWorkspaceService.shared.verifyFilesInShadow(
             files: filesToApply,
             originalWorkspace: projectURL
-        ) { success, message in
+        ) { (success: Bool, message: String) in
             DispatchQueue.main.async {
                 isVerifying = false
                 verificationStatus = success ? .success : .failure(message)

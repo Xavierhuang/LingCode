@@ -49,10 +49,19 @@ class CodebaseIndexService: ObservableObject {
     private var indexedFiles: [String: IndexedFile] = [:]
     private var symbolIndex: [String: [IndexedSymbol]] = [:] // name -> symbols
     private var fileQueue = DispatchQueue(label: "com.lingcode.indexer", qos: .utility)
+    private var currentProjectURL: URL?
+    private let fileWatcher = FileWatcherService.shared
     
     private let supportedExtensions = ["swift", "py", "js", "ts", "jsx", "tsx", "java", "kt", "go", "rs", "c", "cpp", "h", "hpp", "m", "mm"]
     
-    private init() {}
+    private init() {
+        setupFileWatcher()
+    }
+    
+    /// Setup file watcher for incremental indexing
+    private func setupFileWatcher() {
+        // File watcher will be started when project is indexed
+    }
     
     // MARK: - Index Project
     
@@ -60,9 +69,21 @@ class CodebaseIndexService: ObservableObject {
     func indexProject(at url: URL, completion: ((Int, Int) -> Void)? = nil) {
         guard !isIndexing else { return }
         
+        currentProjectURL = url
+        
         DispatchQueue.main.async {
             self.isIndexing = true
             self.indexProgress = 0
+        }
+        
+        // Start file watcher for incremental updates
+        fileWatcher.startWatching(url) { [weak self] changedFileURL in
+            self?.handleFileChanged(changedFileURL)
+        }
+        
+        // Start file watcher for incremental updates
+        fileWatcher.startWatching(url) { [weak self] changedFileURL in
+            self?.handleFileChanged(changedFileURL)
         }
         
         fileQueue.async { [weak self] in
@@ -106,6 +127,61 @@ class CodebaseIndexService: ObservableObject {
                 completion?(processed, symbolCount)
             }
         }
+    }
+    
+    /// Handle file change event (incremental indexing)
+    private func handleFileChanged(_ fileURL: URL) {
+        guard let projectURL = currentProjectURL,
+              isCodeFile(fileURL) else {
+            return
+        }
+        
+        // Only re-index if file is in our index
+        let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
+        guard indexedFiles[relativePath] != nil else {
+            // New file - could add it, but for now just skip
+            return
+        }
+        
+        // Re-index the changed file incrementally
+        fileQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            if let indexed = self.indexFile(at: fileURL, relativeTo: projectURL) {
+                // Remove old symbols from index
+                if let oldFile = self.indexedFiles[relativePath] {
+                    for symbol in oldFile.symbols {
+                        self.symbolIndex[symbol.name]?.removeAll { $0.id == symbol.id }
+                        if self.symbolIndex[symbol.name]?.isEmpty == true {
+                            self.symbolIndex.removeValue(forKey: symbol.name)
+                        }
+                    }
+                }
+                
+                // Add new symbols
+                self.indexedFiles[relativePath] = indexed
+                for symbol in indexed.symbols {
+                    if self.symbolIndex[symbol.name] == nil {
+                        self.symbolIndex[symbol.name] = []
+                    }
+                    self.symbolIndex[symbol.name]?.append(symbol)
+                }
+                
+                let symbolCount = self.symbolIndex.values.reduce(0) { $0 + $1.count }
+                
+                DispatchQueue.main.async {
+                    self.totalSymbolCount = symbolCount
+                    self.lastIndexDate = Date()
+                    print("🟢 [CodebaseIndex] Incrementally updated: \(relativePath)")
+                }
+            }
+        }
+    }
+    
+    /// Check if file is a code file
+    private func isCodeFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return supportedExtensions.contains(ext)
     }
     
     // MARK: - File Collection
