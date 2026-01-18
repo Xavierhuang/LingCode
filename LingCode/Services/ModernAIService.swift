@@ -315,6 +315,15 @@ class ModernAIService: AIProviderProtocol {
             if let toolUseId = contentBlock["id"] as? String,
                let toolName = contentBlock["name"] as? String {
                 print("🔍 [ModernAIService] Tool use started: \(toolName) (ID: \(toolUseId))")
+                // FIX: If there's a previous tool use, emit it first (shouldn't happen, but be safe)
+                if let previousToolUse = currentToolUse, !previousToolUse.partialJson.isEmpty {
+                    print("🟡 [ModernAIService] New tool use started but previous tool use not emitted, emitting now")
+                    if let jsonData = previousToolUse.partialJson.data(using: .utf8),
+                       let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                        continuation.yield("🔧 TOOL_CALL:\(previousToolUse.id):\(previousToolUse.name):\(encodeToolInput(toolInput))\n")
+                        hasReceivedChunks = true
+                    }
+                }
                 // Start tracking this tool use - input will come in deltas
                 currentToolUse = (id: toolUseId, name: toolName, partialJson: "")
                 // Check if input is already complete (non-streaming case)
@@ -335,7 +344,9 @@ class ModernAIService: AIProviderProtocol {
                 if var toolUse = currentToolUse {
                     toolUse.partialJson += partialJson
                     currentToolUse = toolUse
-                    print("🔍 [ModernAIService] Accumulating tool input JSON: \(partialJson.prefix(50))...")
+                    print("🔍 [ModernAIService] Accumulating tool input JSON: \(partialJson.prefix(50))... (total: \(toolUse.partialJson.count) chars)")
+                } else {
+                    print("🟡 [ModernAIService] Received input_json_delta but currentToolUse is nil")
                 }
             } else {
                 // Regular text delta
@@ -363,22 +374,112 @@ class ModernAIService: AIProviderProtocol {
             }
         } else if type == "content_block_stop" {
             // Tool input is complete - emit tool call marker
-            if var toolUse = currentToolUse, !toolUse.partialJson.isEmpty {
-                print("🔍 [ModernAIService] Tool input complete, parsing JSON")
-                // Parse the accumulated JSON
-                if let jsonData = toolUse.partialJson.data(using: .utf8),
-                   let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                    print("🟢 [ModernAIService] Emitting tool call: \(toolUse.name)")
-                    continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
-                    hasReceivedChunks = true
+            print("🔍 [ModernAIService] content_block_stop received")
+            if let toolUse = currentToolUse {
+                print("🔍 [ModernAIService] currentToolUse exists: \(toolUse.name), partialJson length: \(toolUse.partialJson.count)")
+                if !toolUse.partialJson.isEmpty {
+                    print("🔍 [ModernAIService] Tool input complete, parsing JSON")
+                    // Parse the accumulated JSON
+                    if let jsonData = toolUse.partialJson.data(using: .utf8),
+                       let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                        print("🟢 [ModernAIService] Emitting tool call: \(toolUse.name)")
+                        continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                        hasReceivedChunks = true
+                        currentToolUse = nil
+                    } else {
+                        print("🔴 [ModernAIService] Failed to parse accumulated tool input JSON")
+                        print("🔴 [ModernAIService] JSON string (first 500 chars): \(toolUse.partialJson.prefix(500))")
+                        print("🔴 [ModernAIService] JSON string (last 500 chars): \(toolUse.partialJson.suffix(500))")
+                        currentToolUse = nil
+                    }
                 } else {
-                    print("🔴 [ModernAIService] Failed to parse accumulated tool input JSON")
-                    print("🔴 [ModernAIService] JSON string: \(toolUse.partialJson)")
+                    print("🟡 [ModernAIService] content_block_stop but partialJson is empty")
+                    currentToolUse = nil
                 }
-                currentToolUse = nil
+            } else {
+                print("🟡 [ModernAIService] content_block_stop but currentToolUse is nil")
             }
         } else if type == "message_stop" {
             print("🛑 message_stop received")
+            
+            // FIX: Before finishing, check if there's a pending tool use and emit it
+            if let toolUse = currentToolUse, !toolUse.partialJson.isEmpty {
+                print("🔍 [ModernAIService] message_stop received, checking for pending tool call")
+                print("🔍 [ModernAIService] Tool: \(toolUse.name), partialJson length: \(toolUse.partialJson.count)")
+                print("🔍 [ModernAIService] Partial JSON preview: \(toolUse.partialJson.prefix(100))")
+                
+                // Try to parse and emit the tool call
+                if let jsonData = toolUse.partialJson.data(using: .utf8),
+                   let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    print("🟢 [ModernAIService] Emitting pending tool call before message_stop: \(toolUse.name)")
+                    continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                    hasReceivedChunks = true
+                } else {
+                    // JSON is incomplete - analyze what's missing
+                    let trimmedJson = toolUse.partialJson.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let isAlmostComplete = trimmedJson.hasSuffix("\"") || trimmedJson.hasSuffix("}") || trimmedJson.hasSuffix("]")
+                    
+                    // Check for specific tool requirements
+                    var missingFields: [String] = []
+                    if toolUse.name == "write_file" {
+                        if !trimmedJson.contains("\"content\"") {
+                            missingFields.append("content")
+                        }
+                        if !trimmedJson.contains("\"file_path\"") {
+                            missingFields.append("file_path")
+                        }
+                    }
+                    
+                    print("🔴 [ModernAIService] Failed to parse tool input JSON before message_stop")
+                    print("🔴 [ModernAIService] Tool: \(toolUse.name), JSON length: \(toolUse.partialJson.count) chars")
+                    print("🔴 [ModernAIService] JSON preview (first 200 chars): \(toolUse.partialJson.prefix(200))")
+                    print("🔴 [ModernAIService] JSON preview (last 200 chars): \(toolUse.partialJson.suffix(200))")
+                    if !missingFields.isEmpty {
+                        print("🔴 [ModernAIService] Missing required fields: \(missingFields.joined(separator: ", "))")
+                    }
+                    print("🔴 [ModernAIService] JSON appears incomplete - stream ended prematurely")
+                    print("🔴 [ModernAIService] Almost complete: \(isAlmostComplete)")
+                    print("🔴 [ModernAIService] This may indicate a network timeout, API response size limit, or stream truncation")
+                    print("🔴 [ModernAIService] For write_file with large content, the API may be hitting response size limits")
+                    
+                    // Try to fix common incomplete JSON patterns (missing closing brace) only if we have all required fields
+                    if !isAlmostComplete && trimmedJson.count > 10 && missingFields.isEmpty {
+                        // Try adding closing quote and brace if it looks like we're missing just the closing
+                        var fixedJson = trimmedJson
+                        if !fixedJson.hasSuffix("\"") && fixedJson.contains("\"file_path\"") {
+                            // Might be missing closing quote
+                            if let lastQuoteRange = fixedJson.range(of: "\"", options: .backwards) {
+                                let afterLastQuote = String(fixedJson[lastQuoteRange.upperBound...])
+                                if !afterLastQuote.contains("\"") && !afterLastQuote.contains(",") {
+                                    fixedJson += "\""
+                                }
+                            }
+                        }
+                        if !fixedJson.hasSuffix("}") {
+                            fixedJson += "}"
+                        }
+                        
+                        if let jsonData = fixedJson.data(using: .utf8),
+                           let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                            print("🟡 [ModernAIService] Attempting to fix incomplete JSON by adding closing quote/brace")
+                            continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                            hasReceivedChunks = true
+                        } else {
+                            print("🔴 [ModernAIService] Could not fix incomplete JSON - missing required fields or malformed")
+                        }
+                    } else if !missingFields.isEmpty {
+                        print("🔴 [ModernAIService] Cannot fix incomplete JSON - missing required fields: \(missingFields.joined(separator: ", "))")
+                        
+                        // Emit a special error message in the stream so the agent knows what happened
+                        // This will appear in the accumulated response and help the agent understand the issue
+                        let errorHint = "\n\n⚠️ API Response Truncated: The tool call for '\(toolUse.name)' was incomplete because the response was too large. For large file writes, consider breaking the content into smaller chunks or using a different approach."
+                        continuation.yield(errorHint)
+                        hasReceivedChunks = true
+                    }
+                }
+                currentToolUse = nil
+            }
+            
             if !hasReceivedChunks {
                 print("❌ message_stop but no chunks received")
                 print("📋 All events received: \(rawLines.joined(separator: "\n"))")
@@ -534,7 +635,17 @@ class ModernAIService: AIProviderProtocol {
             throw AIError.serverError(httpResponse.statusCode, errorMessage)
         }
         
-        // FIX: 6s TTFT timeout - track first chunk time
+        // FIX: Adaptive TTFT timeout - longer for complex operations
+        // Detect if this is a complex operation that may take longer
+        let isComplexOperation = (context?.count ?? 0) > 50000 || // Large context
+                               message.lowercased().contains("codebase_search") ||
+                               message.lowercased().contains("analyze") ||
+                               message.lowercased().contains("upgrade") ||
+                               message.lowercased().contains("refactor")
+        
+        // Use longer timeout for complex operations (15s) vs simple ones (6s)
+        let ttftTimeout: TimeInterval = isComplexOperation ? 15.0 : 6.0
+        
         let startTime = Date()
         var firstChunkTime: Date?
         var hasReceivedChunks = false
@@ -553,11 +664,14 @@ class ModernAIService: AIProviderProtocol {
             }
             rawLines.append(line)
             
-            // FIX: Check TTFT timeout
+            // FIX: Check adaptive TTFT timeout
             let elapsed = Date().timeIntervalSince(startTime)
-            if !hasReceivedChunks && elapsed > 6.0 {
-                print("⏱️ TTFT timeout after \(elapsed)s, no chunks received")
+            if !hasReceivedChunks && elapsed > ttftTimeout {
+                print("⏱️ TTFT timeout after \(elapsed)s (limit: \(ttftTimeout)s), no chunks received")
                 print("📋 First 20 lines received: \(rawLines.prefix(20).joined(separator: "\n"))")
+                if isComplexOperation {
+                    print("⚠️ [ModernAIService] Complex operation timed out - this may be normal for large codebase searches")
+                }
                 if !continuationFinished {
                     continuation.finish(throwing: AIError.timeout)
                     continuationFinished = true
@@ -607,13 +721,24 @@ class ModernAIService: AIProviderProtocol {
         }
         
         // FIX: If we have a pending tool use with accumulated JSON, emit it now
-        if var toolUse = currentToolUse, !toolUse.partialJson.isEmpty {
-            print("🔍 [ModernAIService] Stream ended, emitting final tool call with accumulated JSON")
-            if let jsonData = toolUse.partialJson.data(using: .utf8),
-               let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
-                hasReceivedChunks = true
+        if let toolUse = currentToolUse {
+            print("🔍 [ModernAIService] Stream ended, checking for pending tool call")
+            print("🔍 [ModernAIService] Tool: \(toolUse.name), partialJson length: \(toolUse.partialJson.count)")
+            if !toolUse.partialJson.isEmpty {
+                print("🔍 [ModernAIService] Stream ended, emitting final tool call with accumulated JSON")
+                if let jsonData = toolUse.partialJson.data(using: .utf8),
+                   let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    print("🟢 [ModernAIService] Emitting tool call at stream end: \(toolUse.name)")
+                    continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                    hasReceivedChunks = true
+                } else {
+                    print("🔴 [ModernAIService] Failed to parse tool input JSON at stream end")
+                    print("🔴 [ModernAIService] JSON string (first 500 chars): \(toolUse.partialJson.prefix(500))")
+                }
+            } else {
+                print("🟡 [ModernAIService] Stream ended but partialJson is empty for tool: \(toolUse.name)")
             }
+            currentToolUse = nil
         }
         
         // Stream ended - only finish if not already finished

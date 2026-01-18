@@ -156,7 +156,7 @@ struct CursorLevelAIView: View {
                     Label("Clear Chat", systemImage: "trash")
                 }
                 Divider()
-                Toggle("Auto-apply", isOn: .constant(true))
+                Toggle("Auto-apply", isOn: $viewModel.isAutoApplyEnabled)
                 Toggle("Show Thinking", isOn: $viewModel.showThinkingProcess)
             } label: {
                 Image(systemName: "ellipsis.circle")

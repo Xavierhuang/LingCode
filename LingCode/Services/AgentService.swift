@@ -315,6 +315,15 @@ class AgentService: ObservableObject {
                     return nil
                 }
                 
+                // Extract files that were written (allow re-reading files that were modified)
+                let filesWritten = self.steps.compactMap { step -> String? in
+                    if step.type == .codeGeneration, step.status == .completed, step.description.hasPrefix("Write: ") {
+                        let filePath = String(step.description.dropFirst("Write: ".count))
+                        return filePath
+                    }
+                    return nil
+                }
+                
                 // Read agent memory (moved into Task)
                 print("⚪ [AgentService] Task - Reading agent memory")
                 let agentMemory = (projectURL != nil) 
@@ -328,10 +337,33 @@ class AgentService: ObservableObject {
                 
                 // Build Prompt (moved into Task)
                 print("⚪ [AgentService] Task - Building prompt")
+                
+                // Detect if task requires actual modifications (not just analysis)
+                let taskLower = task.description.lowercased()
+                let requiresModifications = taskLower.contains("upgrade") || 
+                                         taskLower.contains("modify") || 
+                                         taskLower.contains("improve") || 
+                                         taskLower.contains("update") || 
+                                         taskLower.contains("change") || 
+                                         taskLower.contains("refactor") ||
+                                         taskLower.contains("fix") ||
+                                         taskLower.contains("add") ||
+                                         taskLower.contains("implement")
+                
+                let modificationGuidance = requiresModifications ? """
+                
+                ⚠️ TASK REQUIREMENT: This task requires ACTUAL MODIFICATIONS to files, not just reading/analyzing them.
+                - You MUST use write_file to make changes to the codebase
+                - Reading files is only the first step - you must then modify and write them back
+                - Do NOT call "done" until you have actually written modified files
+                - Your summary should list the specific files you modified and what changes you made
+                
+                """ : ""
+                
                 let prompt = """
                 You are an autonomous coding agent.
                 Goal: \(task.description)
-                
+                \(modificationGuidance)
                 \(agentMemory.isEmpty ? "" : """
                 Project Memory (read from .lingcode/memory.md):
                 \(agentMemory)
@@ -344,9 +376,15 @@ class AgentService: ObservableObject {
                 📁 Files Already Read (DO NOT read these again - use History instead):
                 \(filesRead.map { "- \($0)" }.joined(separator: "\n"))
                 
+                ⚠️ CRITICAL: The FULL CONTENT of these files is already in the History section above. 
+                - Reading them again will IMMEDIATELY trigger loop detection and stop the task
+                - You MUST use the file content from the History section instead
+                - If you need to reference a file, scroll up in the History to find its content
+                - Do NOT call read_file for any file listed above
+                
                 """)
                 ⚠️ CRITICAL RULES:
-                1. Do NOT read the same file multiple times. If you have already read a file (listed above), use the information from the History instead of reading it again.
+                1. Do NOT read the same file multiple times. If you have already read a file (listed above), use the information from the History instead of reading it again. The file content is already available in the History section above.
                 2. Do NOT read files you just wrote unless absolutely necessary for verification. The file write is already confirmed when it succeeds.
                 3. Do NOT repeat the same action multiple times. Check the History to see what has already been done.
                 4. If a previous step failed, analyze why it failed and try a different approach.
@@ -438,6 +476,13 @@ class AgentService: ObservableObject {
                 self.removeStep(thinkingStep.id)
                 self.currentThinkingStep = nil
                 
+                // FIX: Flush any incomplete tool calls from buffer
+                let flushedToolCalls = toolHandler.flush()
+                if !flushedToolCalls.isEmpty {
+                    print("🟢 [AgentService] Task - Flushed \(flushedToolCalls.count) tool call(s) from buffer")
+                    detectedToolCalls.append(contentsOf: flushedToolCalls)
+                }
+                
                 if !hasReceivedChunks {
                     print("🔴 [AgentService] Task - No chunks received!")
                     let errorMessage: String
@@ -462,8 +507,18 @@ class AgentService: ObservableObject {
                         return
                     }
                     
+                    // Check if the response indicates API truncation
+                    let isTruncated = accumulatedResponse.contains("API Response Truncated") || accumulatedResponse.contains("incomplete because the response was too large")
+                    let errorMessage: String
+                    if isTruncated {
+                        errorMessage = "API response was truncated due to large file size. Consider breaking large files into smaller chunks or using incremental updates."
+                        print("🟡 [AgentService] Task - API truncation detected, providing guidance")
+                    } else {
+                        errorMessage = "No tool used"
+                    }
+                    
                     print("🟡 [AgentService] Task - Retrying (no tool used)")
-                    self.addStep(AgentStep(type: .thinking, description: "Retrying...", status: .failed, error: "No tool used"), onUpdate: onStepUpdate)
+                    self.addStep(AgentStep(type: .thinking, description: "Retrying...", status: .failed, error: errorMessage), onUpdate: onStepUpdate)
                     self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
                     return
                 }
@@ -532,8 +587,28 @@ class AgentService: ObservableObject {
                             hasMadeProgress = false
                         }
                         
-                        // More permissive for file reads (allow up to 4 reads before blocking)
-                        let maxAllowedReads = isReadingFile ? 4 : 2
+                        // Stricter for file reads - block after 2 reads of the same file (content is in history)
+                        // Only allow more if it's a different file or if progress was made
+                        let maxAllowedReads = isReadingFile ? 2 : 2
+                        
+                        // Check if this is reading a file that was already read (content should be in history)
+                        // BUT allow re-reading if the file was written after it was read (file was modified)
+                        let filePath = decision.filePath ?? ""
+                        let wasRead = filesRead.contains(filePath)
+                        let wasWritten = filesWritten.contains(filePath)
+                        let isReReadingKnownFile = isReadingFile && !filePath.isEmpty && wasRead && !wasWritten
+                        
+                        if isReReadingKnownFile {
+                            // Block immediately if trying to re-read a file that's already in history AND wasn't modified
+                            print("🟡 [AgentService] Task - Loop detected: Attempting to re-read file that's already in history: \(filePath)")
+                            let errorMsg = "This file was already read and its content is in the History above. Do NOT read it again - use the content from History instead."
+                            self.addStep(AgentStep(type: .thinking, description: "Loop Detected", status: .failed, error: errorMsg), onUpdate: onStepUpdate)
+                            self.finalize(success: false, error: "Agent stuck in loop: re-reading file '\(filePath)' that's already in history", projectURL: projectURL, onComplete: onComplete)
+                            return
+                        } else if wasRead && wasWritten {
+                            // File was read, then written - allow reading again to verify changes
+                            print("🟢 [AgentService] Task - Allowing re-read of file that was modified: \(filePath)")
+                        }
                         
                         if isConsecutiveRepetition {
                             // Consecutive repetition is always suspicious - block immediately
@@ -620,6 +695,30 @@ class AgentService: ObservableObject {
                         } else {
                             self.failedActions.insert(actionHash)
                             print("🟡 [AgentService] executeDecision - Added to failed actions: \(actionHash)")
+                            
+                            // SELF-HEALING: If code action failed due to validation errors, trigger auto-fix
+                            if decision.action == "code" && output.contains("contains errors") {
+                                print("🔧 [AgentService] executeDecision - Code validation failed, triggering self-healing loop")
+                                
+                                // Extract error messages from output
+                                let errorMessages = output.components(separatedBy: "\n")
+                                    .filter { $0.contains("error") || $0.contains("Error") }
+                                
+                                // Update step with detailed error information for the agent to see
+                                let detailedError = "Code validation failed. Errors:\n\(errorMessages.joined(separator: "\n"))\n\nPlease fix these errors and try again."
+                                self.updateStep(nextStep.id, status: .failed, error: detailedError)
+                                onStepUpdate(nextStep)
+                                
+                                // Check iteration limit before self-healing
+                                if self.iterationCount < self.MAX_ITERATIONS {
+                                    print("🟢 [AgentService] executeDecision - Starting self-healing iteration (current: \(self.iterationCount)/\(self.MAX_ITERATIONS))")
+                                    // Trigger next iteration to fix the errors
+                                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                                    return
+                                } else {
+                                    print("🟡 [AgentService] executeDecision - Max iterations reached, cannot self-heal")
+                                }
+                            }
                         }
                         
                         self.updateStep(nextStep.id, status: success ? .completed : .failed, result: success ? "Success" : nil, error: success ? nil : output)
@@ -628,6 +727,38 @@ class AgentService: ObservableObject {
                         // FIX: If action is "done", update the step with summary and finalize
                         if decision.action.lowercased() == "done" {
                             print("🟢 [AgentService] executeDecision - 'done' action detected, updating step and finalizing")
+                            
+                            // Check if task requires modifications and verify files were written
+                            let taskLower = task.description.lowercased()
+                            let requiresModifications = taskLower.contains("upgrade") || 
+                                                     taskLower.contains("modify") || 
+                                                     taskLower.contains("improve") || 
+                                                     taskLower.contains("update") || 
+                                                     taskLower.contains("change") || 
+                                                     taskLower.contains("refactor") ||
+                                                     taskLower.contains("fix") ||
+                                                     taskLower.contains("add") ||
+                                                     taskLower.contains("implement")
+                            
+                            if requiresModifications {
+                                // Count how many files were written
+                                let filesWritten = self.steps.filter { step in
+                                    step.type == .codeGeneration && step.status == .completed
+                                }.count
+                                
+                                if filesWritten == 0 {
+                                    print("🟡 [AgentService] executeDecision - Task requires modifications but no files were written. Rejecting 'done' call.")
+                                    let errorMsg = "This task requires making actual modifications to files, but no files were written. Please use write_file to make changes before marking the task as complete."
+                                    self.updateStep(nextStep.id, status: .failed, error: errorMsg)
+                                    onStepUpdate(nextStep)
+                                    // Continue to next iteration instead of finalizing
+                                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                                    return
+                                } else {
+                                    print("🟢 [AgentService] executeDecision - Task requires modifications and \(filesWritten) file(s) were written. Allowing completion.")
+                                }
+                            }
+                            
                             let summary = decision.thought ?? output
                             // Update the step with the complete summary
                             self.updateStep(nextStep.id, status: .completed, output: summary, append: false)
@@ -781,9 +912,10 @@ class AgentService: ObservableObject {
                             // Warnings are acceptable - mark as success
                             onComplete(true, "File written with warnings")
                         case .errors(let messages):
-                            onOutput("❌ Code written but has errors:\n\(messages.joined(separator: "\n"))")
-                            // REFINEMENT: Mark as failed so agent loop perceives it as failure to fix
-                            onComplete(false, "File written but contains errors")
+                            let errorDetails = messages.joined(separator: "\n")
+                            onOutput("❌ Code written but has errors:\n\(errorDetails)")
+                            // SELF-HEALING: Mark as failed with detailed error messages for agent to fix
+                            onComplete(false, "File written but contains errors:\n\(errorDetails)")
                         case .skipped:
                             // Validation not available or not applicable
                             onComplete(true, "File written successfully")
@@ -1178,8 +1310,57 @@ class AgentService: ObservableObject {
     private func calculateActionHash(_ decision: AgentDecision) -> String {
         let command = decision.command ?? ""
         let filePath = decision.filePath ?? ""
-        let codeHash = (decision.code ?? "").hashValue
+        // Use normalized code hash to catch semantically identical edits with different formatting
+        let normalizedCode = normalizeCodeForHashing(decision.code ?? "")
+        let codeHash = normalizedCode.hashValue
         return "\(decision.action):\(command):\(filePath):\(codeHash)"
+    }
+    
+    /// Normalize code for hashing by removing whitespace, comments, and formatting differences
+    /// This helps detect semantically identical edits even when formatting changes
+    private func normalizeCodeForHashing(_ code: String) -> String {
+        var normalized = code
+        
+        // Remove single-line comments (// ...) - process line by line
+        let lines = normalized.components(separatedBy: .newlines)
+        normalized = lines.map { line in
+            if let commentRange = line.range(of: "//") {
+                return String(line[..<commentRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+            }
+            return line
+        }.joined(separator: "\n")
+        
+        // Remove multi-line comments (/* ... */) using NSRegularExpression
+        do {
+            let multilineCommentPattern = #"/\*.*?\*/"#
+            let regex = try NSRegularExpression(pattern: multilineCommentPattern, options: [.dotMatchesLineSeparators])
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            normalized = regex.stringByReplacingMatches(in: normalized, options: [], range: range, withTemplate: "")
+        } catch {
+            // Fallback: simple string replacement if regex fails
+            normalized = normalized.replacingOccurrences(of: "/*", with: "")
+            normalized = normalized.replacingOccurrences(of: "*/", with: "")
+        }
+        
+        // Normalize whitespace: collapse multiple spaces/tabs to single space
+        normalized = normalized.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        
+        // Remove leading/trailing whitespace from each line
+        let trimmedLines = normalized.components(separatedBy: .newlines)
+        normalized = trimmedLines.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        
+        // Remove all remaining whitespace for final comparison
+        normalized = normalized.replacingOccurrences(of: " ", with: "")
+        normalized = normalized.replacingOccurrences(of: "\n", with: "")
+        normalized = normalized.replacingOccurrences(of: "\t", with: "")
+        
+        return normalized.lowercased()
     }
     
     /// Calculate action hash from a step (for matching steps to decisions)
@@ -1231,13 +1412,25 @@ class AgentService: ObservableObject {
             print("🟢 [AgentService] convertToolCallToDecision - Terminal command: \(cmd)")
             return AgentDecision(action: "terminal", description: "Exec: \(cmd)", command: cmd, query: nil, filePath: nil, code: nil, thought: nil)
         case "write_file":
-            guard let path = input["file_path"]?.value as? String, let content = input["content"]?.value as? String else {
-                print("🔴 [AgentService] convertToolCallToDecision - Missing 'file_path' or 'content' for write_file")
-                print("🔴 [AgentService] convertToolCallToDecision - file_path: \(input["file_path"]?.value ?? "nil"), content: \(input["content"]?.value != nil ? "present" : "nil")")
+            // Handle hallucinated keys: some AI models may send "path" instead of "file_path"
+            let filePath: String? = input["file_path"]?.value as? String ?? 
+                                   input["path"]?.value as? String
+            let content = input["content"]?.value as? String
+            
+            guard let path = filePath, let fileContent = content else {
+                print("🔴 [AgentService] convertToolCallToDecision - Missing required fields for write_file")
+                print("🔴 [AgentService] convertToolCallToDecision - file_path: \(filePath ?? "nil"), content: \(content != nil ? "present" : "nil")")
+                print("🔴 [AgentService] convertToolCallToDecision - Available keys: \(input.keys.joined(separator: ", "))")
                 return nil
             }
+            
+            // Log if we used a fallback key
+            if input["file_path"]?.value == nil {
+                print("⚠️ [AgentService] convertToolCallToDecision - Used fallback key 'path' instead of 'file_path' for write_file")
+            }
+            
             print("🟢 [AgentService] convertToolCallToDecision - Write file: \(path)")
-            return AgentDecision(action: "code", description: "Write: \(path)", command: nil, query: nil, filePath: path, code: content, thought: nil)
+            return AgentDecision(action: "code", description: "Write: \(path)", command: nil, query: nil, filePath: path, code: fileContent, thought: nil)
         case "codebase_search", "search_web":
             guard let q = input["query"]?.value as? String else {
                 print("🔴 [AgentService] convertToolCallToDecision - Missing 'query' for \(toolCall.name)")
@@ -1246,40 +1439,50 @@ class AgentService: ObservableObject {
             print("🟢 [AgentService] convertToolCallToDecision - Search query: \(q)")
             return AgentDecision(action: "search", description: "Search: \(q)", command: nil, query: q, filePath: nil, code: nil, thought: nil)
         case "read_file":
-            guard let path = input["file_path"]?.value as? String else {
-                print("🔴 [AgentService] convertToolCallToDecision - Missing 'file_path' for read_file")
+            // Handle hallucinated keys: some AI models may send "path" instead of "file_path"
+            let filePath: String? = input["file_path"]?.value as? String ?? 
+                                   input["path"]?.value as? String
+            
+            guard let path = filePath else {
+                print("🔴 [AgentService] convertToolCallToDecision - Missing 'file_path' (and fallback 'path') for read_file")
                 print("🔴 [AgentService] convertToolCallToDecision - Available keys: \(input.keys.joined(separator: ", "))")
                 return nil
             }
+            
+            // Log if we used a fallback key
+            if input["file_path"]?.value == nil {
+                print("⚠️ [AgentService] convertToolCallToDecision - Used fallback key 'path' instead of 'file_path' for read_file")
+            }
+            
             print("🟢 [AgentService] convertToolCallToDecision - Read file: \(path)")
             return AgentDecision(action: "file", description: "Read: \(path)", command: nil, query: nil, filePath: path, code: nil, thought: nil)
         case "read_directory":
-            // NOTE: Some AI models may hallucinate and send "path" or "folder" instead of "directory_path"
-            // The logging will help us detect this. If we see it in logs, we can add fallback:
-            // input["directory_path"]?.value as? String ?? input["path"]?.value as? String ?? input["folder"]?.value as? String
-            // For now, we keep strict schema adherence to catch model issues early.
-            guard let path = input["directory_path"]?.value as? String else {
-                print("🔴 [AgentService] convertToolCallToDecision - Missing 'directory_path' for read_directory")
+            // Handle hallucinated keys: some AI models may send "path" or "folder" instead of "directory_path"
+            let path: String? = input["directory_path"]?.value as? String ?? 
+                               input["path"]?.value as? String ?? 
+                               input["folder"]?.value as? String
+            
+            guard let directoryPath = path else {
+                print("🔴 [AgentService] convertToolCallToDecision - Missing 'directory_path' (and fallbacks 'path'/'folder') for read_directory")
                 print("🔴 [AgentService] convertToolCallToDecision - Available keys: \(input.keys.joined(separator: ", "))")
-                // Log alternative keys if present (for debugging model hallucinations)
-                if let altPath = input["path"]?.value as? String {
-                    print("⚠️ [AgentService] convertToolCallToDecision - Found 'path' key instead: \(altPath)")
-                }
-                if let altFolder = input["folder"]?.value as? String {
-                    print("⚠️ [AgentService] convertToolCallToDecision - Found 'folder' key instead: \(altFolder)")
-                }
                 return nil
             }
+            
+            // Log if we used a fallback key (for monitoring model behavior)
+            if input["directory_path"]?.value == nil {
+                let usedKey = input["path"]?.value != nil ? "path" : "folder"
+                print("⚠️ [AgentService] convertToolCallToDecision - Used fallback key '\(usedKey)' instead of 'directory_path' for read_directory")
+            }
+            
             let recursive = (input["recursive"]?.value as? Bool) ?? false
-            print("🟢 [AgentService] convertToolCallToDecision - Read directory: \(path), recursive: \(recursive)")
+            print("🟢 [AgentService] convertToolCallToDecision - Read directory: \(directoryPath), recursive: \(recursive)")
             // FIX: Use "directory" action instead of "file" to properly handle directory reads
-            return AgentDecision(action: "directory", description: "Read: \(path)", command: nil, query: nil, filePath: path, code: nil, thought: recursive ? "recursive" : nil)
+            return AgentDecision(action: "directory", description: "Read: \(directoryPath)", command: nil, query: nil, filePath: directoryPath, code: nil, thought: recursive ? "recursive" : nil)
         default:
             print("🔴 [AgentService] convertToolCallToDecision - Unknown tool name: \(toolCall.name)")
             return nil
         }
     }
-    
     // 🛑 Resume after user approval
     func resumeWithApproval(_ approved: Bool) {
         guard let context = pendingExecutionContext else { return }
@@ -1357,3 +1560,4 @@ class AgentSafetyGuard {
         return .safe
     }
 }
+

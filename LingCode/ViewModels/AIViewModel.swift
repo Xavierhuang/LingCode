@@ -19,6 +19,7 @@ class AIViewModel: ObservableObject {
     @Published var currentActions: [AIAction] = []
     @Published var showThinkingProcess: Bool = true
     @Published var autoExecuteCode: Bool = false // Disabled by default to prevent accidental code deletion
+    @Published var isAutoApplyEnabled: Bool = false // Auto-apply edits when ProposedEdit is fully parsed
     @Published var createdFiles: [URL] = []
     
     // Project generation
@@ -521,8 +522,18 @@ class AIViewModel: ObservableObject {
                             if existingAction.status == .pending {
                                 existingAction.status = .executing
                             }
+                            
+                            // Auto-apply if enabled and action is complete
+                            if self.isAutoApplyEnabled && existingAction.status == .executing {
+                                self.autoApplyActionIfReady(existingAction)
+                            }
                         } else {
                             self.currentActions.append(parsedAction)
+                            
+                            // Auto-apply if enabled and action is ready
+                            if self.isAutoApplyEnabled {
+                                self.autoApplyActionIfReady(parsedAction)
+                            }
                         }
                     }
                     
@@ -579,6 +590,13 @@ class AIViewModel: ObservableObject {
                     self.currentPlan = parsed.plan
                 }
                 self.currentActions = parsed.actions
+                
+                // Auto-apply actions if enabled
+                if self.isAutoApplyEnabled {
+                    for action in self.currentActions {
+                        self.autoApplyActionIfReady(action)
+                    }
+                }
                 
                 // Update message with full response
                 self.conversation.messages[assistantMessageIndex] = AIMessage(
@@ -646,6 +664,13 @@ class AIViewModel: ObservableObject {
                         self.thinkingSteps = parsed.steps
                         self.currentPlan = parsed.plan
                         self.currentActions = parsed.actions
+                        
+                        // Auto-apply actions if enabled
+                        if self.isAutoApplyEnabled {
+                            for action in self.currentActions {
+                                self.autoApplyActionIfReady(action)
+                            }
+                        }
                         
                         // Update message with full response
                         self.conversation.messages[assistantMessageIndex] = AIMessage(
@@ -1400,6 +1425,38 @@ class AIViewModel: ObservableObject {
         case "json": return "json"
         case "md": return "markdown"
         default: return "plaintext"
+        }
+    }
+    
+    // MARK: - Auto-Apply Logic
+    
+    /// Automatically apply an action if it's ready (has content and file path) and auto-apply is enabled
+    private func autoApplyActionIfReady(_ action: AIAction) {
+        // Only auto-apply if action has all required data and hasn't been applied yet
+        guard let content = action.fileContent ?? action.result,
+              let projectURL = editorViewModel?.rootFolderURL,
+              let filePath = action.filePath,
+              action.status != .completed,
+              action.status != .failed else {
+            return
+        }
+        
+        let fileURL = projectURL.appendingPathComponent(filePath)
+        let directory = fileURL.deletingLastPathComponent()
+        
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try content.write(to: fileURL, atomically: true, encoding: .utf8)
+            action.status = .completed
+            
+            // Open the file in the editor
+            editorViewModel?.openFile(at: fileURL)
+            
+            print("🟢 [AIViewModel] Auto-applied file: \(filePath)")
+        } catch {
+            action.status = .failed
+            action.error = error.localizedDescription
+            print("🔴 [AIViewModel] Failed to auto-apply file \(filePath): \(error.localizedDescription)")
         }
     }
 }
