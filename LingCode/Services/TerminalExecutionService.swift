@@ -16,12 +16,38 @@ class TerminalExecutionService: ObservableObject {
     @Published var currentCommand: String?
     @Published var output: String = ""
     @Published var commandHistory: [CommandExecution] = []
+    @Published var isLongRunning: Bool = false // Track if command is a long-running process
     
     private var currentProcess: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
+    private var longRunningTimer: Timer?
     
     private init() {}
+    
+    /// Check if command is likely a long-running server process
+    private func isLongRunningCommand(_ command: String) -> Bool {
+        let lowercased = command.lowercased()
+        let longRunningPatterns = [
+            "http.server",
+            "npm start",
+            "npm run dev",
+            "npm run serve",
+            "yarn start",
+            "yarn dev",
+            "python.*server",
+            "flask run",
+            "rails server",
+            "rails s",
+            "node.*server",
+            "serve",
+            "dev",
+            "watch"
+        ]
+        return longRunningPatterns.contains { pattern in
+            lowercased.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
     
     // MARK: - Command Execution
     
@@ -132,30 +158,75 @@ class TerminalExecutionService: ObservableObject {
             
             do {
                 try process.run()
-                process.waitUntilExit()
                 
-                // Cleanup
-                outputPipe.fileHandleForReading.readabilityHandler = nil
-                errorPipe.fileHandleForReading.readabilityHandler = nil
+                // Check if this is a long-running command
+                let isLongRunningCmd = self.isLongRunningCommand(command)
                 
-                let exitCode = process.terminationStatus
-                
-                DispatchQueue.main.async {
-                    var finalExecution = execution
-                    finalExecution.exitCode = exitCode
-                    finalExecution.output = self.output
-                    finalExecution.endTime = Date()
-                    self.commandHistory.insert(finalExecution, at: 0)
+                if isLongRunningCmd {
+                    // For long-running processes, mark as background after 2 seconds
+                    // Don't wait for exit - let it run in background
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        if self.currentProcess == process {
+                            self.isLongRunning = true
+                            // Process continues running - don't call onComplete
+                            // User can stop it manually via cancel()
+                        }
+                    }
                     
-                    self.isExecuting = false
-                    self.currentProcess = nil
-                    self.currentCommand = nil
+                    // Monitor process termination in background
+                    DispatchQueue.global(qos: .utility).async {
+                        process.waitUntilExit()
+                        
+                        // Process exited - cleanup
+                        DispatchQueue.main.async {
+                            if self.currentProcess == process {
+                                outputPipe.fileHandleForReading.readabilityHandler = nil
+                                errorPipe.fileHandleForReading.readabilityHandler = nil
+                                
+                                var finalExecution = execution
+                                finalExecution.exitCode = process.terminationStatus
+                                finalExecution.output = self.output
+                                finalExecution.endTime = Date()
+                                self.commandHistory.insert(finalExecution, at: 0)
+                                
+                                self.isExecuting = false
+                                self.isLongRunning = false
+                                self.currentProcess = nil
+                                self.currentCommand = nil
+                                
+                                onComplete(process.terminationStatus)
+                            }
+                        }
+                    }
+                } else {
+                    // For normal commands, wait until exit
+                    process.waitUntilExit()
                     
-                    onComplete(exitCode)
+                    // Cleanup
+                    outputPipe.fileHandleForReading.readabilityHandler = nil
+                    errorPipe.fileHandleForReading.readabilityHandler = nil
+                    
+                    let exitCode = process.terminationStatus
+                    
+                    DispatchQueue.main.async {
+                        var finalExecution = execution
+                        finalExecution.exitCode = exitCode
+                        finalExecution.output = self.output
+                        finalExecution.endTime = Date()
+                        self.commandHistory.insert(finalExecution, at: 0)
+                        
+                        self.isExecuting = false
+                        self.isLongRunning = false
+                        self.currentProcess = nil
+                        self.currentCommand = nil
+                        
+                        onComplete(exitCode)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.isExecuting = false
+                    self.isLongRunning = false
                     self.currentProcess = nil
                     self.currentCommand = nil
                     onError("Failed to execute command: \(error.localizedDescription)")

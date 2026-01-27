@@ -350,11 +350,76 @@ struct FileTreeView: NSViewRepresentable {
         }
         
         @objc private func newFile() {
-            // TODO: Implement new file creation
+            guard let rootURL = rootURL else { return }
+
+            let alert = NSAlert()
+            alert.messageText = "New File"
+            alert.informativeText = "Enter the name for the new file:"
+            alert.addButton(withTitle: "Create")
+            alert.addButton(withTitle: "Cancel")
+
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+            input.placeholderString = "filename.txt"
+            alert.accessoryView = input
+
+            alert.window.initialFirstResponder = input
+
+            if alert.runModal() == .alertFirstButtonReturn {
+                let filename = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !filename.isEmpty else { return }
+
+                let newFileURL = rootURL.appendingPathComponent(filename)
+
+                do {
+                    // Create empty file
+                    try "".write(to: newFileURL, atomically: true, encoding: .utf8)
+                    refresh()
+                    // Open the new file - dispatch to main queue to avoid conflicts with view updates
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onFileSelect?(newFileURL)
+                    }
+                } catch {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = "Could not create file"
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .critical
+                    errorAlert.runModal()
+                }
+            }
         }
         
         @objc private func newFolder() {
-            // TODO: Implement new folder creation
+            guard let rootURL = rootURL else { return }
+
+            let alert = NSAlert()
+            alert.messageText = "New Folder"
+            alert.informativeText = "Enter the name for the new folder:"
+            alert.addButton(withTitle: "Create")
+            alert.addButton(withTitle: "Cancel")
+
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+            input.placeholderString = "New Folder"
+            alert.accessoryView = input
+
+            alert.window.initialFirstResponder = input
+
+            if alert.runModal() == .alertFirstButtonReturn {
+                let foldername = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !foldername.isEmpty else { return }
+
+                let newFolderURL = rootURL.appendingPathComponent(foldername)
+
+                do {
+                    try FileManager.default.createDirectory(at: newFolderURL, withIntermediateDirectories: false)
+                    refresh()
+                } catch {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = "Could not create folder"
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .critical
+                    errorAlert.runModal()
+                }
+            }
         }
         
         @objc private func refresh() {
@@ -500,8 +565,10 @@ struct FileTreeView: NSViewRepresentable {
                     // Create empty file
                     try "".write(to: newFileURL, atomically: true, encoding: .utf8)
                     refresh()
-                    // Open the new file
-                    onFileSelect?(newFileURL)
+                    // Open the new file - dispatch to main queue to avoid conflicts with view updates
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onFileSelect?(newFileURL)
+                    }
                 } catch {
                     let errorAlert = NSAlert()
                     errorAlert.messageText = "Could not create file"

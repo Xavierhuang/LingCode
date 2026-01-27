@@ -255,13 +255,21 @@ class MentionParser {
 struct MentionPopupView: View {
     @Binding var isVisible: Bool
     let onSelect: (MentionType) -> Void
+    var editorViewModel: EditorViewModel?
+    var onFileSelected: ((String) -> Void)?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(MentionType.allCases, id: \.self) { type in
                 Button(action: {
-                    onSelect(type)
-                    isVisible = false
+                    if type == .file, let editorViewModel = editorViewModel, let onFileSelected = onFileSelected {
+                        // Show file picker for @file
+                        // This will be handled by parent view
+                        onSelect(type)
+                    } else {
+                        onSelect(type)
+                        isVisible = false
+                    }
                 }) {
                     HStack {
                         Image(systemName: type.icon)
@@ -277,6 +285,12 @@ struct MentionPopupView: View {
                         }
                         
                         Spacer()
+                        
+                        if type == .file {
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)

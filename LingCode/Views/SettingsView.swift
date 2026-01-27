@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var showAPITest: Bool = false
     @State private var isTestingLocalModel: Bool = false
     @State private var localModelTestResult: String? = nil
+    @State private var showRulesManagement: Bool = false
     
     var body: some View {
         NavigationView {
@@ -316,6 +317,40 @@ struct SettingsView: View {
                     }
                 }
                 
+                Section("Rules & Workspace") {
+                    Button(action: {
+                        showRulesManagement = true
+                    }) {
+                        HStack {
+                            Label("Manage Rules", systemImage: "doc.text")
+                            Spacer()
+                            if LingCodeRulesService.shared.hasProjectRules {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
+                    .help("Create or edit WORKSPACE.md, .cursorrules, or .lingcode files")
+                    
+                    if let projectURL = viewModel.rootFolderURL {
+                        Text("Project: \(projectURL.lastPathComponent)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Open a project to manage rules")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Section("Code Generation") {
+                    Toggle("Auto-imports", isOn: Binding(
+                        get: { UserDefaults.standard.bool(forKey: "autoImportsEnabled") },
+                        set: { UserDefaults.standard.set($0, forKey: "autoImportsEnabled") }
+                    ))
+                    .help("Automatically add missing import statements when applying code (Cursor feature)")
+                }
+                
                 Section("Theme") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Appearance")
@@ -350,7 +385,12 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 500, minHeight: 400)
+        .sheet(isPresented: $showRulesManagement) {
+            RulesManagementView(projectURL: viewModel.rootFolderURL)
+        }
         .onAppear {
+            // Load rules for current project
+            LingCodeRulesService.shared.loadRules(for: viewModel.rootFolderURL)
             if let key = AIService.shared.getAPIKey() {
                 apiKey = key
             }

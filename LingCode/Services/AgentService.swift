@@ -28,7 +28,7 @@ struct AgentStep: Identifiable {
     var timestamp: Date = Date()
 }
 
-enum AgentStepType {
+enum AgentStepType: String, Codable {
     case thinking
     case terminal
     case codeGeneration
@@ -48,7 +48,7 @@ enum AgentStepType {
     }
 }
 
-enum AgentStepStatus {
+enum AgentStepStatus: String, Codable {
     case pending
     case running
     case completed
@@ -56,10 +56,40 @@ enum AgentStepStatus {
     case cancelled
 }
 
-struct AgentTaskResult {
+struct AgentTaskResult: Codable {
     let success: Bool
     let error: String?
-    let steps: [AgentStep]
+    let steps: [AgentStepCodable]
+    
+    // Convert from AgentStep to Codable version
+    init(success: Bool, error: String?, steps: [AgentStep]) {
+        self.success = success
+        self.error = error
+        self.steps = steps.map { AgentStepCodable(from: $0) }
+    }
+}
+
+// Codable version of AgentStep for serialization
+struct AgentStepCodable: Codable {
+    let id: UUID
+    let type: AgentStepType
+    let description: String
+    let status: AgentStepStatus
+    let output: String?
+    let result: String?
+    let error: String?
+    let timestamp: Date
+    
+    init(from step: AgentStep) {
+        self.id = step.id
+        self.type = step.type
+        self.description = step.description
+        self.status = step.status
+        self.output = step.output
+        self.result = step.result
+        self.error = step.error
+        self.timestamp = step.timestamp
+    }
 }
 
 struct AgentDecision: Codable, Equatable {
@@ -437,44 +467,67 @@ class AgentService: ObservableObject {
                 let toolHandler = ToolCallHandler.shared
                 var chunkCount = 0
                 
-                for try await chunk in stream {
-                    chunkCount += 1
-                    if chunkCount % 10 == 0 {
-                        print("⚪ [AgentService] Task - Received chunk #\(chunkCount), accumulated: \(accumulatedResponse.count) chars")
-                    }
-                    if isCancelled || Task.isCancelled {
-                        if let thinkingStep = self.currentThinkingStep {
-                            self.removeStep(thinkingStep.id)
-                            self.currentThinkingStep = nil
+                do {
+                    for try await chunk in stream {
+                        chunkCount += 1
+                        if chunkCount % 10 == 0 {
+                            print("⚪ [AgentService] Task - Received chunk #\(chunkCount), accumulated: \(accumulatedResponse.count) chars")
                         }
-                        finalize(success: false, error: "Cancelled by user", projectURL: projectURL, onComplete: onComplete)
-                        return
+                        if isCancelled || Task.isCancelled {
+                            if let thinkingStep = self.currentThinkingStep {
+                                self.removeStep(thinkingStep.id)
+                                self.currentThinkingStep = nil
+                            }
+                            finalize(success: false, error: "Cancelled by user", projectURL: projectURL, onComplete: onComplete)
+                            return
+                        }
+                        
+                        hasReceivedChunks = true
+                        accumulatedResponse += chunk
+                        
+                        // Debug: Check if chunk contains tool call marker
+                        if chunk.contains("🔧 TOOL_CALL:") {
+                            print("🔍 [AgentService] Chunk contains tool call marker: \(chunk.prefix(100))")
+                        }
+                        
+                        let (text, toolCalls) = toolHandler.processChunk(chunk, projectURL: projectURL)
+                        if !toolCalls.isEmpty {
+                            print("🟢 [AgentService] Detected \(toolCalls.count) tool call(s) in chunk")
+                        }
+                        detectedToolCalls.append(contentsOf: toolCalls)
+                        
+                        if !text.isEmpty {
+                            // FIX: Replace output (not append) since we're passing the full accumulated response
+                            self.updateStep(thinkingStep.id, output: accumulatedResponse, append: false)
+                        }
                     }
                     
-                    hasReceivedChunks = true
-                    accumulatedResponse += chunk
+                    // Remove "Thinking" placeholder
+                    print("🟢 [AgentService] Task - Stream completed, total chunks: \(chunkCount), accumulated: \(accumulatedResponse.count) chars")
+                    self.removeStep(thinkingStep.id)
+                    self.currentThinkingStep = nil
+                } catch {
+                    // 🟢 FIX: Catch stream errors immediately (e.g., Ollama connection refused)
+                    print("🔴 [AgentService] Task - Stream error: \(error.localizedDescription)")
+                    self.removeStep(thinkingStep.id)
+                    self.currentThinkingStep = nil
                     
-                    // Debug: Check if chunk contains tool call marker
-                    if chunk.contains("🔧 TOOL_CALL:") {
-                        print("🔍 [AgentService] Chunk contains tool call marker: \(chunk.prefix(100))")
+                    let errorMessage: String
+                    let nsError = error as NSError
+                    if nsError.domain == "LocalOnlyService" || nsError.domain == NSURLErrorDomain {
+                        if nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1004 || nsError.code == -1021 {
+                            errorMessage = "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                        } else {
+                            errorMessage = "AI Service Error: \(error.localizedDescription)"
+                        }
+                    } else {
+                        errorMessage = "AI Service Error: \(error.localizedDescription)"
                     }
                     
-                    let (text, toolCalls) = toolHandler.processChunk(chunk, projectURL: projectURL)
-                    if !toolCalls.isEmpty {
-                        print("🟢 [AgentService] Detected \(toolCalls.count) tool call(s) in chunk")
-                    }
-                    detectedToolCalls.append(contentsOf: toolCalls)
-                    
-                    if !text.isEmpty {
-                        // FIX: Replace output (not append) since we're passing the full accumulated response
-                        self.updateStep(thinkingStep.id, output: accumulatedResponse, append: false)
-                    }
+                    self.addStep(AgentStep(type: .thinking, description: "AI Error", status: .failed, error: errorMessage), onUpdate: onStepUpdate)
+                    self.finalize(success: false, error: errorMessage, projectURL: projectURL, onComplete: onComplete)
+                    return
                 }
-                
-                // Remove "Thinking" placeholder
-                print("🟢 [AgentService] Task - Stream completed, total chunks: \(chunkCount), accumulated: \(accumulatedResponse.count) chars")
-                self.removeStep(thinkingStep.id)
-                self.currentThinkingStep = nil
                 
                 // FIX: Flush any incomplete tool calls from buffer
                 let flushedToolCalls = toolHandler.flush()
@@ -842,7 +895,7 @@ class AgentService: ObservableObject {
                 return
             }
             
-            // Write code to file
+            // Resolve Path
             let fullPath: URL
             if let projectURL = projectURL {
                 fullPath = projectURL.appendingPathComponent(filePath)
@@ -855,10 +908,30 @@ class AgentService: ObservableObject {
                 let directory = fullPath.deletingLastPathComponent()
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
                 
-                // FIX: Check if file exists BEFORE writing (to detect new files)
+                // 🟢 IDEMPOTENCY CHECK (THE FIX) 🟢
+                // Check if file exists and if the content is EXACTLY the same.
+                // If it is, we tell the Agent "Done" so it stops looping.
                 let fileExisted = FileManager.default.fileExists(atPath: fullPath.path)
                 
-                // FIX: Read original content BEFORE writing (for change highlighting)
+                if fileExisted {
+                    if let existingContent = try? String(contentsOf: fullPath, encoding: .utf8) {
+                        // Normalize strings (trim whitespace) to avoid false positives on empty lines
+                        let normalizedExisting = existingContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let normalizedNew = code.trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        if normalizedExisting == normalizedNew {
+                            print("🟡 [AgentService] Skipping write - Content identical")
+                            // 🟢 FIX: Include file content in output so agent can see what's already there
+                            onOutput("ℹ️ File '\(filePath)' is already up-to-date with this exact content.\n\n--- \(filePath) ---\n\(existingContent)\n--- End of \(filePath) ---")
+                            // We mark it as success but give a hint to move on
+                            onComplete(true, "File content is already identical. No changes made.")
+                            return
+                        }
+                    }
+                }
+                
+                // If we get here, the content is different (or new). WRITE IT.
+                // Read original content for change highlighting (only if file existed)
                 let originalContent: String?
                 if fileExisted {
                     originalContent = try? String(contentsOf: fullPath, encoding: .utf8)
@@ -866,67 +939,52 @@ class AgentService: ObservableObject {
                     originalContent = nil
                 }
                 
-                // Write file
                 try code.write(to: fullPath, atomically: true, encoding: .utf8)
-                onOutput("File written: \(filePath)")
                 
-                // FIX: Notify UI to refresh file tree AND open file in editor with highlighting
+                // 🟢 FIX: Include file content in output so agent can see what was written in history
+                onOutput("File written: \(filePath)\n\n--- \(filePath) ---\n\(code)\n--- End of \(filePath) ---")
+                
+                // Notify UI
                 if !fileExisted {
-                    // New file created - notify UI to refresh file tree and open file
-                    print("🟢 [AgentService] New file created: \(filePath), opening in editor with highlighting")
+                    print("🟢 [AgentService] New file created: \(filePath)")
                     NotificationCenter.default.post(
                         name: NSNotification.Name("FileCreated"),
                         object: nil,
-                        userInfo: [
-                            "fileURL": fullPath,
-                            "filePath": filePath,
-                            "content": code,
-                            "originalContent": originalContent ?? ""
-                        ]
+                        userInfo: ["fileURL": fullPath, "filePath": filePath, "content": code, "originalContent": originalContent ?? ""]
                     )
                 } else {
-                    // Existing file updated - notify UI to refresh and open with change highlighting
-                    print("🟢 [AgentService] File updated: \(filePath), opening in editor with change highlighting")
+                    print("🟢 [AgentService] File updated: \(filePath)")
                     NotificationCenter.default.post(
                         name: NSNotification.Name("FileUpdated"),
                         object: nil,
-                        userInfo: [
-                            "fileURL": fullPath,
-                            "filePath": filePath,
-                            "content": code,
-                            "originalContent": originalContent ?? ""
-                        ]
+                        userInfo: ["fileURL": fullPath, "filePath": filePath, "content": code, "originalContent": originalContent ?? ""]
                     )
                 }
                 
-                // IMPROVEMENT: Shadow Workspace - Validate compilation/lint before marking as success
-                // This matches Cursor's approach of validating code before showing it to the user
+                // Validate
                 if let projectURL = projectURL {
                     validateCodeAfterWrite(fileURL: fullPath, projectURL: projectURL) { validationResult in
                         switch validationResult {
                         case .success:
                             onOutput("✅ Code validated successfully")
-                            onComplete(true, "File written and validated successfully")
+                            onComplete(true, "File written and validated")
                         case .warnings(let messages):
-                            onOutput("⚠️ Code written with warnings:\n\(messages.joined(separator: "\n"))")
-                            // Warnings are acceptable - mark as success
+                            onOutput("⚠️ Warnings:\n\(messages.joined(separator: "\n"))")
                             onComplete(true, "File written with warnings")
                         case .errors(let messages):
                             let errorDetails = messages.joined(separator: "\n")
-                            onOutput("❌ Code written but has errors:\n\(errorDetails)")
+                            onOutput("❌ Validation Errors:\n\(errorDetails)")
                             
-                            // CONTEXTUAL SELF-HEALING: Attach GraphRAG context for failing symbols
+                            // Contextual Self-Healing
                             Task { @MainActor in
                                 let contextualError = await self.enrichErrorWithGraphRAG(
                                     errors: messages,
                                     fileURL: fullPath,
                                     projectURL: projectURL
                                 )
-                                // SELF-HEALING: Mark as failed with detailed error messages + GraphRAG context
                                 onComplete(false, contextualError)
                             }
                         case .skipped:
-                            // Validation not available or not applicable
                             onComplete(true, "File written successfully")
                         }
                     }
@@ -1311,6 +1369,12 @@ class AgentService: ObservableObject {
     // MARK: - Helpers
     
     private func finalize(success: Bool, error: String? = nil, projectURL: URL? = nil, summary: String? = nil, onComplete: @escaping (AgentTaskResult) -> Void) {
+        // Save to history
+        if let task = currentTask {
+            let status: AgentHistoryItem.AgentTaskStatus = success ? .completed : (isCancelled ? .cancelled : .failed)
+            let result = AgentTaskResult(success: success, error: error, steps: steps)
+            AgentHistoryService.shared.saveAgentTask(task, steps: steps, result: result, status: status)
+        }
         print("🔵 [AgentService] finalize() - success: \(success), error: \(error ?? "none"), steps: \(self.steps.count)")
         self.isRunning = false
         
@@ -1354,6 +1418,13 @@ class AgentService: ObservableObject {
         }
         
         let result = AgentTaskResult(success: success, error: error, steps: self.steps)
+        
+        // Save to history before clearing currentTask
+        if let task = self.currentTask {
+            let status: AgentHistoryItem.AgentTaskStatus = success ? .completed : (self.isCancelled ? .cancelled : .failed)
+            AgentHistoryService.shared.saveAgentTask(task, steps: self.steps, result: result, status: status)
+        }
+        
         self.currentTask = nil
         
         if success, let projectURL = projectURL {

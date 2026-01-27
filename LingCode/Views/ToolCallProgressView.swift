@@ -20,9 +20,16 @@ struct ToolCallProgressView: View {
                 .font(.system(size: 14, weight: .medium))
             
             // Message
-            Text(progress.message)
-                .font(.system(size: 13))
-                .foregroundColor(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(progress.message.isEmpty ? progress.displayMessage : progress.message)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.primary)
+                if !progress.message.isEmpty {
+                    Text(progress.displayMessage)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
             
             Spacer()
             

@@ -134,11 +134,16 @@ class PTYTerminalService: ObservableObject {
         }
     }
     
-    /// Send input to the terminal
+    /// Send input to the terminal (adds newline)
     func sendInput(_ input: String) {
+        sendRawInput(input + "\n")
+    }
+    
+    /// Send raw input to the terminal (no newline added)
+    func sendRawInput(_ input: String) {
         guard masterFD >= 0, isRunning else { return }
         
-        let data = (input + "\n").data(using: .utf8) ?? Data()
+        let data = input.data(using: .utf8) ?? Data()
         _ = data.withUnsafeBytes { bytes in
             write(masterFD, bytes.baseAddress, data.count)
         }

@@ -190,8 +190,21 @@ class FileActionHandler {
         let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
         let originalContent = fileExists ? try? String(contentsOf: fileURL, encoding: .utf8) : nil
         
+        // Auto-imports (Cursor feature) - add missing imports if enabled
+        var finalContent = file.content
+        if UserDefaults.standard.bool(forKey: "autoImportsEnabled") {
+            let autoImportService = AutoImportService.shared
+            let language = file.language.isEmpty ? nil : file.language
+            finalContent = autoImportService.addMissingImports(
+                to: file.content,
+                filePath: file.path,
+                projectURL: projectURL,
+                language: language
+            )
+        }
+        
         // Enhanced safety checks: Don't apply if content is invalid
-        let trimmedContent = file.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedContent.isEmpty else {
             print("⚠️ Warning: Skipping apply - file content is empty for \(file.path)")
             return
@@ -238,8 +251,8 @@ class FileActionHandler {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             
-            // Write content atomically
-            try file.content.write(to: fileURL, atomically: true, encoding: .utf8)
+            // Write content atomically (with auto-imports if enabled)
+            try finalContent.write(to: fileURL, atomically: true, encoding: .utf8)
             
             // Verify the write was successful by reading back
             if let writtenContent = try? String(contentsOf: fileURL, encoding: .utf8) {

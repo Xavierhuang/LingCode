@@ -59,6 +59,10 @@ struct EditorView: View {
                         diagnostics: viewModel.currentDiagnostics,
                         onTextChange: { text in
                             viewModel.updateDocumentContent(text)
+                            
+                            // 🟢 Trigger the "Hot Start" speculation - pre-fetch context when user pauses typing
+                            SpeculativeContextService.shared.onUserTyping(text: text)
+                            
                             // Update diagnostics with current content (for unsaved changes)
                             if let fileURL = document.filePath {
                                 // Send didChange to LSP to trigger diagnostics update

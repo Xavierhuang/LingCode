@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct StreamingFileInfo: Identifiable, Equatable {
+struct StreamingFileInfo: Identifiable, Equatable, Hashable {
     let id: String
     let path: String
     let name: String
@@ -31,6 +31,11 @@ struct StreamingFileInfo: Identifiable, Equatable {
                lhs.changeSummary == rhs.changeSummary &&
                lhs.addedLines == rhs.addedLines &&
                lhs.removedLines == rhs.removedLines
+    }
+    
+    // Hashable conformance (uses id as unique identifier)
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 

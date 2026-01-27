@@ -18,10 +18,12 @@ struct CursorStreamingFileCard: View {
     let file: StreamingFileInfo
     let isExpanded: Bool
     let projectURL: URL?
+    let isKept: Bool
     let onToggle: () -> Void
     let onOpen: () -> Void
     let onApply: () -> Void
     let onReject: (() -> Void)? // Optional reject callback
+    let onUnkeep: (() -> Void)? // Optional unkeep callback
     
     @State private var isHovered = false
     // CRITICAL FIX: Use model's isApplied state instead of local state
@@ -40,18 +42,22 @@ struct CursorStreamingFileCard: View {
         file: StreamingFileInfo,
         isExpanded: Bool,
         projectURL: URL?,
+        isKept: Bool = false,
         onToggle: @escaping () -> Void,
         onOpen: @escaping () -> Void,
         onApply: @escaping () -> Void,
-        onReject: (() -> Void)? = nil
+        onReject: (() -> Void)? = nil,
+        onUnkeep: (() -> Void)? = nil
     ) {
         self.file = file
         self.isExpanded = isExpanded
         self.projectURL = projectURL
+        self.isKept = isKept
         self.onToggle = onToggle
         self.onOpen = onOpen
         self.onApply = onApply
         self.onReject = onReject
+        self.onUnkeep = onUnkeep
     }
     
     var body: some View {
@@ -287,12 +293,37 @@ struct CursorStreamingFileCard: View {
     
     private var statusBadgeView: some View {
         Group {
-            if file.isStreaming {
+            if isKept {
+                keptBadge
+            } else if file.isStreaming {
                 streamingBadge
             } else {
                 readyBadge
             }
         }
+    }
+    
+    private var keptBadge: some View {
+        Button(action: {
+            onUnkeep?()
+        }) {
+            HStack(spacing: 4) {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 8, weight: .bold))
+                Text("Kept")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(Color.purple)
+                    .shadow(color: Color.purple.opacity(0.3), radius: 2)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+        .help("Click to un-keep this file")
     }
     
     private var streamingBadge: some View {

@@ -23,6 +23,7 @@ struct ContentView: View {
     @State private var showQuickOpen: Bool = false
     @State private var showDefinition: Bool = false
     @State private var showReferences: Bool = false
+    @State private var showQuickActions: Bool = false
     
     // Activity Bar
     @State private var selectedActivity: ActivityItem = .ai
@@ -353,6 +354,12 @@ struct ContentView: View {
         .sheet(isPresented: $showGlobalSearch) {
             GlobalSearchView(viewModel: viewModel, isPresented: $showGlobalSearch)
         }
+        .sheet(isPresented: $showQuickActions) {
+            QuickActionsView(
+                viewModel: viewModel.aiViewModel,
+                editorViewModel: viewModel
+            )
+        }
         .sheet(isPresented: $showInlineEdit) {
             InlineAIEditView(isPresented: $showInlineEdit, viewModel: viewModel)
         }
@@ -615,6 +622,9 @@ struct ContentView: View {
             },
             Command(title: "AI Edit", subtitle: "Edit code with AI", icon: "sparkles", keywords: ["ai", "edit", "generate"]) {
                 showInlineEdit = true
+            },
+            Command(title: "Quick Actions", subtitle: "Fast AI operations", icon: "bolt.fill", keywords: ["quick", "actions", "ai", "explain", "refactor", "test"]) {
+                showQuickActions = true
             },
             Command(title: "Refactor Code", subtitle: "AI-powered refactoring suggestions", icon: "wand.and.stars", keywords: ["refactor", "refactoring", "improve", "optimize"]) {
                 showRefactoring = true

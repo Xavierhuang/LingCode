@@ -1030,8 +1030,14 @@ struct TerminalCommandCard: View {
     @ViewBuilder
     private var statusIcon: some View {
         if isExecuting {
-            ProgressView()
-                .scaleEffect(0.6)
+            if terminalService.isLongRunning {
+                Image(systemName: "circle.fill")
+                    .foregroundColor(.blue)
+                    .font(.system(size: 8))
+            } else {
+                ProgressView()
+                    .scaleEffect(0.6)
+            }
         } else if hasExecuted {
             Image(systemName: exitCode == 0 ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(exitCode == 0 ? .green : .red)

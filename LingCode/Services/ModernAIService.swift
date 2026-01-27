@@ -53,6 +53,19 @@ class ModernAIService: AIProviderProtocol {
                     // Check local mode first
                     let localService = LocalOnlyService.shared
                     if localService.isLocalModeEnabled && localService.isLocalModelAvailable() {
+                        // 🟢 FIX: Check if Ollama is running before attempting to stream
+                        if !localService.isOllamaRunning {
+                            let error = NSError(
+                                domain: "LocalOnlyService",
+                                code: 5,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey: "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                                ]
+                            )
+                            continuation.finish(throwing: error)
+                            return
+                        }
+                        
                         // Use local streaming (convert callback to async stream)
                         // Use a thread-safe cancellation flag with actor
                         actor LocalStreamCancellation {
@@ -888,6 +901,16 @@ class ModernAIService: AIProviderProtocol {
     
     func getAnthropicModel() -> AnthropicModel {
         return anthropicModel
+    }
+    
+    /// Get current model name as string
+    var currentModel: String {
+        switch provider {
+        case .anthropic:
+            return anthropicModel.rawValue
+        case .openAI:
+            return "gpt-4o"
+        }
     }
     
     // MARK: - Private Helpers

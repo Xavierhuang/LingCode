@@ -12,35 +12,52 @@ import UniformTypeIdentifiers
 struct AgentModeView: View {
     @StateObject private var agentService = AgentService.shared
     @StateObject private var imageContextService = ImageContextService.shared
+    @StateObject private var historyService = AgentHistoryService.shared
     @State private var inputText: String = ""
     @State private var lastStepCount: Int = 0
     @Namespace private var bottomID
     @State private var showApprovalDialog = false
+    @State private var selectedAgent: AgentHistoryItem?
+    @State private var showAgentList: Bool = true
     
     @ObservedObject var editorViewModel: EditorViewModel
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "sparkles")
-                    .foregroundColor(.purple)
-                    .symbolEffect(.bounce, value: agentService.isRunning)
-                Text("Autonomous Agent")
-                    .font(.headline)
-                Spacer()
-                if agentService.isRunning {
-                    Button("Stop") {
-                        agentService.cancel()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                }
+        HSplitView {
+            // Agent List Sidebar
+            if showAgentList {
+                AgentListView(selectedAgent: $selectedAgent)
+                    .frame(minWidth: 250, idealWidth: 300)
             }
-            .padding()
-            .background(Color(NSColor.windowBackgroundColor))
             
-            Divider()
+            // Main Agent View
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    Button(action: { showAgentList.toggle() }) {
+                        Image(systemName: showAgentList ? "sidebar.left" : "sidebar.right")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    Image(systemName: "sparkles")
+                        .foregroundColor(.purple)
+                        .symbolEffect(.bounce, value: agentService.isRunning)
+                    Text("Autonomous Agent")
+                        .font(.headline)
+                    Spacer()
+                    if agentService.isRunning {
+                        Button("Stop") {
+                            agentService.cancel()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                    }
+                }
+                .padding()
+                .background(Color(NSColor.windowBackgroundColor))
+                
+                Divider()
             
             // Steps List
             ScrollViewReader { proxy in
@@ -151,6 +168,7 @@ struct AgentModeView: View {
                 }
                 return true
             }
+            }
         }
         .background(Color(NSColor.windowBackgroundColor))
         .onChange(of: agentService.pendingApproval) { oldValue, newValue in
@@ -201,6 +219,7 @@ struct AgentModeView: View {
                     }
                     // Clear images after task completes
                     imageContextService.clearImages()
+                    // History is automatically saved by AgentService.finalize()
                 }
             )
         }
@@ -334,19 +353,30 @@ struct AgentStepRow: View {
                 }
             }
             
-            // Streaming Output Box
-            if isExpanded, let output = step.output, !output.isEmpty, step.status != .running || output.count > 50 {
-                ScrollView {
-                    Text(output)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+            // Streaming Output Box - Show while streaming or when output exists
+            if isExpanded, let output = step.output, !output.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(output)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .id("streaming-output")
+                    }
+                    .frame(maxHeight: 200)
+                    .padding(8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(6)
+                    .onChange(of: output) { _, _ in
+                        // Auto-scroll to bottom as content streams in
+                        if step.status == .running {
+                            withAnimation(.none) {
+                                proxy.scrollTo("streaming-output", anchor: .bottom)
+                            }
+                        }
+                    }
                 }
-                .frame(maxHeight: 200)
-                .padding(8)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(6)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }

@@ -318,10 +318,23 @@ class SourceKitLSPClient: LSPClientProtocol, StoppableLSPClient {
         
         // LSP uses Content-Length header format
         let header = "Content-Length: \(data.count)\r\n\r\n"
-        let headerData = header.data(using: .utf8)!
+        guard let headerData = header.data(using: .utf8) else { return }
         
-        inputPipe.fileHandleForWriting.write(headerData)
-        inputPipe.fileHandleForWriting.write(data)
+        do {
+            // 🟢 SAFER: Throws errors instead of crashing the app
+            if #available(macOS 10.15.4, *) {
+                try inputPipe.fileHandleForWriting.write(contentsOf: headerData)
+                try inputPipe.fileHandleForWriting.write(contentsOf: data)
+            } else {
+                // Fallback for older macOS
+                inputPipe.fileHandleForWriting.write(headerData)
+                inputPipe.fileHandleForWriting.write(data)
+            }
+        } catch {
+            print("⚠️ LSP Write Failed: \(error.localizedDescription)")
+            // If the pipe is broken, restart the server gracefully
+            self.stopServer() 
+        }
     }
     
     /// Send rename request and wait for response

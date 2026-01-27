@@ -9,7 +9,15 @@ import SwiftUI
 
 struct StreamingHeaderView: View {
     @ObservedObject var viewModel: AIViewModel
-    
+    var projectURL: URL? = nil
+
+    private var specPathLabel: String? {
+        guard viewModel.projectMode, let url = projectURL else { return nil }
+        let raw = SpecPromptAssemblyService.loadWorkspaceRules(workspaceRootURL: url)
+        let hasRules = raw.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        return hasRules ? "Workspace rules applied" : "Using project prompt rules"
+    }
+
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.md) {
             // Icon only (no text to avoid layout issues)
@@ -17,8 +25,31 @@ struct StreamingHeaderView: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundColor(DesignSystem.Colors.accent)
                 .help("AI Assistant")
+
+            if let label = specPathLabel {
+                Text(label)
+                    .font(DesignSystem.Typography.caption1)
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
+                    .lineLimit(1)
+                    .help("Deterministic prompt: core + WORKSPACE.md + task template")
+            }
             
             Spacer()
+            
+            // Codebase index status
+            CodebaseIndexStatusView(editorViewModel: nil)
+            
+            // Performance dashboard button (NEW - Better than Cursor)
+            Button(action: {
+                // Trigger via notification or binding
+                NotificationCenter.default.post(name: NSNotification.Name("ShowPerformanceDashboard"), object: nil)
+            }) {
+                Image(systemName: "chart.bar")
+                    .font(.system(size: 12))
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .help("Performance Dashboard")
             
             // Status indicator
             HStack(spacing: DesignSystem.Spacing.sm) {

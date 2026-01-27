@@ -72,7 +72,7 @@ class FileWatcherService {
             pathsToWatch,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             latency,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
         ) else {
             print("🔴 [FileWatcher] Failed to create FSEventStream for \(path)")
             return
@@ -104,13 +104,25 @@ class FileWatcherService {
         eventPaths: UnsafeMutableRawPointer?,
         eventFlags: UnsafePointer<FSEventStreamEventFlags>?
     ) {
-        guard let paths = eventPaths?.assumingMemoryBound(to: Unmanaged<CFString>.self),
+        guard let pathsPtr = eventPaths,
               let flags = eventFlags else {
             return
         }
         
+        // 🟢 FIX: eventPaths is a CFArray when using kFSEventStreamCreateFlagUseCFTypes
+        // Convert to CFArray and safely extract paths
+        let pathsArray = unsafeBitCast(pathsPtr, to: CFArray.self)
+        
         for i in 0..<numEvents {
-            let path = paths[i].takeUnretainedValue() as String
+            // Safely get CFString from CFArray
+            // CFArrayGetValueAtIndex returns UnsafeRawPointer? which we cast to CFString
+            guard let cfStringValue = CFArrayGetValueAtIndex(pathsArray, i) else {
+                continue
+            }
+            let cfString = unsafeBitCast(cfStringValue, to: CFString.self)
+            
+            // Convert CFString to Swift String
+            let path = cfString as String
             let flag = flags[i]
             
             // Only process file modifications (not directory changes)

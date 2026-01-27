@@ -686,11 +686,30 @@ class LocalOnlyService: ObservableObject {
         onComplete: @escaping () -> Void,
         onError: @escaping (Error) -> Void
     ) {
+        // 🟢 FIX: Check if Ollama is running before attempting connection
+        guard isOllamaRunning else {
+            let error = NSError(
+                domain: "LocalOnlyService",
+                code: 5,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"
+                ]
+            )
+            DispatchQueue.main.async {
+                onError(error)
+            }
+            return
+        }
+        
         let url = URL(string: "http://localhost:11434/api/generate")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 300.0 // 5 minutes timeout for large prompts
+        // 🟢 FIX: Use longer timeout for large prompts (agent prompts can be very large)
+        // Connection timeout: 10s (fail fast if Ollama isn't running)
+        // Request timeout: 300s (5 minutes for large prompts to process)
+        // We use URLSessionConfiguration to set different timeouts
+        request.timeoutInterval = 300.0 // 5 minutes for request processing
         
         let requestBody: [String: Any] = [
             "model": model.name,
@@ -798,6 +817,11 @@ class LocalOnlyService: ObservableObject {
                         errorMessage = "Ollama error: \(errorMsg)"
                     }
                     
+                    // 🟢 FIX: Better error messages for 500 errors (often timeout-related)
+                    if httpResponse.statusCode == 500 {
+                        errorMessage = "Ollama server error (500). This often happens when:\n1. The prompt is too large for the model\n2. The model is still loading\n3. The request timed out\n\nTry:\n- Reducing the prompt size\n- Waiting a few seconds and trying again\n- Using a larger model"
+                    }
+                    
                     let error = NSError(domain: "LocalOnlyService", code: httpResponse.statusCode, userInfo: [
                         NSLocalizedDescriptionKey: errorMessage
                     ])
@@ -814,7 +838,16 @@ class LocalOnlyService: ObservableObject {
         }
         
         let delegate = StreamingDelegate(onChunk: onChunk, onComplete: onComplete, onError: onError)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        
+        // 🟢 FIX: Use custom configuration with proper timeouts for large prompts
+        // Connection timeout: handled by URLSession
+        // Request timeout: 300s (allow time for large agent prompts to process)
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300.0 // 5 minutes for request processing
+        config.timeoutIntervalForResource = 600.0 // 10 minutes total resource timeout
+        config.waitsForConnectivity = false // Don't wait for network, fail fast if not connected
+        
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         let task = session.dataTask(with: request)
         task.resume()
         
@@ -834,11 +867,18 @@ class LocalOnlyService: ObservableObject {
             return
         }
         
+        // 🟢 FIX: Check if Ollama is running before testing
+        guard isOllamaRunning else {
+            completion(.failure(NSError(domain: "LocalOnlyService", code: 5, userInfo: [NSLocalizedDescriptionKey: "Cannot connect to Ollama. Make sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again"])))
+            return
+        }
+        
         let url = URL(string: "http://localhost:11434/api/generate")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 10.0 // 10 second timeout
+        // 🟢 FIX: Increase timeout to 30 seconds - models can be slow to start
+        request.timeoutInterval = 30.0 // 30 second timeout for test
         
         let requestBody: [String: Any] = [
             "model": model.name,
@@ -854,7 +894,7 @@ class LocalOnlyService: ObservableObject {
                 var message = "Cannot connect to Ollama"
                 
                 if nsError.code == NSURLErrorTimedOut {
-                    message = "Ollama connection timed out. Make sure 'ollama serve' is running."
+                    message = "Ollama connection timed out after 30 seconds. The model might be slow to respond. Try:\n1. Wait a few seconds and try again\n2. Check if the model is loaded: 'ollama list'\n3. Try a smaller/faster model"
                 } else if nsError.code == NSURLErrorCannotConnectToHost || nsError.code == -1021 { // NSURLErrorConnectionRefused
                     message = "Ollama is not running. Please start it with: 'ollama serve'"
                 } else {
@@ -863,6 +903,25 @@ class LocalOnlyService: ObservableObject {
                 
                 completion(.failure(NSError(domain: "LocalOnlyService", code: 6, userInfo: [NSLocalizedDescriptionKey: message])))
                 return
+            }
+            
+            // 🟢 FIX: Check HTTP status code for 500 errors
+            if let httpResponse = response as? HTTPURLResponse {
+                if httpResponse.statusCode != 200 {
+                    var errorMessage = "Ollama returned error \(httpResponse.statusCode)"
+                    
+                    // Try to parse error message from response
+                    if let data = data,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let errorMsg = json["error"] as? String {
+                        errorMessage = "Ollama error: \(errorMsg)"
+                    } else if httpResponse.statusCode == 500 {
+                        errorMessage = "Ollama server error (500). This often happens when:\n1. The model is still loading\n2. The request timed out\n3. The model ran out of memory\n\nTry:\n- Waiting a few seconds and trying again\n- Restarting Ollama: 'ollama serve'\n- Using a smaller model"
+                    }
+                    
+                    completion(.failure(NSError(domain: "LocalOnlyService", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])))
+                    return
+                }
             }
             
             guard let data = data,

@@ -17,6 +17,8 @@ class AIViewModel: ObservableObject {
     @Published var thinkingSteps: [AIThinkingStep] = []
     @Published var currentPlan: AIPlan?
     @Published var currentActions: [AIAction] = []
+    @Published var todoList: [TodoItem] = [] // Cursor-style todo list
+    @Published var showTodoList: Bool = false // Whether to show todo list before execution
     @Published var showThinkingProcess: Bool = true
     @Published var autoExecuteCode: Bool = false // Disabled by default to prevent accidental code deletion
     @Published var isAutoApplyEnabled: Bool = false // Auto-apply edits when ProposedEdit is fully parsed
@@ -35,6 +37,16 @@ class AIViewModel: ObservableObject {
     private var toolResults: [String: ToolResult] = [:] // Collected tool results for feedback
     private var collectedToolCalls: [ToolCall] = [] // Tool calls collected during streaming
     
+    // Code review before apply
+    @Published var codeReviewResults: [String: CodeReviewResult] = [:] // file path -> review result
+    @Published var isReviewingCode: Bool = false
+    
+    // Context tracking
+    private let contextTracker = ContextTrackingService.shared
+    
+    // Performance metrics
+    private let metricsService = PerformanceMetricsService.shared
+    
     // Use ModernAIService via ServiceContainer for async/await
     private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
     // Keep reference to ModernAIService for configuration
@@ -44,6 +56,8 @@ class AIViewModel: ObservableObject {
     private let stepParser = AIStepParser.shared
     private let actionExecutor = ActionExecutor.shared
     private let projectGenerator = ProjectGeneratorService.shared
+    private let queueService = TaskQueueService.shared
+    private var queueObserver: NSObjectProtocol?
     
     // Reference to editor state (set by EditorViewModel)
     weak var editorViewModel: EditorViewModel?
@@ -53,6 +67,48 @@ class AIViewModel: ObservableObject {
     
     init() {
         setupSpeculativePipeline()
+        
+        // Listen for queue items ready to execute
+        queueObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("TaskQueueItemReady"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let item = notification.object as? TaskQueueItem else { return }
+            
+            // Execute the queued task
+            self.executeQueuedTask(item)
+        }
+    }
+    
+    deinit {
+        if let observer = queueObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
+    /// Execute a task from the queue
+    private func executeQueuedTask(_ item: TaskQueueItem) {
+        guard !isLoading else {
+            // If still loading, wait
+            return
+        }
+        
+        isLoading = true
+        errorMessage = nil
+        
+        // Execute the task
+        sendMessageInternal(
+            userMessage: item.prompt,
+            context: nil,
+            projectURL: nil,
+            images: [],
+            forceEditMode: false
+        )
+        
+        // Note: The queue service will mark it as completed/failed when done
+        // We need to hook into the completion handlers
     }
     
     private func setupSpeculativePipeline() {
@@ -93,6 +149,17 @@ class AIViewModel: ObservableObject {
         
         let userMessage = currentInput
         currentInput = ""
+        isLoading = true
+        errorMessage = nil
+        createdFiles = []
+        generationProgress = nil
+        isSpeculating = false
+        
+        sendMessageInternal(userMessage: userMessage, context: context, projectURL: projectURL, images: images, forceEditMode: forceEditMode)
+    }
+    
+    /// Send message with explicit user message (for todo list execution and internal use)
+    func sendMessageInternal(userMessage: String, context: String?, projectURL: URL?, images: [AttachedImage], forceEditMode: Bool) {
         isLoading = true
         errorMessage = nil
         createdFiles = []
@@ -155,6 +222,40 @@ class AIViewModel: ObservableObject {
             return
         }
         
+        // Clear previous thinking steps
+        thinkingSteps = []
+        currentPlan = nil
+        currentActions = []
+        todoList = []
+        
+        conversation.addMessage(AIMessage(role: .user, content: userMessage))
+        
+        // Cursor feature: Generate todo list for complex prompts
+        if shouldGenerateTodoList(for: userMessage) {
+            generateTodoList(userMessage: userMessage, context: context, projectURL: projectURL, images: images, forceEditMode: forceEditMode)
+            return // Wait for user to approve todo list before executing
+        }
+        
+        // Continue with normal execution (if no todo list was generated)
+        executeTask(userMessage: userMessage, context: context, projectURL: projectURL, images: images, forceEditMode: forceEditMode)
+    }
+    
+    /// Execute the actual AI task (internal implementation)
+    private func executeTask(
+        userMessage: String,
+        context: String?,
+        projectURL: URL?,
+        images: [AttachedImage],
+        forceEditMode: Bool
+    ) {
+        
+        // Detect if this is a project generation request
+        let isProjectRequest = detectProjectRequest(userMessage)
+        isGeneratingProject = isProjectRequest
+        
+        // Detect if this is a "run it" request
+        let isRunRequest = stepParser.detectRunRequest(userMessage)
+        
         // Fast task classification with heuristics
         let classifier = TaskClassifier.shared
         let editorState = editorViewModel?.editorState
@@ -167,39 +268,6 @@ class AIViewModel: ObservableObject {
             selectedText: (editorState?.selectedText.isEmpty ?? true) ? nil : editorState?.selectedText
         )
         let taskType = classifier.classify(context: classificationContext)
-        
-        // Convert AITaskType to AITask for model selection
-        let aiTask: AITask = {
-            switch taskType {
-            case .autocomplete: return .autocomplete
-            case .inlineEdit: return .inlineEdit
-            case .refactor: return .refactor
-            case .debug: return .debug
-            case .generate: return .generate
-            case .chat: return .chat
-            }
-        }()
-        
-        // Model selection based on task (with offline-first support)
-        let localModelService = LocalModelService.shared
-        let (_, _) = localModelService.selectModel(
-            for: aiTask,
-            requiresReasoning: aiTask == .refactor || aiTask == .debug
-        )
-        
-        // Show offline mode badge if active
-        if let badge = localModelService.offlineModeBadge {
-            print("ℹ️ \(badge)")
-        }
-        
-        // TODO: Apply model selection to AI service (requires updating AIService to accept model parameter)
-        
-        // Clear previous thinking steps
-        thinkingSteps = []
-        currentPlan = nil
-        currentActions = []
-        
-        conversation.addMessage(AIMessage(role: .user, content: userMessage))
         
         // Build full context (editor context + optional extra context)
         // IMPORTANT: Do NOT include "plan/think out loud" instructions when we need strict edit output.
@@ -239,25 +307,54 @@ class AIViewModel: ObservableObject {
         )
         thinkingSteps.append(initialStep)
         
-        // Try streaming first for better UX
-        // Use higher token limit for project generation (multiple files need more tokens)
-        let maxTokens = isProjectRequest ? 16384 : nil // 16k tokens for projects, default (4k) for regular requests
-        
         // Track latency
         let contextStart = Date()
-        let contextTime = Date().timeIntervalSince(contextStart)
-        LatencyOptimizer.shared.recordContextBuild(contextTime)
         
         // Parse edits from stream as they come
         var detectedEdits: [Edit]? = nil
         
         // FIX: Wrap async context building in Task since sendMessage is not async
-        Task { @MainActor in
+        Task { @MainActor [isProjectRequest, isRunRequest, taskType, contextStart] in
+            // Capture variables for use in Task block
+            let capturedIsProjectRequest = isProjectRequest
+            let capturedIsRunRequest = isRunRequest
+            let capturedTaskType = taskType
+            let capturedContextStart = contextStart
+            
+            // Try streaming first for better UX
+            // Use higher token limit for project generation (multiple files need more tokens)
+            let maxTokens = capturedIsProjectRequest ? 16384 : nil // 16k tokens for projects, default (4k) for regular requests
+            
+            let contextTime = Date().timeIntervalSince(capturedContextStart)
+            LatencyOptimizer.shared.recordContextBuild(contextTime)
+            // Clear previous context tracking
+            contextTracker.clearCurrentContext()
+            
             // Build context asynchronously if not already built
             var finalEditorContext = editorContext
             if finalEditorContext.isEmpty, let editorVM = editorViewModel {
                 let activeFile = editorVM.editorState.activeDocument?.filePath
                 let selectedText = editorVM.editorState.selectedText.isEmpty ? nil : editorVM.editorState.selectedText
+                
+                // Track active file context
+                if let activeFile = activeFile {
+                    contextTracker.trackContext(
+                        type: .activeFile,
+                        name: activeFile.lastPathComponent,
+                        path: activeFile.path,
+                        tokenCount: nil
+                    )
+                }
+                
+                // Track selection context
+                if let selectedText = selectedText, !selectedText.isEmpty {
+                    contextTracker.trackContext(
+                        type: .selectedText,
+                        name: "Selection",
+                        path: activeFile?.path,
+                        tokenCount: selectedText.components(separatedBy: .whitespacesAndNewlines).count
+                    )
+                }
                 
                 finalEditorContext = await ContextRankingService.shared.buildContext(
                     activeFile: activeFile,
@@ -288,6 +385,7 @@ class AIViewModel: ObservableObject {
             
             // Compute prompts after context is built
             let intent = IntentClassifier.shared.classify(userMessage)
+            
             let shouldUseEditMode: Bool = {
                 // Force Edit Mode if explicitly requested (e.g., Agent mode)
                 if forceEditMode {
@@ -301,30 +399,7 @@ class AIViewModel: ObservableObject {
                     break
                 }
                 // Also use Edit Mode for edit/refactor tasks.
-                return taskType == .inlineEdit || taskType == .refactor
-            }()
-
-            // System prompt to send via the provider's real system prompt channel (NOT embedded in context).
-            let systemPromptForRequest: String? = {
-                if shouldUseEditMode {
-                    return EditModePromptBuilder.shared.buildEditModeSystemPrompt()
-                }
-                return CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: finalEditorContext.isEmpty ? nil : finalEditorContext)
-            }()
-
-            // User prompt for the request.
-            let messageForRequest: String = {
-                if shouldUseEditMode {
-                    return EditModePromptBuilder.shared.buildEditModeUserPrompt(instruction: userMessage)
-                }
-                // Use appropriate prompt enhancement (this adds to user message, not system prompt)
-                if isProjectRequest {
-                    return stepParser.enhancePromptForSteps(userMessage)
-                } else if isRunRequest {
-                    return stepParser.enhancePromptForRun(userMessage, projectURL: projectURL)
-                } else {
-                    return stepParser.enhancePromptForSteps(userMessage)
-                }
+                return capturedTaskType == .inlineEdit || capturedTaskType == .refactor
             }()
 
             // Context channel: include editor context (file/selection/diagnostics) plus any extra caller context.
@@ -336,6 +411,31 @@ class AIViewModel: ObservableObject {
                     result = finalEditorContext + "\n\n" + result
                 }
                 return result
+            }()
+
+            // System prompt and user message. Use spec architecture (docs/PROMPT_ARCHITECTURE.md) when in project mode with a workspace root.
+            let (systemPromptForRequest, messageForRequest, contextForRequest): (String?, String, String?) = {
+                if shouldUseEditMode {
+                    return (
+                        EditModePromptBuilder.shared.buildEditModeSystemPrompt(),
+                        EditModePromptBuilder.shared.buildEditModeUserPrompt(instruction: userMessage),
+                        finalFullContext.isEmpty ? nil : finalFullContext
+                    )
+                }
+                if projectMode, let workspaceRoot = projectURL {
+                    let (sys, user) = SpecPromptAssemblyService.buildPrompt(
+                        userMessage: userMessage,
+                        context: finalFullContext.isEmpty ? nil : finalFullContext,
+                        workspaceRootURL: workspaceRoot
+                    )
+                    return (sys, user, nil)
+                }
+                return (
+                    CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: finalEditorContext.isEmpty ? nil : finalEditorContext),
+                    capturedIsProjectRequest ? stepParser.enhancePromptForSteps(userMessage)
+                        : (capturedIsRunRequest ? stepParser.enhancePromptForRun(userMessage, projectURL: projectURL) : stepParser.enhancePromptForSteps(userMessage)),
+                    finalFullContext.isEmpty ? nil : finalFullContext
+                )
             }()
             
             do {
@@ -351,7 +451,7 @@ class AIViewModel: ObservableObject {
                 
                 let stream = aiService.streamMessage(
                     messageForRequest,
-                    context: finalFullContext.isEmpty ? nil : finalFullContext,
+                    context: contextForRequest,
                     images: images,
                     maxTokens: maxTokens,
                     systemPrompt: systemPromptForRequest,
@@ -384,12 +484,47 @@ class AIViewModel: ObservableObject {
                         let requiresApproval = permission?.requiresApproval ?? false
                         let autoApprove = permission?.autoApprove ?? false
                         
+                        // Build descriptive message for the tool call
+                        let message: String
+                        switch toolCall.name {
+                        case "write_file":
+                            if let filePathValue = toolCall.input["file_path"],
+                               let filePath = filePathValue.value as? String {
+                                message = "Write to file: \(filePath)"
+                            } else {
+                                message = "Write file"
+                            }
+                        case "run_terminal_command":
+                            if let commandValue = toolCall.input["command"],
+                               let command = commandValue.value as? String {
+                                message = "Run command: \(command)"
+                            } else {
+                                message = "Run terminal command"
+                            }
+                        case "read_file":
+                            if let filePathValue = toolCall.input["file_path"],
+                               let filePath = filePathValue.value as? String {
+                                message = "Read file: \(filePath)"
+                            } else {
+                                message = "Read file"
+                            }
+                        case "codebase_search":
+                            if let queryValue = toolCall.input["query"],
+                               let query = queryValue.value as? String {
+                                message = "Search codebase: \(String(query.prefix(50)))"
+                            } else {
+                                message = "Search codebase"
+                            }
+                        default:
+                            message = "Execute \(toolCall.name)"
+                        }
+                        
                         // Add progress indicator
                         let progress = ToolCallProgress(
                             id: toolCall.id,
                             toolName: toolCall.name,
                             status: requiresApproval && !autoApprove ? .pending : .executing,
-                            message: "",
+                            message: message,
                             startTime: Date()
                         )
                         self.toolCallProgresses.append(progress)
@@ -606,7 +741,7 @@ class AIViewModel: ObservableObject {
                 )
                 
                 // Check for missing referenced files
-                if isProjectRequest {
+                if capturedIsProjectRequest {
                     self.checkAndRequestMissingFiles(
                         from: assistantResponse,
                         parsedActions: parsed.actions,
@@ -626,6 +761,32 @@ class AIViewModel: ObservableObject {
                     self.isGeneratingProject = false
                 }
                 
+                // Track performance metrics
+                let requestEndTime = Date()
+                let latency = requestEndTime.timeIntervalSince(capturedContextStart)
+                let modelName = self.modernAIService?.currentModel ?? "unknown"
+                let inputTokens = (finalFullContext.count + userMessage.count) / 4
+                let outputTokens = assistantResponse.count / 4
+                
+                self.metricsService.recordMetric(
+                    requestType: shouldUseEditMode ? "Edit" : (capturedIsProjectRequest ? "Project" : "Chat"),
+                    model: modelName,
+                    inputTokens: inputTokens,
+                    outputTokens: outputTokens,
+                    latency: latency,
+                    contextBuildTime: contextTime,
+                    success: true
+                )
+                
+                // Save conversation to history
+                let fileCount = self.currentActions.count
+                ConversationHistoryService.shared.saveConversation(
+                    self.conversation,
+                    title: nil,
+                    projectURL: projectURL,
+                    fileCount: fileCount
+                )
+                
             } catch {
                 // Handle errors
                 let localService = LocalOnlyService.shared
@@ -642,6 +803,22 @@ class AIViewModel: ObservableObject {
                             errorMsg = "⚠️ Cannot connect to Ollama.\n\nMake sure Ollama is running:\n1. Open Terminal\n2. Run: ollama serve\n3. Try again\n\nError: \(error.localizedDescription)"
                         }
                     }
+                    
+                    // Track error in metrics
+                    let requestEndTime = Date()
+                    let latency = requestEndTime.timeIntervalSince(capturedContextStart)
+                    let modelName = self.modernAIService?.currentModel ?? "unknown"
+                    let inputTokens = (finalFullContext.count + userMessage.count) / 4
+                    
+                    self.metricsService.recordMetric(
+                        requestType: shouldUseEditMode ? "Edit" : (capturedIsProjectRequest ? "Project" : "Chat"),
+                        model: modelName,
+                        inputTokens: inputTokens,
+                        outputTokens: 0,
+                        latency: latency,
+                        contextBuildTime: contextTime,
+                        success: false
+                    )
                     
                     self.errorMessage = errorMsg
                     self.conversation.addMessage(AIMessage(
@@ -691,6 +868,11 @@ class AIViewModel: ObservableObject {
                         self.isGeneratingProject = false
                         let errorService = ErrorHandlingService.shared
                         self.errorMessage = errorService.formatError(error)
+                        
+                        // Mark queued task as failed if applicable
+                        if let currentQueuedItem = self.queueService.getCurrentExecutingItem() {
+                            self.queueService.markFailed(currentQueuedItem, error: error)
+                        }
                     }
                 }
             }
@@ -937,6 +1119,74 @@ class AIViewModel: ObservableObject {
                 startTime: toolCallProgresses[index].startTime
             )
         }
+    }
+    
+    /// Check if prompt is complex enough to warrant a todo list
+    private func shouldGenerateTodoList(for prompt: String) -> Bool {
+        let lowercased = prompt.lowercased()
+        
+        // Complex indicators
+        let complexKeywords = [
+            "implement", "create", "build", "add", "multiple", "several",
+            "refactor", "restructure", "migrate", "convert", "rewrite",
+            "feature", "module", "component", "system", "architecture"
+        ]
+        
+        let hasComplexKeyword = complexKeywords.contains { lowercased.contains($0) }
+        let wordCount = prompt.components(separatedBy: .whitespaces).count
+        let hasMultipleActions = lowercased.contains("and") || lowercased.contains(",") || lowercased.contains("then")
+        
+        // Generate todo list if:
+        // - Has complex keywords AND (long prompt OR multiple actions)
+        return hasComplexKeyword && (wordCount > 15 || hasMultipleActions)
+    }
+    
+    /// Generate todo list for complex prompt (Cursor feature)
+    private func generateTodoList(userMessage: String, context: String?, projectURL: URL?, images: [AttachedImage], forceEditMode: Bool) {
+        // Store execution parameters for later use
+        pendingExecutionContext = (userMessage: userMessage, context: context, projectURL: projectURL, images: images, forceEditMode: forceEditMode)
+        
+        TodoListPlanner.shared.generateTodoList(
+            for: userMessage,
+            context: context,
+            projectURL: projectURL
+        ) { [weak self] result in
+            guard let self = self else { return }
+            
+            switch result {
+            case .success(let todos):
+                self.todoList = todos
+                self.showTodoList = !todos.isEmpty
+            case .failure(let error):
+                print("Failed to generate todo list: \(error)")
+                // Continue with normal execution if todo generation fails
+                if let pending = self.pendingExecutionContext {
+                    self.executeWithTodoList(
+                        userMessage: pending.userMessage,
+                        context: pending.context,
+                        projectURL: pending.projectURL,
+                        images: pending.images,
+                        forceEditMode: pending.forceEditMode
+                    )
+                    self.pendingExecutionContext = nil
+                }
+            }
+        }
+    }
+    
+    /// Store pending execution context for todo list approval
+    private var pendingExecutionContext: (userMessage: String, context: String?, projectURL: URL?, images: [AttachedImage], forceEditMode: Bool)?
+    
+    /// Execute the actual task (called after todo list is approved)
+    func executeWithTodoList(userMessage: String, context: String?, projectURL: URL?, images: [AttachedImage] = [], forceEditMode: Bool = false) {
+        // Clear todo list UI
+        showTodoList = false
+        
+        // Continue with normal execution, preserving all original parameters
+        sendMessageInternal(userMessage: userMessage, context: context, projectURL: projectURL, images: images, forceEditMode: forceEditMode)
+        
+        // Clear pending context
+        pendingExecutionContext = nil
     }
     
     func executeCodeGeneration(from response: String, projectURL: URL?) {

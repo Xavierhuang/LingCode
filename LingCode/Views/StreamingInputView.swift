@@ -16,6 +16,7 @@ struct StreamingInputView: View {
     
     @Binding var activeMentions: [Mention]
     @State private var showMentionPopup = false
+    @State private var showFilePicker = false
     
     let onSendMessage: () -> Void
     let onImageDrop: ([NSItemProvider]) async -> Bool
@@ -111,9 +112,33 @@ struct StreamingInputView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Add context (@file, @codebase, etc.)")
                 .popover(isPresented: $showMentionPopup, arrowEdge: .top) {
-                    MentionPopupView(isVisible: $showMentionPopup) { type in
-                        addMention(type)
-                    }
+                    MentionPopupView(
+                        isVisible: $showMentionPopup,
+                        onSelect: { type in
+                            if type == .file {
+                                showFilePicker = true
+                            } else {
+                                addMention(type)
+                            }
+                        },
+                        editorViewModel: editorViewModel
+                    )
+                }
+                .sheet(isPresented: $showFilePicker) {
+                    FileMentionPickerView(
+                        editorViewModel: editorViewModel,
+                        onSelect: { filePath in
+                            let mention = Mention(
+                                type: .file,
+                                value: filePath,
+                                displayName: "@file:\(filePath)"
+                            )
+                            if !activeMentions.contains(where: { $0.type == .file && $0.value == filePath }) {
+                                activeMentions.append(mention)
+                            }
+                        },
+                        isVisible: $showFilePicker
+                    )
                 }
                 
                 // Image attachment button
@@ -150,12 +175,17 @@ struct StreamingInputView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Paste image from clipboard")
                 
-                // Text input
-                TextField("Ask AI anything...", text: $viewModel.currentInput, axis: .vertical)
+                // Text input with better styling
+                TextField("Plan, @ for context, / for commands", text: $viewModel.currentInput, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .lineLimit(1...6)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, DesignSystem.Spacing.sm)
+                    .padding(.vertical, DesignSystem.Spacing.sm)
+                    .background(
+                        RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
+                            .fill(Color(NSColor.controlBackgroundColor))
+                    )
                     .onSubmit {
                         if !viewModel.currentInput.isEmpty && !viewModel.isLoading {
                             onSendMessage()
@@ -222,11 +252,11 @@ struct StreamingInputView: View {
                     }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, DesignSystem.Spacing.md)
+            .padding(.vertical, DesignSystem.Spacing.sm)
             .background(
-                Color(NSColor.controlBackgroundColor)
-                    .opacity(0.6)
+                DesignSystem.Colors.secondaryBackground
+                    .opacity(0.8)
             )
             .onDrop(of: [.image, .fileURL], isTargeted: .constant(false)) { providers in
                 Task {
