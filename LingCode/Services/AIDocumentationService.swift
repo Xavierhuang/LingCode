@@ -49,16 +49,19 @@ class AIDocumentationService {
         Return ONLY the documented code, no explanations.
         """
         
-        aiService.sendMessage(prompt, context: nil) { response in
-            let documentedCode = self.extractCode(from: response, language: language)
-            let result = DocumentationResult(
-                originalCode: code,
-                documentedCode: documentedCode,
-                summary: nil
-            )
-            completion(.success(result))
-        } onError: { error in
-            completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                let documentedCode = self.extractCode(from: response, language: language)
+                let result = DocumentationResult(
+                    originalCode: code,
+                    documentedCode: documentedCode,
+                    summary: nil
+                )
+                completion(.success(result))
+            } catch {
+                completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: String(describing: error)])))
+            }
         }
     }
     
@@ -84,15 +87,18 @@ class AIDocumentationService {
         Return ONLY the documentation comment that should go before the function.
         """
         
-        aiService.sendMessage(prompt, context: nil) { response in
-            let doc = response
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "```\(language ?? "")", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            completion(.success(doc))
-        } onError: { error in
-            completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                let doc = response
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "```\(language ?? "")", with: "")
+                    .replacingOccurrences(of: "```", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                completion(.success(doc))
+            } catch {
+                completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: String(describing: error)])))
+            }
         }
     }
     
@@ -119,10 +125,13 @@ class AIDocumentationService {
         Use proper Markdown formatting.
         """
         
-        aiService.sendMessage(prompt, context: nil) { response in
-            completion(.success(response))
-        } onError: { error in
-            completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                completion(.success(response))
+            } catch {
+                completion(.failure(NSError(domain: "Documentation", code: -1, userInfo: [NSLocalizedDescriptionKey: String(describing: error)])))
+            }
         }
     }
     

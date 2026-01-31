@@ -357,7 +357,7 @@ class AgentService: ObservableObject, Identifiable {
                 NotificationCenter.default.post(name: NSNotification.Name(fileExisted ? "FileUpdated" : "FileCreated"), object: nil, userInfo: ["fileURL": fullPath, "filePath": filePath, "content": code, "originalContent": originalContent ?? ""])
                 
                 if let projectURL = projectURL {
-                    validateCodeAfterWrite(fileURL: fullPath, projectURL: projectURL) { result in
+                    AgentValidationService.shared.validateCodeAfterWrite(fileURL: fullPath, projectURL: projectURL) { result in
                         switch result {
                         case .success: onComplete(true, "File written and validated")
                         case .warnings(let msgs): onOutput("Warnings:\n\(msgs.joined(separator: "\n"))"); onComplete(true, "File written with warnings")
@@ -414,107 +414,6 @@ class AgentService: ObservableObject, Identifiable {
         default:
             onComplete(false, "Unknown action: \(decision.action)")
         }
-    }
-
-    // MARK: - Validation
-    
-    enum ValidationResult {
-        case success, warnings([String]), errors([String]), skipped
-    }
-    
-    func validateCodeAfterWrite(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
-        let shadowService = ShadowWorkspaceService.shared
-        
-        guard let shadowWorkspaceURL = shadowService.getShadowWorkspace(for: projectURL) ?? shadowService.createShadowWorkspace(for: projectURL) else {
-            validateCodeDirectly(fileURL: fileURL, projectURL: projectURL, completion: completion)
-            return
-        }
-        
-        guard let modifiedContent = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            completion(.errors(["Failed to read modified file content"]))
-            return
-        }
-        
-        let relativePath = fileURL.path.replacingOccurrences(of: projectURL.path + "/", with: "")
-        
-        do {
-            try shadowService.prepareShadowWorkspaceForValidation(modifiedFileURL: fileURL, projectURL: projectURL, shadowWorkspaceURL: shadowWorkspaceURL)
-            try shadowService.writeToShadowWorkspace(content: modifiedContent, relativePath: relativePath, shadowWorkspaceURL: shadowWorkspaceURL)
-            let shadowFileURL = shadowWorkspaceURL.appendingPathComponent(relativePath)
-            validateCodeInShadowWorkspace(fileURL: shadowFileURL, shadowWorkspaceURL: shadowWorkspaceURL, originalProjectURL: projectURL, completion: completion)
-        } catch {
-            validateCodeDirectly(fileURL: fileURL, projectURL: projectURL, completion: completion)
-        }
-    }
-    
-    private func validateCodeDirectly(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
-        LinterService.shared.validate(files: [fileURL], in: projectURL) { lintError in
-            if let lintError = lintError {
-                switch lintError {
-                case .issues(let messages):
-                    let errors = messages.filter { $0.lowercased().contains("error") }
-                    let warnings = messages.filter { !$0.lowercased().contains("error") }
-                    if !errors.isEmpty { completion(.errors(errors)) }
-                    else if !warnings.isEmpty { completion(.warnings(warnings)) }
-                    else { completion(.success) }
-                }
-            } else if fileURL.pathExtension.lowercased() == "swift" {
-                self.validateSwiftCompilation(fileURL: fileURL, projectURL: projectURL, completion: completion)
-            } else {
-                completion(.success)
-            }
-        }
-    }
-    
-    private func validateCodeInShadowWorkspace(fileURL: URL, shadowWorkspaceURL: URL, originalProjectURL: URL, completion: @escaping (ValidationResult) -> Void) {
-        LinterService.shared.validate(files: [fileURL], in: shadowWorkspaceURL) { lintError in
-            if let lintError = lintError {
-                switch lintError {
-                case .issues(let messages):
-                    let errors = messages.filter { $0.lowercased().contains("error") }
-                    let warnings = messages.filter { !$0.lowercased().contains("error") }
-                    if !errors.isEmpty { completion(.errors(errors)) }
-                    else if !warnings.isEmpty { completion(.warnings(warnings)) }
-                    else { completion(.success) }
-                }
-            } else if fileURL.pathExtension.lowercased() == "swift" {
-                self.validateSwiftCompilationInShadow(fileURL: fileURL, shadowWorkspaceURL: shadowWorkspaceURL, originalProjectURL: originalProjectURL, completion: completion)
-            } else {
-                completion(.success)
-            }
-        }
-    }
-    
-    private func validateSwiftCompilation(fileURL: URL, projectURL: URL, completion: @escaping (ValidationResult) -> Void) {
-        let hasPackageSwift = FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("Package.swift").path)
-        guard hasPackageSwift else { completion(.skipped); return }
-        
-        terminalService.execute(
-            "swift build 2>&1",
-            workingDirectory: projectURL,
-            environment: nil,
-            onOutput: { _ in },
-            onError: { _ in },
-            onComplete: { exitCode in
-                completion(exitCode == 0 ? .success : .errors(["Compilation failed."]))
-            }
-        )
-    }
-    
-    private func validateSwiftCompilationInShadow(fileURL: URL, shadowWorkspaceURL: URL, originalProjectURL: URL, completion: @escaping (ValidationResult) -> Void) {
-        let hasPackageSwift = FileManager.default.fileExists(atPath: shadowWorkspaceURL.appendingPathComponent("Package.swift").path)
-        guard hasPackageSwift else { completion(.skipped); return }
-        
-        terminalService.execute(
-            "swift build 2>&1",
-            workingDirectory: shadowWorkspaceURL,
-            environment: nil,
-            onOutput: { _ in },
-            onError: { _ in },
-            onComplete: { exitCode in
-                completion(exitCode == 0 ? .success : .errors(["Compilation failed in shadow workspace."]))
-            }
-        )
     }
 
     // MARK: - Error Enrichment

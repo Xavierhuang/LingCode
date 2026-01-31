@@ -82,22 +82,20 @@ class AICodeReviewService: ObservableObject {
         Be specific and actionable. Focus on real issues, not nitpicking.
         """
         
-        aiService.sendMessage(prompt, context: nil) { [weak self] response in
-            DispatchQueue.main.async {
-                self?.isReviewing = false
-                
-                let result = self?.parseReviewResponse(response)
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                self.isReviewing = false
+                let result = self.parseReviewResponse(response)
                 if let result = result {
-                    self?.lastReview = result
+                    self.lastReview = result
                     completion(.success(result))
                 } else {
                     completion(.failure(NSError(domain: "CodeReview", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to parse review"])))
                 }
-            }
-        } onError: { [weak self] error in
-            DispatchQueue.main.async {
-                self?.isReviewing = false
-                completion(.failure(NSError(domain: "CodeReview", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
+            } catch {
+                self.isReviewing = false
+                completion(.failure(NSError(domain: "CodeReview", code: -1, userInfo: [NSLocalizedDescriptionKey: String(describing: error)])))
             }
         }
     }

@@ -137,48 +137,6 @@ class AIService: AIProviderProtocol {
         return accumulatedText
     }
     
-    // MARK: - Legacy Compatibility Overloads
-    
-    func sendMessage(
-        _ message: String,
-        context: String? = nil,
-        images: [AttachedImage] = [],
-        onResponse: @escaping (String) -> Void,
-        onError: @escaping (Error) -> Void
-    ) {
-        Task {
-            do {
-                let result = try await sendMessage(message, context: context, images: images, tools: nil)
-                onResponse(result)
-            } catch {
-                onError(error)
-            }
-        }
-    }
-    
-    func streamMessage(
-        _ message: String,
-        context: String? = nil,
-        images: [AttachedImage] = [],
-        maxTokens: Int? = nil,
-        systemPrompt: String? = nil,
-        onChunk: @escaping (String) -> Void,
-        onComplete: @escaping () -> Void,
-        onError: @escaping (Error) -> Void
-    ) {
-        Task {
-            do {
-                let stream = streamMessage(message, context: context, images: images, maxTokens: maxTokens, systemPrompt: systemPrompt, tools: nil, forceToolName: nil)
-                for try await chunk in stream {
-                    onChunk(chunk)
-                }
-                onComplete()
-            } catch {
-                onError(error)
-            }
-        }
-    }
-    
     // MARK: - Anthropic Streaming & Failover
     
     private func streamAnthropicWithFailover(

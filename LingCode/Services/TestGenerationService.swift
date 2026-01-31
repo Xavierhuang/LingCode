@@ -71,16 +71,12 @@ class TestGenerationService: ObservableObject {
         Provide the test code in a code block.
         """
         
-        aiService.sendMessage(prompt, context: nil) { [weak self] response in
-            DispatchQueue.main.async {
-                self?.isGenerating = false
-                
-                // Extract test code from response
-                let testContent = self?.extractTestCode(from: response, language: language) ?? response
-                
-                // Analyze coverage
-                let coverage = self?.analyzeCoverage(code: code, testContent: testContent, language: language) ?? GeneratedTest.TestCoverage(functions: [], classes: [], lines: 0)
-                
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                self.isGenerating = false
+                let testContent = self.extractTestCode(from: response, language: language) ?? response
+                let coverage = self.analyzeCoverage(code: code, testContent: testContent, language: language) ?? GeneratedTest.TestCoverage(functions: [], classes: [], lines: 0)
                 let test = GeneratedTest(
                     filePath: filePath,
                     testContent: testContent,
@@ -88,13 +84,10 @@ class TestGenerationService: ObservableObject {
                     coverage: coverage,
                     timestamp: Date()
                 )
-                
-                self?.generatedTests.append(test)
+                self.generatedTests.append(test)
                 completion(.success(test))
-            }
-        } onError: { [weak self] error in
-            DispatchQueue.main.async {
-                self?.isGenerating = false
+            } catch {
+                self.isGenerating = false
                 completion(.failure(error))
             }
         }

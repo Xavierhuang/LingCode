@@ -77,19 +77,20 @@ class SmartErrorRecoveryService: ObservableObject {
         FIX_CODE: [code if auto-fixable]
         """
         
-        aiService.sendMessage(prompt, context: nil) { [weak self] response in
-            DispatchQueue.main.async {
-                let suggestion = self?.parseRecoveryResponse(response, error: error, context: context)
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(prompt, context: nil, images: [], tools: nil)
+                let suggestion = self.parseRecoveryResponse(response, error: error, context: context)
                 if let suggestion = suggestion {
-                    self?.recoveryHistory.append(suggestion)
-                    self?.learnPattern(error: error, fix: suggestion.suggestion)
+                    self.recoveryHistory.append(suggestion)
+                    self.learnPattern(error: error, fix: suggestion.suggestion)
                     completion(.success(suggestion))
                 } else {
                     completion(.failure(NSError(domain: "ErrorRecovery", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to parse recovery suggestion"])))
                 }
+            } catch {
+                completion(.failure(error))
             }
-        } onError: { error in
-            completion(.failure(error))
         }
     }
     

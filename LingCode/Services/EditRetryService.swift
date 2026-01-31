@@ -185,10 +185,9 @@ class EditRetryService {
         
         let retryPrompt = self.generateRetryPrompt(context: retryContext)
         
-        aiService.sendMessage(
-            retryPrompt,
-            context: nil,
-            onResponse: { response in
+        Task { @MainActor in
+            do {
+                let response = try await aiService.sendMessage(retryPrompt, context: nil, images: [], tools: nil)
                 if let correctedEdits = JSONEditSchemaService.shared.parseEdits(from: response) {
                     self.applyWithRetryInternal(
                         edits: correctedEdits,
@@ -202,11 +201,10 @@ class EditRetryService {
                 } else {
                     onError(RetryError.couldNotParseCorrectedEdits)
                 }
-            },
-            onError: { aiError in
-                onError(RetryError.aiRetryFailed(aiError))
+            } catch {
+                onError(RetryError.aiRetryFailed(error))
             }
-        )
+        }
     }
     
     private func findFailedEdit(edits: [Edit], error: Error) -> Edit? {
