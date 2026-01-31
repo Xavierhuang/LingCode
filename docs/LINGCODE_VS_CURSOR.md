@@ -85,7 +85,8 @@
 | Prompt / rules         | Deterministic; WORKSPACE.md + rules chip       | .cursorrules + cloud   | LingCode ahead |
 | Agent list UX          | Pinned section, Pin/Unpin, Duplicate, Rename, Mark as Unread, Delete | Same                   | Parity        |
 | Rules/context visibility | Rules file + Local/Cloud in streaming and agent headers | Similar                 | Parity        |
-| Apply/verification feedback | “Lint passed, Shadow verified” badge          | Apply + diff           | Parity        |
+| Apply/verification feedback | Lint passed, Shadow verified + timing + in-progress badge | Apply + diff           | Parity        |
+| Running commands / jobs     | Command running / 1 background job in status bar          | Terminal integration   | Parity        |
 | Native app             | Swift/SwiftUI, EditorCore                     | Electron/VS Code       | LingCode ahead |
 
 ---
