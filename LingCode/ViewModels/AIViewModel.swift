@@ -53,7 +53,6 @@ class AIViewModel: ObservableObject {
     private var modernAIService: ModernAIService? {
         ServiceContainer.shared.modernAIService
     }
-    private let stepParser = AIStepParser.shared
     private let actionExecutor = ActionExecutor.shared
     private let projectGenerator = ProjectGeneratorService.shared
     private let queueService = TaskQueueService.shared
@@ -123,6 +122,23 @@ class AIViewModel: ObservableObject {
             .store(in: &cancellables)
     }
     
+    /// Extract potential filenames/paths mentioned in stream text for IntentPredictionService warmup.
+    private static func extractMentionedFilenames(from text: String) -> Set<String> {
+        let pattern = #"[\w./-]+\.(swift|ts|tsx|js|jsx|py|go|rs|md|json|yaml|yml)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        var result = Set<String>()
+        regex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+            guard let match = match, match.numberOfRanges > 0,
+                  let r = Range(match.range(at: 0), in: text) else { return }
+            let s = String(text[r]).trimmingCharacters(in: .whitespaces)
+            if s.count < 200 && !s.contains("..") {
+                result.insert(s)
+            }
+        }
+        return result
+    }
+    
     private func triggerSpeculation(query: String) {
         guard let editorVM = editorViewModel else { return }
         
@@ -171,10 +187,10 @@ class AIViewModel: ObservableObject {
         isGeneratingProject = isProjectRequest
         
         // Detect if this is a "run it" request
-        let isRunRequest = stepParser.detectRunRequest(userMessage)
+        let isRunRequest = AgentService.detectRunRequest(userMessage)
         
         // Detect if this is a "check/review" request
-        let isCheckRequest = stepParser.detectCheckRequest(userMessage)
+        let isCheckRequest = AgentService.detectCheckRequest(userMessage)
         
         // If it's a check request, trigger code review instead of normal generation
         if isCheckRequest, let editorVM = editorViewModel, let activeDoc = editorVM.editorState.activeDocument {
@@ -254,12 +270,11 @@ class AIViewModel: ObservableObject {
         isGeneratingProject = isProjectRequest
         
         // Detect if this is a "run it" request
-        let isRunRequest = stepParser.detectRunRequest(userMessage)
+        let isRunRequest = AgentService.detectRunRequest(userMessage)
         
         // Fast task classification with heuristics
-        let classifier = TaskClassifier.shared
         let editorState = editorViewModel?.editorState
-        let classificationContext = ClassificationContext(
+        let classificationContext = IntentEngine.ClassificationContext(
             userInput: userMessage,
             cursorIsMidLine: false, // TODO: Get from editor state
             diagnosticsPresent: false, // TODO: Get from diagnostics
@@ -267,7 +282,7 @@ class AIViewModel: ObservableObject {
             activeFile: editorState?.activeDocument?.filePath,
             selectedText: (editorState?.selectedText.isEmpty ?? true) ? nil : editorState?.selectedText
         )
-        let taskType = classifier.classify(context: classificationContext)
+        let taskType = IntentEngine.shared.classifyTask(context: classificationContext)
         
         // Build full context (editor context + optional extra context)
         // IMPORTANT: Do NOT include "plan/think out loud" instructions when we need strict edit output.
@@ -384,7 +399,7 @@ class AIViewModel: ObservableObject {
             }
             
             // Compute prompts after context is built
-            let intent = IntentClassifier.shared.classify(userMessage)
+            let intent = IntentEngine.shared.classifyIntent(userMessage)
             
             let shouldUseEditMode: Bool = {
                 // Force Edit Mode if explicitly requested (e.g., Agent mode)
@@ -432,8 +447,8 @@ class AIViewModel: ObservableObject {
                 }
                 return (
                     CursorSystemPromptService.shared.getEnhancedSystemPrompt(context: finalEditorContext.isEmpty ? nil : finalEditorContext),
-                    capturedIsProjectRequest ? stepParser.enhancePromptForSteps(userMessage)
-                        : (capturedIsRunRequest ? stepParser.enhancePromptForRun(userMessage, projectURL: projectURL) : stepParser.enhancePromptForSteps(userMessage)),
+                    capturedIsProjectRequest ? AgentService.enhancePromptForSteps(userMessage)
+                        : (capturedIsRunRequest ? AgentService.enhancePromptForRun(userMessage, projectURL: projectURL) : AgentService.enhancePromptForSteps(userMessage)),
                     finalFullContext.isEmpty ? nil : finalFullContext
                 )
             }()
@@ -466,6 +481,9 @@ class AIViewModel: ObservableObject {
                 self.toolResults.removeAll()
                 self.toolCallProgresses.removeAll()
                 
+                // Warm up IntentPredictionService cache when AI mentions filenames in the stream
+                var warmedFilenamesForStream: Set<String> = []
+                
                 // Process stream chunks
                 for try await chunk in stream {
                     // FIX: Detect and handle tool calls
@@ -473,6 +491,14 @@ class AIViewModel: ObservableObject {
                     
                     if !text.isEmpty {
                         accumulatedResponse += text
+                    }
+                    
+                    // Trigger IntentPredictionService warmup as soon as a filename appears in the stream
+                    if let projectURL = projectURL {
+                        let mentioned = Self.extractMentionedFilenames(from: accumulatedResponse)
+                        for name in mentioned where warmedFilenamesForStream.insert(name).inserted {
+                            IntentPredictionService.shared.warmupCacheForFile(filenameOrPath: name, projectURL: projectURL)
+                        }
                     }
                     
                     // FIX: Handle tool calls with progress indicators and permissions
@@ -616,7 +642,7 @@ class AIViewModel: ObservableObject {
                     }
                     
                     // Parse steps incrementally as we receive chunks
-                    let parsed = self.stepParser.parseResponse(accumulatedResponse)
+                    let parsed = AgentService.parseResponse(accumulatedResponse)
                     
                     // Merge thinking steps instead of replacing - preserve existing thinking steps
                     if !parsed.steps.isEmpty {
@@ -697,7 +723,7 @@ class AIViewModel: ObservableObject {
                 }
                 
                 // Final parse
-                let parsed = self.stepParser.parseResponse(assistantResponse)
+                let parsed = AgentService.parseResponse(assistantResponse)
                 
                 // Merge thinking steps
                 var mergedSteps = self.thinkingSteps
@@ -838,7 +864,7 @@ class AIViewModel: ObservableObject {
                         assistantResponse = response
                         
                         // Parse steps from response
-                        let parsed = self.stepParser.parseResponse(response)
+                        let parsed = AgentService.parseResponse(response)
                         self.thinkingSteps = parsed.steps
                         self.currentPlan = parsed.plan
                         self.currentActions = parsed.actions
@@ -1603,29 +1629,27 @@ class AIViewModel: ObservableObject {
     
     /// Detect code changes from AI response and show diffs (Cursor-like)
     private func detectAndShowCodeChanges(from response: String, projectURL: URL?) {
-        let patchGenerator = PatchGeneratorService.shared
-        let patches = patchGenerator.generatePatches(from: response, projectURL: projectURL)
+        let applyService = ApplyCodeService.shared
+        let patches = applyService.generatePatches(from: response, projectURL: projectURL)
         
         guard !patches.isEmpty else { return }
         
-        // Convert patches to CodeChange objects for display
-        let applyService = ApplyCodeService.shared
         var changes: [CodeChange] = []
         
         for patch in patches {
             // Get original content if file exists
             let originalContent: String?
-            if FileManager.default.fileExists(atPath: patch.filePath) {
-                let fileURL = URL(fileURLWithPath: patch.filePath)
+            let fileURL = applyService.resolveFileURL(for: patch.filePath, projectURL: projectURL)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
                 originalContent = try? String(contentsOf: fileURL, encoding: .utf8)
             } else {
                 originalContent = nil
             }
             
-            // Apply patch to get new content
+            // Apply patch in-memory to get new content
             let newContent: String
             do {
-                newContent = try patchGenerator.applyPatch(patch, projectURL: projectURL)
+                newContent = try applyService.applyPatchInMemory(patch, projectURL: projectURL)
                 
                 // Safety check: Don't create changes with empty content (unless it's a delete operation)
                 if newContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && patch.operation != .delete {
@@ -1637,11 +1661,11 @@ class AIViewModel: ObservableObject {
                 continue // Skip invalid patches
             }
             
-            // Create CodeChange
+            // Create CodeChange (use resolved path for single-path apply)
             let change = CodeChange(
                 id: patch.id,
-                filePath: patch.filePath,
-                fileName: (patch.filePath as NSString).lastPathComponent,
+                filePath: fileURL.path,
+                fileName: fileURL.lastPathComponent,
                 operationType: patch.operation == .insert ? .create : .update,
                 originalContent: originalContent,
                 newContent: newContent,

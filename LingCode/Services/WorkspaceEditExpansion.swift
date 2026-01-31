@@ -26,7 +26,7 @@ final class WorkspaceEditExpansion {
         let wasExpanded: Bool
         
         /// Deterministic edits generated (if any)
-        let deterministicEdits: [DeterministicEditGenerator.GeneratedEdit]
+        let deterministicEdits: [DeterministicGeneratedEdit]
         
         /// Files that matched the search (for completion summary)
         let matchedFiles: [URL]
@@ -45,7 +45,7 @@ final class WorkspaceEditExpansion {
         
         init(
             wasExpanded: Bool,
-            deterministicEdits: [DeterministicEditGenerator.GeneratedEdit],
+            deterministicEdits: [DeterministicGeneratedEdit],
             matchedFiles: [URL],
             editSource: EditSource,
             searchTerm: String? = nil
@@ -81,7 +81,7 @@ final class WorkspaceEditExpansion {
         }
         
         // Step 1: Classify intent (PRE-AI)
-        let intent = IntentClassifier.shared.classify(prompt)
+        let intent = IntentEngine.shared.classifyIntent(prompt)
         
         print("🎯 INTENT CLASSIFICATION:")
         print("   Prompt: '\(prompt)'")
@@ -142,7 +142,7 @@ final class WorkspaceEditExpansion {
     /// PARSER CONTRACT: Edits can originate from deterministic IDE generation or AI
     /// Both are treated identically by the execution layer
     func convertToStreamingFileInfo(
-        edits: [DeterministicEditGenerator.GeneratedEdit],
+        edits: [DeterministicGeneratedEdit],
         workspaceURL: URL
     ) -> [StreamingFileInfo] {
         return edits.map { edit in
@@ -196,7 +196,7 @@ final class WorkspaceEditExpansion {
         }
         
         // Step 3: Generate deterministic edits
-        let edits = DeterministicEditGenerator.shared.generateReplacementEdits(
+        let edits = ApplyCodeService.shared.generateReplacementEdits(
             from: from,
             to: to,
             matchedFiles: matchedFiles,
@@ -221,7 +221,7 @@ final class WorkspaceEditExpansion {
     }
     
     /// Extract search term from edit (for summary)
-    private func extractSearchTerm(from edit: DeterministicEditGenerator.GeneratedEdit) -> String {
+    private func extractSearchTerm(from edit: DeterministicGeneratedEdit) -> String {
         // Try to find what was replaced by comparing original and new content
         // This is a heuristic - in practice, we'd pass the search term separately
         return "text" // Placeholder - actual implementation would track this

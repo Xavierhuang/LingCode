@@ -25,27 +25,54 @@ class FileWatcherService {
         stopWatching()
     }
     
-    /// Start watching a directory for file changes
+    /// Start watching a directory for file changes. Supports multiple directories in one stream.
     func startWatching(_ directoryURL: URL, callback: @escaping (URL) -> Void) {
         let path = directoryURL.path
-        
-        guard !watchedPaths.contains(path) else {
-            // Already watching, just add callback
-            if fileChangeCallbacks[path] == nil {
-                fileChangeCallbacks[path] = []
-            }
-            fileChangeCallbacks[path]?.append(callback)
-            return
-        }
-        
-        watchedPaths.insert(path)
         
         if fileChangeCallbacks[path] == nil {
             fileChangeCallbacks[path] = []
         }
         fileChangeCallbacks[path]?.append(callback)
         
-        // Create FSEventStream
+        guard !watchedPaths.contains(path) else {
+            return
+        }
+        
+        watchedPaths.insert(path)
+        restartStream()
+    }
+    
+    /// Stop watching a specific directory
+    func stopWatching(_ directoryURL: URL) {
+        let path = directoryURL.path
+        guard watchedPaths.contains(path) else { return }
+        watchedPaths.remove(path)
+        fileChangeCallbacks.removeValue(forKey: path)
+        restartStream()
+    }
+    
+    /// Stop watching all directories
+    func stopWatching() {
+        if let stream = streamRef {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            streamRef = nil
+        }
+        watchedPaths.removeAll()
+        fileChangeCallbacks.removeAll()
+    }
+    
+    private func restartStream() {
+        if let stream = streamRef {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            streamRef = nil
+        }
+        
+        guard !watchedPaths.isEmpty else { return }
+        
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -54,8 +81,8 @@ class FileWatcherService {
             copyDescription: nil
         )
         
-        let pathsToWatch = [path] as CFArray
-        let latency: CFTimeInterval = 0.1 // 100ms latency for near real-time updates
+        let pathsToWatch = Array(watchedPaths) as CFArray
+        let latency: CFTimeInterval = 0.1
         
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
@@ -74,28 +101,12 @@ class FileWatcherService {
             latency,
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
         ) else {
-            print("🔴 [FileWatcher] Failed to create FSEventStream for \(path)")
             return
         }
         
         streamRef = stream
         FSEventStreamSetDispatchQueue(stream, callbackQueue)
         FSEventStreamStart(stream)
-        
-        print("🟢 [FileWatcher] Started watching: \(path)")
-    }
-    
-    /// Stop watching all directories
-    func stopWatching() {
-        if let stream = streamRef {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            streamRef = nil
-        }
-        watchedPaths.removeAll()
-        fileChangeCallbacks.removeAll()
-        print("🟢 [FileWatcher] Stopped watching all directories")
     }
     
     /// Handle file system events

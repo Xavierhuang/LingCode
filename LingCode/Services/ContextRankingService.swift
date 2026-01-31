@@ -10,6 +10,15 @@ import Foundation
 // FIX: Import CodeChunk type from SemanticSearchService
 // This is needed for semantic search results
 
+/// Boost rules from legacy ContextManager: template-based file discovery merged into tiered ranking
+struct ContextBoostRule: Sendable {
+    let name: String
+    let description: String
+    let filePatterns: [String]
+    let includePatterns: [String]
+    let maxFiles: Int
+}
+
 struct ContextRankingItem: Sendable {
     let file: URL
     let score: Int
@@ -39,6 +48,31 @@ struct ContextRankingItem: Sendable {
 actor ContextRankingService {
     static let shared = ContextRankingService()
     
+    /// Boost rules (from ContextManager templates): add template-matched files to context with a score boost
+    static let boostRules: [ContextBoostRule] = [
+        ContextBoostRule(
+            name: "Full Stack Feature",
+            description: "Frontend + Backend + Tests",
+            filePatterns: ["*.swift", "*.ts", "*.tsx", "*.js", "*.jsx"],
+            includePatterns: ["*View.swift", "*Controller.swift", "*Service.swift", "*Test.swift"],
+            maxFiles: 10
+        ),
+        ContextBoostRule(
+            name: "API Endpoint",
+            description: "Route + Handler + Model + Tests",
+            filePatterns: ["*.swift", "*.ts", "*.js"],
+            includePatterns: ["*Route*", "*Handler*", "*Model*", "*Test*"],
+            maxFiles: 8
+        ),
+        ContextBoostRule(
+            name: "Component",
+            description: "Component + Styles + Tests",
+            filePatterns: ["*.tsx", "*.jsx", "*.ts", "*.js", "*.css", "*.scss"],
+            includePatterns: ["*Component*", "*Style*", "*Test*", "*.test.*"],
+            maxFiles: 6
+        )
+    ]
+    
     private init() {}
     
     /// Build context with Cursor-style ranking algorithm
@@ -59,6 +93,10 @@ actor ContextRankingService {
         
         let tier3FileLists = (projectURL != nil)
             ? getTier3FileLists(in: projectURL!, query: query)
+            : []
+        
+        let boostRuleFileLists = (projectURL != nil)
+            ? getBoostRuleFileLists(activeFile: activeFile, query: query, in: projectURL!)
             : []
         
         // FIX: Access main actor-isolated services before TaskGroup
@@ -130,6 +168,20 @@ actor ContextRankingService {
             
             // Tier 3: Read in Parallel
             for (file, score, reason) in tier3FileLists {
+                group.addTask {
+                    guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+                    return ContextRankingItem(
+                        file: file,
+                        score: score,
+                        content: content,
+                        tier: .tier3,
+                        reason: reason
+                    )
+                }
+            }
+            
+            // Boost Rules: template-matched files (from ContextManager) with score boost
+            for (file, score, reason) in boostRuleFileLists {
                 group.addTask {
                     guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
                     return ContextRankingItem(
@@ -333,6 +385,86 @@ actor ContextRankingService {
         }
         
         return fileLists
+    }
+    
+    /// Boost rule file lists: template-matched files (from ContextManager) with score 25
+    /// Picks rule(s) by active file extension or query keywords, then applies include patterns
+    nonisolated private func getBoostRuleFileLists(
+        activeFile: URL?,
+        query: String?,
+        in projectURL: URL
+    ) -> [(URL, Int, String)] {
+        var fileLists: [(URL, Int, String)] = []
+        let queryLower = (query ?? "").lowercased()
+        let activeExt = activeFile?.pathExtension.lowercased() ?? ""
+        
+        let rulesToApply: [ContextBoostRule]
+        if queryLower.contains("api") || queryLower.contains("endpoint") {
+            rulesToApply = [Self.boostRules[1]]
+        } else if queryLower.contains("component") {
+            rulesToApply = [Self.boostRules[2]]
+        } else if ["swift", "ts", "tsx", "js", "jsx"].contains(activeExt) {
+            rulesToApply = [Self.boostRules[0]]
+        } else {
+            rulesToApply = [Self.boostRules[0]]
+        }
+        
+        var seen = Set<URL>()
+        for rule in rulesToApply {
+            let matching = findFilesMatchingBoostRule(rule, in: projectURL)
+            for file in matching.prefix(rule.maxFiles) {
+                if seen.insert(file).inserted {
+                    fileLists.append((file, 25, "Boost: \(rule.name)"))
+                }
+            }
+        }
+        
+        return fileLists
+    }
+    
+    /// Find files matching a boost rule's filePatterns and includePatterns
+    nonisolated private func findFilesMatchingBoostRule(_ rule: ContextBoostRule, in projectURL: URL) -> [URL] {
+        var matchingFiles: [URL] = []
+        
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+        
+        let blockedFolders = ["node_modules", "vendor", "build", "dist", ".git", ".build", "Pods", "DerivedData", ".swiftpm"]
+        
+        for case let url as URL in enumerator {
+            guard !url.hasDirectoryPath else {
+                if let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+                   resourceValues.isDirectory == true,
+                   blockedFolders.contains(url.lastPathComponent) {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            
+            let fileName = url.lastPathComponent
+            var matchesFilePattern = false
+            for pattern in rule.filePatterns {
+                if matchesPattern(fileName, pattern: pattern) {
+                    matchesFilePattern = true
+                    break
+                }
+            }
+            if !matchesFilePattern { continue }
+            
+            for includePattern in rule.includePatterns {
+                if matchesPattern(fileName, pattern: includePattern) {
+                    matchingFiles.append(url)
+                    break
+                }
+            }
+        }
+        
+        return matchingFiles
     }
     
     /// FIX: Optimized Recent File Discovery

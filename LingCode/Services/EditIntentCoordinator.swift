@@ -27,7 +27,7 @@ final class EditIntentCoordinator: ObservableObject {
         let commands: [ParsedCommand]
         let isValid: Bool
         let errorMessage: String?
-        let intentCategory: IntentClassifier.IntentType.EditIntentCategory?
+        let intentCategory: IntentEngine.IntentType.EditIntentCategory?
         
         // Equatable conformance (StreamingFileInfo is Equatable, ParsedCommand may not be)
         static func == (lhs: EditResult, rhs: EditResult) -> Bool {
@@ -75,7 +75,7 @@ final class EditIntentCoordinator: ObservableObject {
 
         // Step 0: Classify intent (PRE-AI)
         // If this is a simple replace/rename, prefer deterministic workspace expansion over model output.
-        let intent = IntentClassifier.shared.classify(userPrompt)
+        let intent = IntentEngine.shared.classifyIntent(userPrompt)
         let intentCategory = intent.editIntentCategory
 
         if let workspaceURL = projectURL {
@@ -226,11 +226,10 @@ final class EditIntentCoordinator: ObservableObject {
             let commands = await Task { @MainActor in
                 TerminalExecutionService.shared.extractCommands(from: contentToParse)
             }.value
-            // Access StreamingContentParser from MainActor to avoid actor isolation warnings
             let files = await Task { @MainActor in
-                StreamingContentParser.shared.parseContent(
+                ApplyCodeService.shared.parseStreamingContent(
                     contentToParse,
-                    isLoading: isLoading, // Critical: false when streaming completes, ensures only complete blocks
+                    isLoading: isLoading,
                     projectURL: projectURL,
                     actions: actions
                 )

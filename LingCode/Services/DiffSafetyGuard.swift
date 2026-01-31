@@ -52,7 +52,7 @@ final class DiffSafetyGuard {
     func validateEdit(
         originalContent: String,
         newContent: String,
-        intentCategory: IntentClassifier.IntentType.EditIntentCategory
+        intentCategory: IntentEngine.IntentType.EditIntentCategory
     ) -> ValidationResult {
         let originalLines = originalContent.components(separatedBy: .newlines)
         let newLines = newContent.components(separatedBy: .newlines)

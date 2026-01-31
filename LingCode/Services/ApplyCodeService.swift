@@ -2,13 +2,15 @@
 //  ApplyCodeService.swift
 //  LingCode
 //
-//  Created by Weijia Huang on 11/23/25.
+//  Single-path write integrity: sole broker for all disk changes.
+//  Parsing (CodeGenerator), patches, and deterministic replacements flow here;
+//  broker chooses Fast Path (single-file backup + write) or High-Integrity (snapshot + restore on error).
 //
 
 import Foundation
 import Combine
 
-/// Service for applying AI-generated code changes with preview and confirmation
+/// Sole broker for all disk changes. Decides high-integrity transaction vs fast path write.
 class ApplyCodeService: ObservableObject {
     static let shared = ApplyCodeService()
     
@@ -20,9 +22,92 @@ class ApplyCodeService: ObservableObject {
     
     private init() {}
     
-    // MARK: - Parse Changes
+    // MARK: - Disk Write Broker (Single-Path Integrity)
     
-    /// Parse code changes from AI response
+    /// Single entry point for writing changes to disk. Chooses Fast Path or High-Integrity.
+    func writeChanges(
+        _ changes: [CodeChange],
+        workspaceURL: URL,
+        onProgress: ((Int, Int) -> Void)? = nil,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
+        guard !changes.isEmpty else {
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+            return
+        }
+        if useFastPath(changes) {
+            applyViaFastPath(changes, workspaceURL: workspaceURL, onComplete: onComplete)
+        } else {
+            applyViaHighIntegrity(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
+        }
+    }
+    
+    /// Fast path: single file, backup + direct write (no snapshot).
+    private func useFastPath(_ changes: [CodeChange]) -> Bool {
+        guard changes.count == 1 else { return false }
+        let change = changes[0]
+        return change.operationType != .delete || FileManager.default.fileExists(atPath: change.filePath)
+    }
+    
+    private func applyViaFastPath(
+        _ changes: [CodeChange],
+        workspaceURL: URL,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
+        guard let change = changes.first else {
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+            return
+        }
+        isApplying = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let result = self.applyChange(change, requestedScope: "Fast path")
+            let applyResult: ApplyResult
+            if result.success {
+                applyResult = ApplyResult(
+                    success: true,
+                    appliedCount: 1,
+                    failedCount: 0,
+                    errors: [],
+                    appliedFiles: [URL(fileURLWithPath: change.filePath)]
+                )
+            } else {
+                applyResult = ApplyResult(
+                    success: false,
+                    appliedCount: 0,
+                    failedCount: 1,
+                    errors: [result.error ?? "Apply failed"],
+                    appliedFiles: []
+                )
+            }
+            DispatchQueue.main.async {
+                self.lastApplyResult = applyResult
+                self.isApplying = false
+                if !applyResult.appliedFiles.isEmpty {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("FilesCreated"),
+                        object: nil,
+                        userInfo: ["files": applyResult.appliedFiles]
+                    )
+                }
+                onComplete(applyResult)
+            }
+        }
+    }
+    
+    /// High-integrity: snapshot workspace, apply each change, restore on any failure.
+    private func applyViaHighIntegrity(
+        _ changes: [CodeChange],
+        workspaceURL: URL,
+        onProgress: ((Int, Int) -> Void)?,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
+        applyAllChangesViaTransaction(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
+    }
+    
+    // MARK: - Parse Changes (CodeGenerator path)
+    
+    /// Parse code changes from AI response (CodeGeneratorService path)
     func parseChanges(from response: String, projectURL: URL?) -> [CodeChange] {
         var changes: [CodeChange] = []
         
@@ -55,6 +140,427 @@ class ApplyCodeService: ObservableObject {
         }
         
         return changes
+    }
+    
+    // MARK: - Patch Parsing and Application
+    
+    /// Parse AI response and extract structured patches (patch-based writes via broker)
+    func generatePatches(from response: String, projectURL: URL?) -> [CodePatch] {
+        var patches: [CodePatch] = []
+        if let jsonPatches = parseJSONPatches(from: response, projectURL: projectURL) {
+            patches.append(contentsOf: jsonPatches)
+        }
+        let fileBlocks = parseFileBlocksToPatches(from: response, projectURL: projectURL)
+        patches.append(contentsOf: fileBlocks)
+        return patches
+    }
+    
+    /// Apply a patch in-memory; returns new file content. Use applyPatchesToDisk to write.
+    func applyPatchInMemory(_ patch: CodePatch, projectURL: URL?) throws -> String {
+        let fileURL = resolveFileURL(for: patch.filePath, projectURL: projectURL)
+        let existingContent: String
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            existingContent = try String(contentsOf: fileURL, encoding: .utf8)
+        } else {
+            existingContent = ""
+        }
+        let existingLines = existingContent.components(separatedBy: .newlines)
+        
+        switch patch.operation {
+        case .insert:
+            if let range = patch.range {
+                var newLines = existingLines
+                let insertIndex = min(range.startLine - 1, newLines.count)
+                newLines.insert(contentsOf: patch.content, at: insertIndex)
+                return newLines.joined(separator: "\n")
+            }
+            return existingContent + "\n" + patch.content.joined(separator: "\n")
+            
+        case .replace:
+            if let range = patch.range {
+                var newLines = existingLines
+                let startIndex = max(0, range.startLine - 1)
+                let endIndex = min(range.endLine, newLines.count)
+                if startIndex > endIndex {
+                    let newContent = patch.content.joined(separator: "\n")
+                    guard !newContent.isEmpty else {
+                        throw NSError(domain: "ApplyCodeService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot replace with empty content"])
+                    }
+                    return newContent
+                }
+                newLines.replaceSubrange(startIndex..<endIndex, with: patch.content)
+                return newLines.joined(separator: "\n")
+            }
+            let newContent = patch.content.joined(separator: "\n")
+            let newLineCount = patch.content.count
+            let originalLineCount = existingLines.count
+            if originalLineCount > 50 && newLineCount > 0 {
+                let ratio = Double(newLineCount) / Double(originalLineCount)
+                if ratio < 0.2 {
+                    throw NSError(domain: "ApplyCodeService", code: 3, userInfo: [NSLocalizedDescriptionKey: "Rejected: New content (\(newLineCount) lines) much smaller than original (\(originalLineCount) lines). Provide complete file or use range-based edit."])
+                }
+            }
+            guard !newContent.isEmpty else {
+                throw NSError(domain: "ApplyCodeService", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot replace file with empty content"])
+            }
+            return newContent
+            
+        case .delete:
+            if let range = patch.range {
+                var newLines = existingLines
+                let startIndex = max(0, range.startLine - 1)
+                let endIndex = min(range.endLine, newLines.count)
+                newLines.removeSubrange(startIndex..<endIndex)
+                return newLines.joined(separator: "\n")
+            }
+            return ""
+        }
+    }
+    
+    /// Apply patches to disk via single path (backup + write, or AtomicEditService for multi-file)
+    func applyPatches(_ patches: [CodePatch], projectURL: URL?, onComplete: @escaping (ApplyResult) -> Void) {
+        guard let projectURL = projectURL else {
+            onComplete(ApplyResult(success: false, appliedCount: 0, failedCount: patches.count, errors: ["No project URL"], appliedFiles: []))
+            return
+        }
+        var changes: [CodeChange] = []
+        for patch in patches {
+            let fileURL = resolveFileURL(for: patch.filePath, projectURL: projectURL)
+            let existingContent = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? nil
+            let newContent: String
+            do {
+                newContent = try applyPatchInMemory(patch, projectURL: projectURL)
+            } catch {
+                continue
+            }
+            let opType: FileOperation.OperationType = existingContent == nil ? .create : .update
+            if newContent.isEmpty && patch.operation != .delete {
+                continue
+            }
+            let change = CodeChange(
+                id: patch.id,
+                filePath: fileURL.path,
+                fileName: fileURL.lastPathComponent,
+                operationType: opType,
+                originalContent: existingContent,
+                newContent: newContent,
+                lineRange: patch.range.map { ($0.startLine, $0.endLine) },
+                language: detectLanguage(from: fileURL)
+            )
+            changes.append(change)
+        }
+        if changes.isEmpty {
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+            return
+        }
+        writeChanges(changes, workspaceURL: projectURL, onComplete: onComplete)
+    }
+    
+    /// Resolve relative or absolute file path to URL
+    func resolveFileURL(for filePath: String, projectURL: URL?) -> URL {
+        if let projectURL = projectURL {
+            if filePath.hasPrefix("/") {
+                return URL(fileURLWithPath: filePath)
+            }
+            return projectURL.appendingPathComponent(filePath)
+        }
+        return URL(fileURLWithPath: filePath)
+    }
+    
+    private func parseJSONPatches(from response: String, projectURL: URL?) -> [CodePatch]? {
+        let jsonPattern = #"```json\s*\{[^`]+\}\s*```"#
+        guard let regex = try? NSRegularExpression(pattern: jsonPattern, options: [.dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: response, range: NSRange(location: 0, length: response.utf16.count)),
+              let jsonRange = Range(match.range, in: response) else {
+            return nil
+        }
+        let jsonString = String(response[jsonRange])
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let jsonData = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let edits = json["edits"] as? [[String: Any]] else {
+            return nil
+        }
+        var patches: [CodePatch] = []
+        for edit in edits {
+            guard let file = edit["file"] as? String,
+                  let opString = edit["operation"] as? String,
+                  let operation = CodePatch.PatchOperation(rawValue: opString) else {
+                continue
+            }
+            var range: CodePatch.PatchRange? = nil
+            if let rangeDict = edit["range"] as? [String: Any],
+               let startLine = rangeDict["startLine"] as? Int,
+               let endLine = rangeDict["endLine"] as? Int {
+                range = CodePatch.PatchRange(
+                    startLine: startLine,
+                    endLine: endLine,
+                    startColumn: rangeDict["startColumn"] as? Int,
+                    endColumn: rangeDict["endColumn"] as? Int
+                )
+            }
+            let content = edit["content"] as? [String] ?? []
+            let description = edit["description"] as? String
+            patches.append(CodePatch(filePath: file, operation: operation, range: range, content: content, description: description))
+        }
+        return patches
+    }
+    
+    private func parseFileBlocksToPatches(from response: String, projectURL: URL?) -> [CodePatch] {
+        var patches: [CodePatch] = []
+        let filePattern = #"`([^`]+)`:\s*\n```(\w+)?\n([\s\S]*?)```"#
+        guard let regex = try? NSRegularExpression(pattern: filePattern, options: []) else {
+            return patches
+        }
+        let matches = regex.matches(in: response, options: [], range: NSRange(location: 0, length: response.utf16.count))
+        for match in matches {
+            guard match.numberOfRanges >= 4,
+                  let filePathRange = Range(match.range(at: 1), in: response),
+                  let contentRange = Range(match.range(at: 3), in: response) else {
+                continue
+            }
+            let filePath = String(response[filePathRange])
+            let content = String(response[contentRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { continue }
+            let lines = content.components(separatedBy: .newlines)
+            let fileURL = resolveFileURL(for: filePath, projectURL: projectURL)
+            let fileExists = FileManager.default.fileExists(atPath: fileURL.path)
+            let operation: CodePatch.PatchOperation = fileExists ? .replace : .insert
+            patches.append(CodePatch(filePath: filePath, operation: operation, range: nil, content: lines, description: nil))
+        }
+        return patches
+    }
+    
+    // MARK: - Deterministic Edits
+    
+    /// Generate deterministic replacement edits (simple string replace, no AI)
+    func generateReplacementEdits(
+        from: String,
+        to: String,
+        matchedFiles: [WorkspaceScanner.FileMatch],
+        workspaceURL: URL,
+        caseSensitive: Bool = false
+    ) -> [DeterministicGeneratedEdit] {
+        var edits: [DeterministicGeneratedEdit] = []
+        for match in matchedFiles {
+            guard let originalContent = try? String(contentsOf: match.fileURL, encoding: .utf8) else { continue }
+            let newContent: String
+            if caseSensitive {
+                newContent = originalContent.replacingOccurrences(of: from, with: to)
+            } else {
+                newContent = performCaseInsensitiveReplacement(in: originalContent, from: from, to: to)
+            }
+            if newContent != originalContent {
+                let relativePath = match.fileURL.path.replacingOccurrences(of: workspaceURL.path + "/", with: "")
+                edits.append(DeterministicGeneratedEdit(
+                    filePath: relativePath,
+                    originalContent: originalContent,
+                    newContent: newContent,
+                    matchCount: match.matchCount
+                ))
+            }
+        }
+        return edits
+    }
+    
+    /// Apply deterministic edits to disk via single path (transaction when multiple files)
+    func applyDeterministicEdits(_ edits: [DeterministicGeneratedEdit], workspaceURL: URL, onComplete: @escaping (ApplyResult) -> Void) {
+        var changes: [CodeChange] = []
+        for edit in edits {
+            let fileURL = workspaceURL.appendingPathComponent(edit.filePath)
+            let change = CodeChange(
+                id: UUID(),
+                filePath: fileURL.path,
+                fileName: fileURL.lastPathComponent,
+                operationType: .update,
+                originalContent: edit.originalContent,
+                newContent: edit.newContent,
+                lineRange: nil,
+                language: detectLanguage(from: fileURL)
+            )
+            changes.append(change)
+        }
+        if changes.isEmpty {
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+            return
+        }
+        writeChanges(changes, workspaceURL: workspaceURL, onComplete: onComplete)
+    }
+    
+    private func performCaseInsensitiveReplacement(in content: String, from: String, to: String) -> String {
+        let pattern = NSRegularExpression.escapedPattern(for: from)
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return content.replacingOccurrences(of: from, with: to, options: .caseInsensitive)
+        }
+        let range = NSRange(location: 0, length: content.utf16.count)
+        let mutable = NSMutableString(string: content)
+        regex.replaceMatches(in: mutable, options: [], range: range, withTemplate: to)
+        return mutable as String
+    }
+    
+    // MARK: - Streaming content parsing (inlined from StreamingContentParser)
+    
+    /// Parse streaming AI response into file list (JSON patches + fenced blocks + actions). Single entry for edit pipeline.
+    func parseStreamingContent(
+        _ content: String,
+        isLoading: Bool,
+        projectURL: URL?,
+        actions: [AIAction]
+    ) -> [StreamingFileInfo] {
+        var newFiles: [StreamingFileInfo] = []
+        var processedPaths = Set<String>()
+        
+        let jsonPatches = generatePatches(from: content, projectURL: projectURL).filter { $0.range != nil }
+        if !jsonPatches.isEmpty {
+            for patch in jsonPatches where !processedPaths.contains(patch.filePath) {
+                processedPaths.insert(patch.filePath)
+                if let newContent = try? applyPatchInMemory(patch, projectURL: projectURL) {
+                    let (summary, added, removed) = streamingChangeSummary(filePath: patch.filePath, newContent: newContent, projectURL: projectURL)
+                    newFiles.append(StreamingFileInfo(
+                        id: patch.filePath,
+                        path: patch.filePath,
+                        name: URL(fileURLWithPath: patch.filePath).lastPathComponent,
+                        language: detectLanguage(from: resolveFileURL(for: patch.filePath, projectURL: projectURL)),
+                        content: newContent,
+                        isStreaming: isLoading,
+                        changeSummary: summary,
+                        addedLines: added,
+                        removedLines: removed
+                    ))
+                }
+            }
+        }
+        
+        for block in extractFencedCodeBlocks(from: content, allowIncomplete: isLoading) {
+            guard let filePath = block.filePath, !processedPaths.contains(filePath) else { continue }
+            let trimmedCode = block.code.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !isLoading && !block.isComplete { continue }
+            if trimmedCode.count < 5 && !block.isComplete { continue }
+            processedPaths.insert(filePath)
+            let (summary, added, removed) = streamingChangeSummary(filePath: filePath, newContent: block.code, projectURL: projectURL)
+            let fileInfo = StreamingFileInfo(
+                id: filePath,
+                path: filePath,
+                name: URL(fileURLWithPath: filePath).lastPathComponent,
+                language: block.language,
+                content: block.code,
+                isStreaming: !block.isComplete || isLoading,
+                changeSummary: summary,
+                addedLines: added,
+                removedLines: removed
+            )
+            if let idx = newFiles.firstIndex(where: { $0.id == filePath }) {
+                newFiles[idx] = fileInfo
+            } else {
+                newFiles.append(fileInfo)
+            }
+        }
+        
+        for action in actions {
+            guard let path = action.filePath, !processedPaths.contains(path),
+                  let content = action.fileContent ?? action.result else { continue }
+            processedPaths.insert(path)
+            let (summary, added, removed) = streamingChangeSummary(filePath: path, newContent: content, projectURL: projectURL)
+            newFiles.append(StreamingFileInfo(
+                id: path,
+                path: path,
+                name: URL(fileURLWithPath: path).lastPathComponent,
+                language: detectLanguage(from: URL(fileURLWithPath: path)),
+                content: content,
+                isStreaming: action.status == .executing,
+                changeSummary: summary,
+                addedLines: added,
+                removedLines: removed
+            ))
+        }
+        
+        return newFiles
+    }
+    
+    private struct FencedBlock {
+        let filePath: String?
+        let language: String
+        let code: String
+        let isComplete: Bool
+    }
+    
+    private func extractFencedCodeBlocks(from content: String, allowIncomplete: Bool) -> [FencedBlock] {
+        if !content.contains("```") { return [] }
+        let lines = content.components(separatedBy: .newlines)
+        var blocks: [FencedBlock] = []
+        var i = 0
+        while i < lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let header = (i > 0 ? lines[i - 1].trimmingCharacters(in: .whitespacesAndNewlines) : "")
+                guard let filePath = extractFilePathFromHeader(header) else { i += 1; continue }
+                let codeStart = i + 1
+                var j = codeStart
+                var found = false
+                while j < lines.count {
+                    if lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("```") { found = true; break }
+                    j += 1
+                }
+                if found {
+                    let code = lines[codeStart..<j].joined(separator: "\n")
+                    blocks.append(FencedBlock(filePath: filePath, language: lang.isEmpty ? detectLanguage(from: URL(fileURLWithPath: filePath)) : lang, code: code, isComplete: true))
+                    i = j + 1
+                    continue
+                }
+                if allowIncomplete {
+                    let code = lines[codeStart...].joined(separator: "\n")
+                    blocks.append(FencedBlock(filePath: filePath, language: lang.isEmpty ? detectLanguage(from: URL(fileURLWithPath: filePath)) : lang, code: code, isComplete: false))
+                }
+                break
+            }
+            i += 1
+        }
+        return blocks
+    }
+    
+    private func extractFilePathFromHeader(_ header: String) -> String? {
+        var h = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        if h.hasSuffix(":") { h = String(h.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) }
+        if let first = h.firstIndex(of: "`"), let last = h.lastIndex(of: "`"), first < last {
+            let v = String(h[h.index(after: first)..<last]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalizeFilePath(v)
+        }
+        if h.hasPrefix("**"), h.hasSuffix("**"), h.count > 4 {
+            let v = String(h.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalizeFilePath(v)
+        }
+        if h.hasPrefix("###") {
+            return normalizeFilePath(h.replacingOccurrences(of: "###", with: "").trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return normalizeFilePath(h)
+    }
+    
+    private func normalizeFilePath(_ value: String) -> String? {
+        let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty || t.contains(" ") || !t.contains(".") { return nil }
+        return t
+    }
+    
+    private func streamingChangeSummary(filePath: String, newContent: String, projectURL: URL?) -> (summary: String?, added: Int, removed: Int) {
+        guard let projectURL = projectURL else {
+            return ("New file", newContent.components(separatedBy: .newlines).count, 0)
+        }
+        let fileURL = projectURL.appendingPathComponent(filePath)
+        let newLines = newContent.components(separatedBy: .newlines)
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let existing = try? String(contentsOf: fileURL, encoding: .utf8) {
+            let existingLines = existing.components(separatedBy: .newlines)
+            let added = max(0, newLines.count - existingLines.count)
+            let removed = max(0, existingLines.count - newLines.count)
+            if added > 0 && removed > 0 { return ("Modified: +\(added) -\(removed) lines", added, removed) }
+            if added > 0 { return ("Added \(added) line(s)", added, removed) }
+            if removed > 0 { return ("Removed \(removed) line(s)", added, removed) }
+            return ("No changes", 0, 0)
+        }
+        return ("New file: \(newLines.count) lines", newLines.count, 0)
     }
     
     /// Set pending changes for review
@@ -123,7 +629,7 @@ class ApplyCodeService: ObservableObject {
                 )
             case .warning(let message):
                 // Log warning but continue
-                print("⚠️ Git warning: \(message)")
+                print("Git warning: \(message)")
             case .accepted:
                 break
             }
@@ -226,7 +732,7 @@ class ApplyCodeService: ObservableObject {
         }
     }
     
-    /// Apply all pending changes with atomic transaction and retry logic
+    /// Apply all pending changes via broker (fast path or high-integrity)
     func applyAllChangesWithRetry(
         _ changes: [CodeChange],
         in workspaceURL: URL,
@@ -234,35 +740,112 @@ class ApplyCodeService: ObservableObject {
         onProgress: @escaping (Int, Int) -> Void,
         onComplete: @escaping (ApplyResult) -> Void
     ) {
-        // Convert CodeChange to Edit format for atomic service
-        // For now, use regular applyAllChanges
-        // TODO: Full integration with JSONEditSchemaService and AtomicEditService
-        applyAllChanges(onProgress: onProgress, onComplete: onComplete)
+        setPendingChanges(changes)
+        writeChanges(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
     }
     
-    /// Apply all pending changes
+    /// High-integrity path: snapshot workspace, apply each change, restore on any failure
+    private func applyAllChangesViaTransaction(
+        _ changes: [CodeChange],
+        workspaceURL: URL,
+        onProgress: ((Int, Int) -> Void)? = nil,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
+        guard !changes.isEmpty else {
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+            return
+        }
+        isApplying = true
+        let snapshot = WorkspaceSnapshot.create(from: workspaceURL)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var applied = 0
+            var failed = 0
+            var errors: [String] = []
+            var appliedFiles: [URL] = []
+            var didFail = false
+            for (index, change) in changes.enumerated() {
+                DispatchQueue.main.async {
+                    onProgress?(index + 1, changes.count)
+                }
+                let result = self.applyChange(change, requestedScope: "Batch apply")
+                if result.success {
+                    applied += 1
+                    appliedFiles.append(URL(fileURLWithPath: change.filePath))
+                } else {
+                    failed += 1
+                    didFail = true
+                    errors.append(result.error ?? "Failed to \(change.operationType.rawValue) \(change.fileName)")
+                }
+            }
+            if didFail {
+                do {
+                    try snapshot.restore(to: workspaceURL)
+                } catch {
+                    errors.append("Restore failed: \(error.localizedDescription)")
+                }
+                applied = 0
+                appliedFiles = []
+                failed = changes.count
+            }
+            let result = ApplyResult(
+                success: failed == 0,
+                appliedCount: applied,
+                failedCount: failed,
+                errors: errors,
+                appliedFiles: appliedFiles
+            )
+            DispatchQueue.main.async {
+                self.lastApplyResult = result
+                self.isApplying = false
+                self.pendingChanges.removeAll()
+                if !appliedFiles.isEmpty {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("FilesCreated"),
+                        object: nil,
+                        userInfo: ["files": appliedFiles]
+                    )
+                }
+                onComplete(result)
+            }
+        }
+    }
+    
+    /// Apply all pending changes (single path via transaction)
     func applyAllChanges(
         onProgress: @escaping (Int, Int) -> Void,
         onComplete: @escaping (ApplyResult) -> Void
     ) {
         guard !pendingChanges.isEmpty else {
-            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: []))
+            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
             return
         }
-        
+        guard let workspaceURL = findProjectURL(for: pendingChanges[0].filePath) ?? pendingChanges.first.map({ URL(fileURLWithPath: $0.filePath).deletingLastPathComponent() }) else {
+            applyAllChangesLegacy(onProgress: onProgress, onComplete: onComplete)
+            return
+        }
+        let toApply = pendingChanges
+        writeChanges(toApply, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: { [weak self] result in
+            if result.success { self?.pendingChanges.removeAll() }
+            onComplete(result)
+        })
+    }
+    
+    /// Legacy apply without workspace snapshot (single-file or when project root unknown)
+    private func applyAllChangesLegacy(
+        onProgress: @escaping (Int, Int) -> Void,
+        onComplete: @escaping (ApplyResult) -> Void
+    ) {
         isApplying = true
-        
         DispatchQueue.global(qos: .userInitiated).async {
             var applied = 0
             var failed = 0
             var errors: [String] = []
             var appliedFiles: [URL] = []
-            
             for (index, change) in self.pendingChanges.enumerated() {
                 DispatchQueue.main.async {
                     onProgress(index + 1, self.pendingChanges.count)
                 }
-                
                 let result = self.applyChange(change, requestedScope: "Batch apply")
                 if result.success {
                     applied += 1
@@ -272,29 +855,14 @@ class ApplyCodeService: ObservableObject {
                     errors.append(result.error ?? "Failed to \(change.operationType.rawValue) \(change.fileName)")
                 }
             }
-            
-            let result = ApplyResult(
-                success: failed == 0,
-                appliedCount: applied,
-                failedCount: failed,
-                errors: errors,
-                appliedFiles: appliedFiles
-            )
-            
+            let result = ApplyResult(success: failed == 0, appliedCount: applied, failedCount: failed, errors: errors, appliedFiles: appliedFiles)
             DispatchQueue.main.async {
                 self.lastApplyResult = result
                 self.isApplying = false
                 self.pendingChanges.removeAll()
-                
-                // Notify about applied files
                 if !appliedFiles.isEmpty {
-                    NotificationCenter.default.post(
-                        name: NSNotification.Name("FilesCreated"),
-                        object: nil,
-                        userInfo: ["files": appliedFiles]
-                    )
+                    NotificationCenter.default.post(name: NSNotification.Name("FilesCreated"), object: nil, userInfo: ["files": appliedFiles])
                 }
-                
                 onComplete(result)
             }
         }
@@ -408,6 +976,41 @@ class ApplyCodeService: ObservableObject {
     }
 }
 
+// MARK: - Patch Types
+
+/// Structured code edit (patch) parsed from AI response
+struct CodePatch: Identifiable {
+    let id = UUID()
+    let filePath: String
+    let operation: CodePatch.PatchOperation
+    let range: CodePatch.PatchRange?
+    let content: [String]
+    let description: String?
+    
+    enum PatchOperation: String {
+        case insert
+        case replace
+        case delete
+    }
+    
+    struct PatchRange {
+        let startLine: Int
+        let endLine: Int
+        let startColumn: Int?
+        let endColumn: Int?
+    }
+}
+
+// MARK: - Deterministic Edit Types
+
+/// Generated edit for simple string replacement (deterministic, no AI)
+struct DeterministicGeneratedEdit: Equatable {
+    let filePath: String
+    let originalContent: String
+    let newContent: String
+    let matchCount: Int
+}
+
 // MARK: - Supporting Types
 
 struct CodeChange: Identifiable {
@@ -475,10 +1078,10 @@ enum ChangeRecommendation {
         switch self {
         case .safeToApply(let reason):
             return reason
-        case .reviewCarefully(let reason):
-            return "⚠️ \(reason)"
+            case .reviewCarefully(let reason):
+            return reason
         case .useGraphiteStacking(let reason, let prs):
-            return "📚 \(reason) Estimated: \(prs) PRs"
+            return "\(reason) Estimated: \(prs) PRs"
         }
     }
     

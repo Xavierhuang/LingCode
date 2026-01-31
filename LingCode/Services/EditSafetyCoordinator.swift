@@ -37,7 +37,7 @@ final class EditSafetyCoordinator {
     /// - Parameter prompt: User's edit instruction
     /// - Returns: Execution intent
     func classifyExecutionIntent(_ prompt: String) -> ExecutionIntent {
-        let intent = IntentClassifier.shared.classify(prompt)
+        let intent = IntentEngine.shared.classifyIntent(prompt)
         
         switch intent {
         case .simpleReplace, .rename:

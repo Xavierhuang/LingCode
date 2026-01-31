@@ -14,8 +14,10 @@ class TerminalExecutionService: ObservableObject {
     @Published var output: String = ""
     @Published var commandHistory: [CommandExecution] = []
     @Published var isLongRunning: Bool = false
+    @Published var isBackgroundRunning: Bool = false
     
     private var currentProcess: Process?
+    private var backgroundProcess: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
     
@@ -32,7 +34,7 @@ class TerminalExecutionService: ObservableObject {
         onComplete: @escaping (Int32) -> Void
     ) {
         guard !isExecuting else {
-            onError("Blocked: Another process is already running.")
+            onError("Blocked: Another foreground process is already running.")
             return
         }
         
@@ -128,6 +130,75 @@ class TerminalExecutionService: ObservableObject {
             }
         }
     }
+    
+    /// Run a long-running command in the background. Does not set isExecuting, so validation/linter can still run.
+    /// Use for servers, watchers, dev servers (e.g. npm run dev). Foreground execute() remains for validation/build.
+    func executeInBackground(
+        _ command: String,
+        workingDirectory: URL? = nil,
+        environment: [String: String]? = nil,
+        onOutput: @escaping (String) -> Void,
+        onError: @escaping (String) -> Void,
+        onComplete: @escaping (Int32) -> Void
+    ) {
+        let process = Process()
+        let pipe = Pipe()
+        let errorPipe = Pipe()
+        backgroundProcess = process
+        
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                DispatchQueue.main.async {
+                    onOutput(str)
+                }
+            }
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                DispatchQueue.main.async {
+                    onError(str)
+                }
+            }
+        }
+        
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-l", "-c", normalizeCommand(command)]
+        process.currentDirectoryURL = workingDirectory
+        
+        var env = ProcessInfo.processInfo.environment
+        if let customEnv = environment { customEnv.forEach { env[$0] = $1 } }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let commonPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "\(home)/.cargo/bin"]
+        env["PATH"] = (commonPaths + [env["PATH"] ?? ""]).joined(separator: ":")
+        process.environment = env
+        process.standardOutput = pipe
+        process.standardError = errorPipe
+        
+        process.terminationHandler = { [weak self] proc in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                self?.backgroundProcess = nil
+                self?.isBackgroundRunning = false
+                onComplete(proc.terminationStatus)
+            }
+        }
+        
+        do {
+            try process.run()
+            DispatchQueue.main.async {
+                self.isBackgroundRunning = true
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.backgroundProcess = nil
+                onError("Background launch failed: \(error.localizedDescription)")
+                onComplete(-1)
+            }
+        }
+    }
 
     // MARK: - Synchronous execution (for quick checks: which, git status, swift build, etc.)
 
@@ -176,6 +247,11 @@ class TerminalExecutionService: ObservableObject {
         return patterns.contains { command.lowercased().range(of: $0, options: .regularExpression) != nil }
     }
     
+    /// Whether a command is typically long-running; callers can use executeInBackground for these.
+    func isBackgroundStyleCommand(_ command: String) -> Bool {
+        isLongRunningCommand(command)
+    }
+    
     private func normalizeCommand(_ command: String) -> String {
         var cmd = command
         if cmd.contains("python ") && !cmd.contains("python3 ") {
@@ -188,6 +264,12 @@ class TerminalExecutionService: ObservableObject {
         currentProcess?.terminate()
         currentProcess = nil
         isExecuting = false
+    }
+    
+    func cancelBackground() {
+        backgroundProcess?.terminate()
+        backgroundProcess = nil
+        isBackgroundRunning = false
     }
     
     func extractCommands(from response: String) -> [ParsedCommand] {

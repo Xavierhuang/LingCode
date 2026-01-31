@@ -37,7 +37,8 @@ extension ServiceContainer {
     // Access to existing singleton services (for gradual migration)
     var context: ContextRankingService { ContextRankingService.shared }
     var search: SemanticSearchService { SemanticSearchService.shared }
-    var latency: LatencyOptimizer { LatencyOptimizer.shared }
+    var latency: PerformanceOptimizer { PerformanceOptimizer.shared }
+    var performance: PerformanceOptimizer { PerformanceOptimizer.shared }
     var streaming: StreamingUpdateCoordinator { StreamingUpdateCoordinator.shared }
     var editIntent: EditIntentCoordinator { EditIntentCoordinator.shared }
     var agentCoordinator: AgentCoordinator { AgentCoordinator.shared }

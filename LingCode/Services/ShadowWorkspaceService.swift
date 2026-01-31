@@ -11,14 +11,16 @@ class ShadowWorkspaceService {
     static let shared = ShadowWorkspaceService()
     
     private var activeWorkspaces: [URL: URL] = [:]
+    private var warmedProjects: Set<URL> = []
     private let fileManager = FileManager.default
+    private let queue = DispatchQueue(label: "com.lingcode.shadowworkspace", qos: .utility)
     
     private init() {}
     
     // MARK: - Workspace Management
     
     func getShadowWorkspace(for projectURL: URL) -> URL? {
-        return activeWorkspaces[projectURL]
+        queue.sync { activeWorkspaces[projectURL] }
     }
     
     func createShadowWorkspace(for projectURL: URL) -> URL? {
@@ -26,10 +28,100 @@ class ShadowWorkspaceService {
         let shadowURL = fileManager.temporaryDirectory.appendingPathComponent("lingcode-shadow-\(UUID().uuidString)")
         do {
             try fileManager.createDirectory(at: shadowURL, withIntermediateDirectories: true)
-            activeWorkspaces[projectURL] = shadowURL
+            queue.sync { activeWorkspaces[projectURL] = shadowURL }
             return shadowURL
         } catch {
             return nil
+        }
+    }
+    
+    /// Pre-warm shadow workspace: create if needed, initial sync, then keep in sync via file watcher.
+    /// Reduces validation latency from seconds to milliseconds by avoiding copy-on-demand.
+    func ensureShadowWarmed(for projectURL: URL, completion: @escaping (URL?) -> Void) {
+        let normalized = projectURL.standardizedFileURL
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if let existing = self.activeWorkspaces[normalized] {
+                if self.warmedProjects.contains(normalized) {
+                    DispatchQueue.main.async { completion(existing) }
+                    return
+                }
+            }
+            guard let shadowURL = self.getShadowWorkspace(for: normalized) ?? self.createShadowWorkspace(for: normalized) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            self.initialSync(projectURL: normalized, shadowURL: shadowURL) {
+                self.queue.async {
+                    self.warmedProjects.insert(normalized)
+                    self.startWatchingForSync(projectURL: normalized, shadowURL: shadowURL)
+                }
+                DispatchQueue.main.async { completion(shadowURL) }
+            }
+        }
+    }
+    
+    private func startWatchingForSync(projectURL: URL, shadowURL: URL) {
+        FileWatcherService.shared.startWatching(projectURL) { [weak self] changedFileURL in
+            self?.syncFileFromProjectToShadow(projectURL: projectURL, fileURL: changedFileURL)
+        }
+    }
+    
+    private func syncFileFromProjectToShadow(projectURL: URL, fileURL: URL) {
+        let projectPath = projectURL.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+        guard filePath.hasPrefix(projectPath) else { return }
+        var relative = String(filePath.dropFirst(projectPath.count))
+        if relative.hasPrefix("/") { relative.removeFirst() }
+        if relative.isEmpty { return }
+        
+        guard let shadowURL = getShadowWorkspace(for: projectURL) else { return }
+        let dest = shadowURL.appendingPathComponent(relative)
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: filePath, isDirectory: &isDir), !isDir.boolValue else { return }
+        do {
+            try fileManager.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fileManager.fileExists(atPath: dest.path) { try fileManager.removeItem(at: dest) }
+            try fileManager.copyItem(at: fileURL, to: dest)
+        } catch {}
+    }
+    
+    private func initialSync(projectURL: URL, shadowURL: URL, completion: @escaping () -> Void) {
+        let manifestFiles = ["Package.swift", "package.json", "requirements.txt", "Cargo.toml"]
+        for fileName in manifestFiles {
+            let src = projectURL.appendingPathComponent(fileName)
+            if fileManager.fileExists(atPath: src.path) {
+                let dest = shadowURL.appendingPathComponent(fileName)
+                try? fileManager.removeItem(at: dest)
+                try? fileManager.copyItem(at: src, to: dest)
+            }
+        }
+        let sourcesDir = projectURL.appendingPathComponent("Sources")
+        let testsDir = projectURL.appendingPathComponent("Tests")
+        if fileManager.fileExists(atPath: sourcesDir.path) {
+            copyDirectory(from: sourcesDir, to: shadowURL.appendingPathComponent("Sources"))
+        }
+        if fileManager.fileExists(atPath: testsDir.path) {
+            copyDirectory(from: testsDir, to: shadowURL.appendingPathComponent("Tests"))
+        }
+        completion()
+    }
+    
+    private func copyDirectory(from src: URL, to dest: URL) {
+        try? fileManager.createDirectory(at: dest, withIntermediateDirectories: true)
+        guard let enumerator = fileManager.enumerator(at: src, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+        for case let item as URL in enumerator {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDir) else { continue }
+            let rel = item.path.replacingOccurrences(of: src.path, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let target = dest.appendingPathComponent(rel)
+            if isDir.boolValue {
+                try? fileManager.createDirectory(at: target, withIntermediateDirectories: true)
+            } else {
+                try? fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: target.path) { try? fileManager.removeItem(at: target) }
+                try? fileManager.copyItem(at: item, to: target)
+            }
         }
     }
     
@@ -75,46 +167,54 @@ class ShadowWorkspaceService {
     }
 
     func cleanup(for projectURL: URL) {
-        if let url = activeWorkspaces[projectURL] {
+        let url = queue.sync { activeWorkspaces.removeValue(forKey: projectURL.standardizedFileURL) }
+        if let url = url {
             try? fileManager.removeItem(at: url)
-            activeWorkspaces.removeValue(forKey: projectURL)
+            queue.sync { warmedProjects.remove(projectURL.standardizedFileURL) }
         }
     }
 
     // MARK: - CursorStreamingView verification
 
     /// Verifies that the given files compile in a shadow workspace before applying.
+    /// Uses pre-warmed shadow when available for minimal latency.
     func verifyFilesInShadow(files: [StreamingFileInfo], originalWorkspace: URL, completion: @escaping (Bool, String) -> Void) {
-        guard let shadowURL = getShadowWorkspace(for: originalWorkspace) ?? createShadowWorkspace(for: originalWorkspace) else {
-            completion(false, "Could not create shadow workspace.")
-            return
-        }
-        guard let first = files.first else {
-            completion(true, "No files to verify.")
-            return
-        }
-        do {
-            try prepareShadowWorkspaceForValidation(modifiedFileURL: originalWorkspace.appendingPathComponent(first.path), projectURL: originalWorkspace, shadowWorkspaceURL: shadowURL)
-            for file in files {
-                try writeToShadowWorkspace(content: file.content, relativePath: file.path, shadowWorkspaceURL: shadowURL)
-            }
-            let hasPackageSwift = fileManager.fileExists(atPath: shadowURL.appendingPathComponent("Package.swift").path)
-            guard hasPackageSwift else {
-                completion(true, "No Package.swift; skipped build.")
+        let projectURL = originalWorkspace.standardizedFileURL
+        ensureShadowWarmed(for: projectURL) { [weak self] shadowURL in
+            guard let self = self, let shadowURL = shadowURL else {
+                completion(false, "Could not create shadow workspace.")
                 return
             }
-            TerminalExecutionService.shared.execute(
-                "swift build 2>&1",
-                workingDirectory: shadowURL,
-                environment: nil,
-                onOutput: { _ in },
-                onError: { _ in },
-                onComplete: { exitCode in
-                    completion(exitCode == 0, exitCode == 0 ? "Build successful." : "Compilation failed.")
+            guard let first = files.first else {
+                completion(true, "No files to verify.")
+                return
+            }
+            do {
+                let isWarmed = self.queue.sync { self.warmedProjects.contains(projectURL) }
+                if !isWarmed {
+                    try self.prepareShadowWorkspaceForValidation(modifiedFileURL: projectURL.appendingPathComponent(first.path), projectURL: projectURL, shadowWorkspaceURL: shadowURL)
                 }
-            )
-        } catch {
-            completion(false, "Shadow setup failed: \(error.localizedDescription)")
+                for file in files {
+                    try self.writeToShadowWorkspace(content: file.content, relativePath: file.path, shadowWorkspaceURL: shadowURL)
+                }
+                let hasPackageSwift = self.fileManager.fileExists(atPath: shadowURL.appendingPathComponent("Package.swift").path)
+                guard hasPackageSwift else {
+                    completion(true, "No Package.swift; skipped build.")
+                    return
+                }
+                TerminalExecutionService.shared.execute(
+                    "swift build 2>&1",
+                    workingDirectory: shadowURL,
+                    environment: nil,
+                    onOutput: { _ in },
+                    onError: { _ in },
+                    onComplete: { exitCode in
+                        completion(exitCode == 0, exitCode == 0 ? "Build successful." : "Compilation failed.")
+                    }
+                )
+            } catch {
+                completion(false, "Shadow setup failed: \(error.localizedDescription)")
+            }
         }
     }
 }

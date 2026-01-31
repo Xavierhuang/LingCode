@@ -99,7 +99,6 @@ final class StreamingUpdateCoordinator: ObservableObject {
     
     // MARK: - Dependencies
     
-    private let contentParser = StreamingContentParser.shared
     private let terminalService = TerminalExecutionService.shared
     private let editIntentCoordinator = EditIntentCoordinator.shared
     

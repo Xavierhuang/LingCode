@@ -243,7 +243,7 @@ class AgentService: ObservableObject, Identifiable {
                 let flushedToolCalls = ToolCallHandler.shared.flush()
                 detectedToolCalls.append(contentsOf: flushedToolCalls)
                 
-                guard let toolCall = detectedToolCalls.first, let decision = AgentToolCallConverter.convert(toolCall) else {
+                guard let toolCall = detectedToolCalls.first, let decision = self.convertToolCallToDecision(toolCall) else {
                     self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
                     return
                 }
@@ -280,7 +280,38 @@ class AgentService: ObservableObject, Identifiable {
         }
     }
 
-    // MARK: - Decision Execution
+    // MARK: - Decision Execution (ToolCall -> AgentDecision inlined from AgentToolCallConverter)
+    
+    private func convertToolCallToDecision(_ toolCall: ToolCall) -> AgentDecision? {
+        let input = toolCall.input
+        switch toolCall.name {
+        case "done":
+            let summary = input["summary"]?.value as? String
+            return AgentDecision(action: "done", description: "Task Complete", command: nil, query: nil, filePath: nil, code: nil, thought: summary)
+        case "run_terminal_command":
+            guard let cmd = input["command"]?.value as? String else { return nil }
+            return AgentDecision(action: "terminal", description: "Exec: \(cmd)", command: cmd, query: nil, filePath: nil, code: nil, thought: nil)
+        case "write_file":
+            let filePath: String? = input["file_path"]?.value as? String ?? input["path"]?.value as? String
+            let content = input["content"]?.value as? String
+            guard let path = filePath, let fileContent = content else { return nil }
+            return AgentDecision(action: "code", description: "Write: \(path)", command: nil, query: nil, filePath: path, code: fileContent, thought: nil)
+        case "codebase_search", "search_web":
+            guard let q = input["query"]?.value as? String else { return nil }
+            return AgentDecision(action: "search", description: "Search: \(q)", command: nil, query: q, filePath: nil, code: nil, thought: nil)
+        case "read_file":
+            let filePath: String? = input["file_path"]?.value as? String ?? input["path"]?.value as? String
+            guard let path = filePath else { return nil }
+            return AgentDecision(action: "file", description: "Read: \(path)", command: nil, query: nil, filePath: path, code: nil, thought: nil)
+        case "read_directory":
+            let path: String? = input["directory_path"]?.value as? String ?? input["path"]?.value as? String ?? input["folder"]?.value as? String
+            guard let directoryPath = path else { return nil }
+            let recursive = (input["recursive"]?.value as? Bool) ?? false
+            return AgentDecision(action: "directory", description: "Read: \(directoryPath)", command: nil, query: nil, filePath: directoryPath, code: nil, thought: recursive ? "recursive" : nil)
+        default:
+            return nil
+        }
+    }
     
     func executeDecision(_ decision: AgentDecision, projectURL: URL?, onOutput: @escaping (String) -> Void, onComplete: @escaping (Bool, String) -> Void) {
         switch decision.action.lowercased() {
@@ -644,5 +675,183 @@ class AgentService: ObservableObject, Identifiable {
                 else { steps[index].output = o }
             }
         }
+    }
+}
+
+// MARK: - Step / response parsing and prompt helpers (inlined from AIStepParser)
+
+extension AgentService {
+    static func parseResponse(_ response: String) -> (steps: [AIThinkingStep], plan: AIPlan?, actions: [AIAction]) {
+        var steps: [AIThinkingStep] = []
+        var plan: AIPlan?
+        var actions: [AIAction] = []
+        let lines = response.components(separatedBy: .newlines)
+        var currentStep: AIThinkingStep?
+        var currentSection: String?
+        var planSteps: [String] = []
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.lowercased().contains("plan:") || trimmed.lowercased().contains("planning:") || trimmed.lowercased().hasPrefix("## plan") || trimmed.lowercased().hasPrefix("### plan") {
+                currentSection = "planning"
+                if let step = currentStep { steps.append(step) }
+                currentStep = AIThinkingStep(type: .planning, content: "")
+                continue
+            }
+            if trimmed.lowercased().contains("thinking:") || trimmed.lowercased().contains("reasoning:") || trimmed.lowercased().hasPrefix("## thinking") || trimmed.lowercased().hasPrefix("### thinking") {
+                currentSection = "thinking"
+                if let step = currentStep { steps.append(step) }
+                currentStep = AIThinkingStep(type: .thinking, content: "")
+                continue
+            }
+            if trimmed.lowercased().contains("action:") || trimmed.lowercased().contains("executing:") || trimmed.lowercased().hasPrefix("## action") || trimmed.lowercased().hasPrefix("### action") || trimmed.lowercased().hasPrefix("step ") || trimmed.lowercased().hasPrefix("creating file:") || trimmed.lowercased().hasPrefix("create file:") {
+                currentSection = "action"
+                if let step = currentStep { steps.append(step) }
+                currentStep = AIThinkingStep(type: .action, content: trimmed)
+                continue
+            }
+            if trimmed.lowercased().contains("result:") || trimmed.lowercased().contains("completed:") || trimmed.lowercased().hasPrefix("## result") || trimmed.lowercased().hasPrefix("### result") {
+                currentSection = "result"
+                if let step = currentStep {
+                    steps.append(AIThinkingStep(id: step.id, type: step.type, content: step.content, timestamp: step.timestamp, isComplete: true))
+                }
+                currentStep = AIThinkingStep(type: .result, content: "")
+                continue
+            }
+            if currentSection == "planning" {
+                if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil {
+                    var stepText = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") ? String(trimmed.dropFirst(2)) : trimmed
+                    stepText = stepText.trimmingCharacters(in: .whitespaces)
+                    if !stepText.isEmpty { planSteps.append(stepText) }
+                }
+            }
+            if let step = currentStep, !trimmed.isEmpty {
+                let updatedContent = step.content.isEmpty ? trimmed : step.content + "\n" + trimmed
+                currentStep = AIThinkingStep(id: step.id, type: step.type, content: updatedContent, timestamp: step.timestamp, isComplete: step.isComplete)
+            }
+        }
+        if let step = currentStep { steps.append(step) }
+        if !planSteps.isEmpty { plan = AIPlan(steps: planSteps, estimatedTime: nil, complexity: nil) }
+        for step in steps where step.type == .action {
+            actions.append(AIAction(name: Self.extractActionName(from: step.content), description: step.content, status: step.isComplete ? .completed : .executing))
+        }
+        actions.append(contentsOf: Self.extractFileActions(from: response))
+        if steps.isEmpty { steps.append(AIThinkingStep(type: .thinking, content: response)) }
+        return (steps, plan, actions)
+    }
+    
+    private static func extractActionName(from content: String) -> String {
+        let firstLine = content.components(separatedBy: .newlines).first ?? ""
+        let cleaned = firstLine
+            .replacingOccurrences(of: "Action:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Executing:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Creating file:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Create file:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Step", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "Action" : String(cleaned.prefix(50))
+    }
+    
+    private static func extractFileActions(from response: String) -> [AIAction] {
+        var actions: [AIAction] = []
+        var foundPaths = Set<String>()
+        let fileBlockPattern = #"`([^`\n]+\.[a-zA-Z0-9]+)`[:\s]*\n```[a-zA-Z]*\n([\s\S]*?)```"#
+        if let regex = try? NSRegularExpression(pattern: fileBlockPattern, options: []) {
+            let range = NSRange(response.startIndex..<response.endIndex, in: response)
+            let matches = regex.matches(in: response, options: [], range: range)
+            for match in matches where match.numberOfRanges > 2 {
+                if let pathRange = Range(match.range(at: 1), in: response), let contentRange = Range(match.range(at: 2), in: response) {
+                    let path = String(response[pathRange]).trimmingCharacters(in: CharacterSet(charactersIn: "`*\"'"))
+                    let content = String(response[contentRange])
+                    if !foundPaths.contains(path), !path.isEmpty {
+                        foundPaths.insert(path)
+                        actions.append(AIAction(name: "Create \(path)", description: "Creating file: \(path)", status: .pending, filePath: path, fileContent: content))
+                    }
+                }
+            }
+        }
+        let altPattern = #"\*\*([^*\n]+\.[a-zA-Z0-9]+)\*\*[:\s]*\n```[a-zA-Z]*\n([\s\S]*?)```"#
+        if let regex = try? NSRegularExpression(pattern: altPattern, options: []) {
+            let range = NSRange(response.startIndex..<response.endIndex, in: response)
+            let matches = regex.matches(in: response, options: [], range: range)
+            for match in matches where match.numberOfRanges > 2 {
+                if let pathRange = Range(match.range(at: 1), in: response), let contentRange = Range(match.range(at: 2), in: response) {
+                    let path = String(response[pathRange]).trimmingCharacters(in: .whitespaces)
+                    let content = String(response[contentRange])
+                    if !foundPaths.contains(path), !path.isEmpty {
+                        foundPaths.insert(path)
+                        actions.append(AIAction(name: "Create \(path)", description: "Creating file: \(path)", status: .pending, filePath: path, fileContent: content))
+                    }
+                }
+            }
+        }
+        let headerPattern = #"###\s+([^\n]+\.[a-zA-Z0-9]+)\s*\n```[a-zA-Z]*\n([\s\S]*?)```"#
+        if let regex = try? NSRegularExpression(pattern: headerPattern, options: []) {
+            let range = NSRange(response.startIndex..<response.endIndex, in: response)
+            let matches = regex.matches(in: response, options: [], range: range)
+            for match in matches where match.numberOfRanges > 2 {
+                if let pathRange = Range(match.range(at: 1), in: response), let contentRange = Range(match.range(at: 2), in: response) {
+                    let path = String(response[pathRange]).trimmingCharacters(in: .whitespaces)
+                    let content = String(response[contentRange])
+                    if !foundPaths.contains(path), !path.isEmpty {
+                        foundPaths.insert(path)
+                        actions.append(AIAction(name: "Create \(path)", description: "Creating file: \(path)", status: .pending, filePath: path, fileContent: content))
+                    }
+                }
+            }
+        }
+        return actions
+    }
+    
+    static func detectRunRequest(_ prompt: String) -> Bool {
+        let lowercased = prompt.lowercased()
+        return lowercased.contains("run it") || lowercased.contains("run the") || lowercased.contains("start it") || lowercased.contains("start the") ||
+               lowercased.contains("execute it") || lowercased.contains("execute the") || lowercased.contains("launch it") || lowercased.contains("launch the") ||
+               (lowercased.contains("for me") && (lowercased.contains("run") || lowercased.contains("start") || lowercased.contains("execute")))
+    }
+    
+    static func detectCheckRequest(_ prompt: String) -> Bool {
+        let lowercased = prompt.lowercased()
+        return lowercased.contains("check") || lowercased.contains("review") || lowercased.contains("analyze") || lowercased.contains("inspect") ||
+               lowercased.contains("validate") || lowercased.contains("audit") || lowercased.contains("look at") || lowercased.contains("examine") ||
+               lowercased.contains("what's wrong") || lowercased.contains("any issues") || lowercased.contains("any problems")
+    }
+    
+    static func enhancePromptForSteps(_ originalPrompt: String) -> String {
+        let lowercased = originalPrompt.lowercased()
+        let isProjectRequest = lowercased.contains("project") || lowercased.contains("app") || lowercased.contains("application") || lowercased.contains("create") ||
+                              lowercased.contains("build") || lowercased.contains("scaffold") || lowercased.contains("landing page") || lowercased.contains("website") ||
+                              lowercased.contains("web app") || lowercased.contains("web application") || lowercased.contains("dashboard") || lowercased.contains("portfolio") ||
+                              lowercased.contains("blog") || lowercased.contains("write me") || lowercased.contains("make me") || lowercased.contains("build me")
+        if isProjectRequest {
+            return originalPrompt + "\n\n**Generate a COMPLETE, WORKING application with ALL necessary files. Use format: `path/to/file.ext`:\n```language\ncode\n```"
+        }
+        let mightNeedMultiple = lowercased.contains("page") || lowercased.contains("site") || lowercased.contains("component") || lowercased.contains("feature") || lowercased.contains("module")
+        if mightNeedMultiple {
+            return originalPrompt + "\n\n**If this requires multiple files (HTML + CSS + JS), generate ALL of them. Use format: `path/to/file.ext`:\n```language\ncode\n```"
+        }
+        return originalPrompt + "\n\n**WORKFLOW: Think out loud, then generate code for each file. Use format: `path/to/file.ext`:\n```language\ncode\n```"
+    }
+    
+    static func enhancePromptForRun(_ originalPrompt: String, projectURL: URL?) -> String {
+        var runCommand: String?
+        if let projectURL = projectURL {
+            if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("package.json").path) {
+                if let data = try? Data(contentsOf: projectURL.appendingPathComponent("package.json")),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let scripts = json["scripts"] as? [String: String] {
+                    runCommand = scripts["start"] ?? scripts["dev"] ?? scripts["serve"] ?? "npm start"
+                } else { runCommand = "npm start" }
+            } else if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("main.py").path) { runCommand = "python3 main.py"
+            } else if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("app.py").path) { runCommand = "python3 app.py"
+            } else if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("Cargo.toml").path) { runCommand = "cargo run"
+            } else if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("Package.swift").path) { runCommand = "swift run"
+            } else if FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("main.go").path) { runCommand = "go run main.go"
+            }
+        }
+        if let command = runCommand {
+            return originalPrompt + "\n\nGenerate the terminal command to run this project:\n\n```bash\n\(command)\n```"
+        }
+        return originalPrompt + "\n\nGenerate the appropriate terminal command(s) to run/start the project. Format:\n\n```bash\n<command>\n```"
     }
 }
