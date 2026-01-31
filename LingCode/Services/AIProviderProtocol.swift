@@ -36,6 +36,17 @@ protocol AIProviderProtocol {
     
     /// Cancel the current request
     func cancelCurrentRequest()
+    
+    /// API key (nil if not set)
+    func getAPIKey() -> String?
+    /// Set API key and provider
+    func setAPIKey(_ key: String, provider: AIProvider)
+    /// Current provider (e.g. anthropic, openAI)
+    func getProvider() -> AIProvider
+    /// Current Anthropic model (for display/settings)
+    func getAnthropicModel() -> AnthropicModel
+    /// Current model identifier for telemetry
+    var currentModel: String { get }
 }
 
 /// Modern async/await error types

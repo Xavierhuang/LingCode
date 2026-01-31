@@ -16,12 +16,9 @@ class ServiceContainer {
     
     // AI Services
     private(set) var aiService: AIProviderProtocol
-    private(set) var modernAIService: ModernAIService
     
     private init() {
-        // Initialize services (can be replaced with mocks for testing)
-        modernAIService = ModernAIService()
-        aiService = modernAIService // Use modern implementation by default
+        aiService = AIService.shared
     }
     
     /// Replace AI service (useful for testing or local models)

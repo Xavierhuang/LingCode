@@ -56,16 +56,14 @@ struct APITestView: View {
     }
     
     private func testAPI() {
-        // FIX: Use ModernAIService directly to ensure we're using the same service as the app
-        let modernAIService = ServiceContainer.shared.modernAIService
-        
-        guard let apiKey = modernAIService.getAPIKey() else {
+        let aiService = ServiceContainer.shared.aiService
+        guard let apiKey = aiService.getAPIKey() else {
             errorMessage = "No API key configured. Please set your API key in Settings."
             return
         }
         
-        let provider = modernAIService.getProvider()
-        let model = modernAIService.getAnthropicModel()
+        let provider = aiService.getProvider()
+        let model = aiService.getAnthropicModel()
         
         isTesting = true
         testResult = ""

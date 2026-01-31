@@ -2,16 +2,24 @@
 //  ApplyCodeService.swift
 //  LingCode
 //
-//  Single-path write integrity: sole broker for all disk changes.
-//  Parsing (CodeGenerator), patches, and deterministic replacements flow here;
-//  broker chooses Fast Path (single-file backup + write) or High-Integrity (snapshot + restore on error).
+//  Lightweight adapter: executes committed EditorCore transactions to disk.
+//  High-integrity snapshot and rollback live in EditorCore.EditTransaction.executeToDisk.
 //
 
 import Foundation
 import Combine
+import EditorCore
 
-/// Sole broker for all disk changes. Decides high-integrity transaction vs fast path write.
-class ApplyCodeService: ObservableObject {
+/// Wraps LingCode WorkspaceSnapshot for EditorCore.WorkspaceSnapshotProtocol.
+private struct WorkspaceSnapshotAdapter: WorkspaceSnapshotProtocol {
+    let snapshot: WorkspaceSnapshot
+    func restore(to workspaceURL: URL) throws {
+        try snapshot.restore(to: workspaceURL)
+    }
+}
+
+/// Adapter that executes EditorCore transactions to disk. Single unified transaction pipeline.
+class ApplyCodeService: ObservableObject, DiskWriteAdapter {
     static let shared = ApplyCodeService()
     
     @Published var pendingChanges: [CodeChange] = []
@@ -22,9 +30,9 @@ class ApplyCodeService: ObservableObject {
     
     private init() {}
     
-    // MARK: - Disk Write Broker (Single-Path Integrity)
+    // MARK: - Disk Write (Unified Transaction Pipeline via EditorCore)
     
-    /// Single entry point for writing changes to disk. Chooses Fast Path or High-Integrity.
+    /// Single entry point: build EditTransaction, run EditorCore.executeToDisk (snapshot + adapter), no fast path.
     func writeChanges(
         _ changes: [CodeChange],
         workspaceURL: URL,
@@ -35,54 +43,36 @@ class ApplyCodeService: ObservableObject {
             onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
             return
         }
-        if useFastPath(changes) {
-            applyViaFastPath(changes, workspaceURL: workspaceURL, onComplete: onComplete)
-        } else {
-            applyViaHighIntegrity(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
-        }
-    }
-    
-    /// Fast path: single file, backup + direct write (no snapshot).
-    private func useFastPath(_ changes: [CodeChange]) -> Bool {
-        guard changes.count == 1 else { return false }
-        let change = changes[0]
-        return change.operationType != .delete || FileManager.default.fileExists(atPath: change.filePath)
-    }
-    
-    private func applyViaFastPath(
-        _ changes: [CodeChange],
-        workspaceURL: URL,
-        onComplete: @escaping (ApplyResult) -> Void
-    ) {
-        guard let change = changes.first else {
-            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
+        let proposedEdits = changes.compactMap { codeChangeToProposedEdit($0, workspaceURL: workspaceURL) }
+        guard proposedEdits.count == changes.count else {
+            onComplete(ApplyResult(success: false, appliedCount: 0, failedCount: changes.count, errors: ["Failed to convert changes to transaction"], appliedFiles: []))
             return
         }
+        let transaction = EditTransaction(edits: proposedEdits, metadata: TransactionMetadata(description: "ApplyCodeService", source: "broker"))
         isApplying = true
+        let snapshot = WorkspaceSnapshot.create(from: workspaceURL)
+        let progressWrapper: ((Int, Int) -> Void)? = onProgress.map { callback in
+            { cur, total in DispatchQueue.main.async { callback(cur, total) } }
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let result = self.applyChange(change, requestedScope: "Fast path")
+            let result = transaction.executeToDisk(
+                workspaceURL: workspaceURL,
+                createSnapshot: { WorkspaceSnapshotAdapter(snapshot: snapshot) },
+                adapter: self,
+                onProgress: progressWrapper
+            )
             let applyResult: ApplyResult
-            if result.success {
-                applyResult = ApplyResult(
-                    success: true,
-                    appliedCount: 1,
-                    failedCount: 0,
-                    errors: [],
-                    appliedFiles: [URL(fileURLWithPath: change.filePath)]
-                )
-            } else {
-                applyResult = ApplyResult(
-                    success: false,
-                    appliedCount: 0,
-                    failedCount: 1,
-                    errors: [result.error ?? "Apply failed"],
-                    appliedFiles: []
-                )
+            switch result {
+            case .success(let urls):
+                applyResult = ApplyResult(success: true, appliedCount: urls.count, failedCount: 0, errors: [], appliedFiles: urls)
+            case .failure(let error):
+                applyResult = ApplyResult(success: false, appliedCount: 0, failedCount: changes.count, errors: [error.localizedDescription], appliedFiles: [])
             }
             DispatchQueue.main.async {
                 self.lastApplyResult = applyResult
                 self.isApplying = false
+                self.pendingChanges.removeAll()
                 if !applyResult.appliedFiles.isEmpty {
                     NotificationCenter.default.post(
                         name: NSNotification.Name("FilesCreated"),
@@ -95,14 +85,57 @@ class ApplyCodeService: ObservableObject {
         }
     }
     
-    /// High-integrity: snapshot workspace, apply each change, restore on any failure.
-    private func applyViaHighIntegrity(
-        _ changes: [CodeChange],
-        workspaceURL: URL,
-        onProgress: ((Int, Int) -> Void)?,
-        onComplete: @escaping (ApplyResult) -> Void
-    ) {
-        applyAllChangesViaTransaction(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
+    /// DiskWriteAdapter: perform one edit to disk (write or delete). Used by EditorCore transaction pipeline.
+    func writeEdit(_ edit: ProposedEdit, workspaceURL: URL) throws -> URL {
+        let filePath = edit.filePath.hasPrefix("/") ? edit.filePath : (workspaceURL.path as NSString).appendingPathComponent(edit.filePath)
+        let fileURL = URL(fileURLWithPath: filePath)
+        switch edit.metadata.editType {
+        case .deletion:
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            return fileURL
+        case .creation, .modification:
+            let directory = fileURL.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+            try edit.proposedContent.write(to: fileURL, atomically: true, encoding: .utf8)
+            return fileURL
+        }
+    }
+    
+    private func codeChangeToProposedEdit(_ change: CodeChange, workspaceURL: URL) -> ProposedEdit? {
+        let relativePath: String
+        if change.filePath.hasPrefix(workspaceURL.path) {
+            relativePath = String(change.filePath.dropFirst(workspaceURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else {
+            relativePath = (change.filePath as NSString).lastPathComponent
+        }
+        let original = change.originalContent ?? ""
+        let proposed = change.newContent
+        let editType: EditType
+        switch change.operationType {
+        case .create: editType = .creation
+        case .update, .append: editType = .modification
+        case .delete: editType = .deletion
+        }
+        let oldCount = original.components(separatedBy: .newlines).count
+        let newCount = proposed.components(separatedBy: .newlines).count
+        let diff = DiffResult(
+            hunks: [],
+            addedLines: max(0, newCount - oldCount),
+            removedLines: max(0, oldCount - newCount),
+            unchangedLines: 0
+        )
+        return ProposedEdit(
+            id: change.id,
+            filePath: relativePath,
+            originalContent: original,
+            proposedContent: proposed,
+            diff: diff,
+            metadata: EditMetadata(editType: editType, source: "ApplyCodeService")
+        )
     }
     
     // MARK: - Parse Changes (CodeGenerator path)
@@ -732,7 +765,7 @@ class ApplyCodeService: ObservableObject {
         }
     }
     
-    /// Apply all pending changes via broker (fast path or high-integrity)
+    /// Apply all pending changes via unified transaction pipeline (EditorCore)
     func applyAllChangesWithRetry(
         _ changes: [CodeChange],
         in workspaceURL: URL,
@@ -744,74 +777,7 @@ class ApplyCodeService: ObservableObject {
         writeChanges(changes, workspaceURL: workspaceURL, onProgress: onProgress, onComplete: onComplete)
     }
     
-    /// High-integrity path: snapshot workspace, apply each change, restore on any failure
-    private func applyAllChangesViaTransaction(
-        _ changes: [CodeChange],
-        workspaceURL: URL,
-        onProgress: ((Int, Int) -> Void)? = nil,
-        onComplete: @escaping (ApplyResult) -> Void
-    ) {
-        guard !changes.isEmpty else {
-            onComplete(ApplyResult(success: true, appliedCount: 0, failedCount: 0, errors: [], appliedFiles: []))
-            return
-        }
-        isApplying = true
-        let snapshot = WorkspaceSnapshot.create(from: workspaceURL)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            var applied = 0
-            var failed = 0
-            var errors: [String] = []
-            var appliedFiles: [URL] = []
-            var didFail = false
-            for (index, change) in changes.enumerated() {
-                DispatchQueue.main.async {
-                    onProgress?(index + 1, changes.count)
-                }
-                let result = self.applyChange(change, requestedScope: "Batch apply")
-                if result.success {
-                    applied += 1
-                    appliedFiles.append(URL(fileURLWithPath: change.filePath))
-                } else {
-                    failed += 1
-                    didFail = true
-                    errors.append(result.error ?? "Failed to \(change.operationType.rawValue) \(change.fileName)")
-                }
-            }
-            if didFail {
-                do {
-                    try snapshot.restore(to: workspaceURL)
-                } catch {
-                    errors.append("Restore failed: \(error.localizedDescription)")
-                }
-                applied = 0
-                appliedFiles = []
-                failed = changes.count
-            }
-            let result = ApplyResult(
-                success: failed == 0,
-                appliedCount: applied,
-                failedCount: failed,
-                errors: errors,
-                appliedFiles: appliedFiles
-            )
-            DispatchQueue.main.async {
-                self.lastApplyResult = result
-                self.isApplying = false
-                self.pendingChanges.removeAll()
-                if !appliedFiles.isEmpty {
-                    NotificationCenter.default.post(
-                        name: NSNotification.Name("FilesCreated"),
-                        object: nil,
-                        userInfo: ["files": appliedFiles]
-                    )
-                }
-                onComplete(result)
-            }
-        }
-    }
-    
-    /// Apply all pending changes (single path via transaction)
+    /// Apply all pending changes (unified pipeline; requires workspace URL)
     func applyAllChanges(
         onProgress: @escaping (Int, Int) -> Void,
         onComplete: @escaping (ApplyResult) -> Void
@@ -821,7 +787,7 @@ class ApplyCodeService: ObservableObject {
             return
         }
         guard let workspaceURL = findProjectURL(for: pendingChanges[0].filePath) ?? pendingChanges.first.map({ URL(fileURLWithPath: $0.filePath).deletingLastPathComponent() }) else {
-            applyAllChangesLegacy(onProgress: onProgress, onComplete: onComplete)
+            onComplete(ApplyResult(success: false, appliedCount: 0, failedCount: pendingChanges.count, errors: ["No workspace URL for transaction pipeline"], appliedFiles: []))
             return
         }
         let toApply = pendingChanges
@@ -829,43 +795,6 @@ class ApplyCodeService: ObservableObject {
             if result.success { self?.pendingChanges.removeAll() }
             onComplete(result)
         })
-    }
-    
-    /// Legacy apply without workspace snapshot (single-file or when project root unknown)
-    private func applyAllChangesLegacy(
-        onProgress: @escaping (Int, Int) -> Void,
-        onComplete: @escaping (ApplyResult) -> Void
-    ) {
-        isApplying = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            var applied = 0
-            var failed = 0
-            var errors: [String] = []
-            var appliedFiles: [URL] = []
-            for (index, change) in self.pendingChanges.enumerated() {
-                DispatchQueue.main.async {
-                    onProgress(index + 1, self.pendingChanges.count)
-                }
-                let result = self.applyChange(change, requestedScope: "Batch apply")
-                if result.success {
-                    applied += 1
-                    appliedFiles.append(URL(fileURLWithPath: change.filePath))
-                } else {
-                    failed += 1
-                    errors.append(result.error ?? "Failed to \(change.operationType.rawValue) \(change.fileName)")
-                }
-            }
-            let result = ApplyResult(success: failed == 0, appliedCount: applied, failedCount: failed, errors: errors, appliedFiles: appliedFiles)
-            DispatchQueue.main.async {
-                self.lastApplyResult = result
-                self.isApplying = false
-                self.pendingChanges.removeAll()
-                if !appliedFiles.isEmpty {
-                    NotificationCenter.default.post(name: NSNotification.Name("FilesCreated"), object: nil, userInfo: ["files": appliedFiles])
-                }
-                onComplete(result)
-            }
-        }
     }
     
     /// Apply selected changes only

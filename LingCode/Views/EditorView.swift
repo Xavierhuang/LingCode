@@ -486,7 +486,7 @@ struct EditorView: View {
         var responseText = ""
         var isStreamBlocked = false // SAFETY FLAG: Stops feeding garbage to the editor
         
-        // Use ModernAIService with async/await
+        // Use AIService with async/await
         Task { @MainActor in
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai

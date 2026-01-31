@@ -145,7 +145,7 @@ class GraphiteService {
         ]
         """
         
-        // Use ModernAIService to generate stacking plan
+        // Use AIService to generate stacking plan
         Task {
             do {
                 let aiService: AIProviderProtocol = ServiceContainer.shared.ai

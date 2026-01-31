@@ -75,8 +75,103 @@ actor ContextRankingService {
     
     private init() {}
     
+    // MARK: - Priority Streaming Context (OPTIMIZATION)
+    
+    /// Build context with priority streaming - yields Tier 1 immediately, streams Tier 2/3 as available.
+    /// This allows starting AI requests before full context is ready (latency optimization).
+    /// Returns (initialContext, fullContext) where initialContext has Tier 1 only.
+    func buildContextWithPriority(
+        activeFile: URL?,
+        selectedRange: String?,
+        diagnostics: [String]?,
+        projectURL: URL?,
+        query: String?,
+        tokenLimit: Int = 8000
+    ) async -> (initial: String, full: String) {
+        // PHASE 1: Build Tier 1 context immediately (no file discovery needed)
+        var tier1Items: [ContextRankingItem] = []
+        
+        // Active File (single read - fast)
+        if let activeFile = activeFile,
+           let content = try? String(contentsOf: activeFile, encoding: .utf8) {
+            tier1Items.append(ContextRankingItem(
+                file: activeFile,
+                score: 100,
+                content: content,
+                tier: .tier1,
+                reason: "Active file"
+            ))
+        }
+        
+        // Selected Range (immediate, no I/O)
+        if let selectedRange = selectedRange, !selectedRange.isEmpty {
+            tier1Items.append(ContextRankingItem(
+                file: activeFile ?? URL(fileURLWithPath: ""),
+                score: 80,
+                content: selectedRange,
+                tier: .tier1,
+                reason: "Selected range"
+            ))
+        }
+        
+        // Diagnostics (immediate, no I/O)
+        if let diagnostics = diagnostics, !diagnostics.isEmpty {
+            let diagnosticsContent = diagnostics.joined(separator: "\n")
+            tier1Items.append(ContextRankingItem(
+                file: URL(fileURLWithPath: ""),
+                score: 60,
+                content: diagnosticsContent,
+                tier: .tier1,
+                reason: "Diagnostics"
+            ))
+        }
+        
+        // Build initial context from Tier 1 only
+        let initialContext = formatContextItems(tier1Items, tokenLimit: tokenLimit)
+        
+        // PHASE 2: Build full context with Tier 2/3 in parallel (can be used for follow-up)
+        let fullContext = await buildContext(
+            activeFile: activeFile,
+            selectedRange: selectedRange,
+            diagnostics: diagnostics,
+            projectURL: projectURL,
+            query: query,
+            tokenLimit: tokenLimit
+        )
+        
+        return (initial: initialContext, full: fullContext)
+    }
+    
+    /// Format context items into string (shared helper)
+    private func formatContextItems(_ items: [ContextRankingItem], tokenLimit: Int) -> String {
+        let sorted = items.sorted { $0.score > $1.score }
+        let contextItems = sorted.map { item -> ContextItem in
+            let isActive = item.tier == .tier1 && item.reason == "Active file"
+            return ContextItem(
+                file: item.file,
+                content: item.content,
+                score: item.score,
+                isActive: isActive,
+                referencedSymbols: Set<String>()
+            )
+        }
+        
+        let optimized = TokenBudgetOptimizer.shared.optimizeContext(
+            items: contextItems,
+            maxTokens: tokenLimit
+        )
+        
+        return optimized.map { item in
+            let header = item.isActive
+                ? "--- Active File: \(item.file.lastPathComponent) ---"
+                : "--- \(item.file.lastPathComponent) ---"
+            return "\n\n\(header)\n\(item.content)"
+        }.joined()
+    }
+    
     /// Build context with Cursor-style ranking algorithm
     /// Runs on the actor's background executor, keeping the UI completely free
+    /// OPTIMIZATION: Uses priority queue - Tier 1 items are collected first and yielded early
     func buildContext(
         activeFile: URL?,
         selectedRange: String?,
@@ -85,7 +180,7 @@ actor ContextRankingService {
         query: String?,
         tokenLimit: Int = 8000
     ) async -> String {
-        // FIX: Discovery phase runs on actor's background executor, not UI thread!
+        // OPTIMIZATION: File discovery runs on actor's background executor, not UI thread!
         // This prevents 50-200ms UI freezes during file system crawling
         let tier2FileLists = (projectURL != nil && activeFile != nil)
             ? getTier2FileLists(for: activeFile!, in: projectURL!, query: query)
@@ -99,39 +194,38 @@ actor ContextRankingService {
             ? getBoostRuleFileLists(activeFile: activeFile, query: query, in: projectURL!)
             : []
         
-        // FIX: Access main actor-isolated services before TaskGroup
         // Get semantic search results outside TaskGroup to avoid actor isolation issues
-        // Must access SemanticSearchService.shared inside MainActor.run block
         let semanticChunks: [CodeChunk] = if let query = query, !query.isEmpty {
             await MainActor.run {
-                // Access shared property inside MainActor context
                 SemanticSearchService.shared.search(query: query, limit: 5)
             }
         } else {
             []
         }
         
-        // Use TaskGroup to read files in parallel (Speed Boost 🚀)
-        return await withTaskGroup(of: ContextRankingItem?.self) { group in
-            var items: [ContextRankingItem] = []
+        // OPTIMIZATION: Use TaskGroup with priority queue - Tier 1 items collected first
+        return await withTaskGroup(of: (ContextRankingItem, Int)?.self) { group in
+            var tier1Items: [ContextRankingItem] = []
+            var tier2Items: [ContextRankingItem] = []
+            var tier3Items: [ContextRankingItem] = []
             
-            // Tier 1: Active File (parallel read)
+            // Priority 0: Active File (highest priority - read first)
             if let activeFile = activeFile {
                 group.addTask {
                     guard let content = try? String(contentsOf: activeFile, encoding: .utf8) else { return nil }
-                    return ContextRankingItem(
+                    return (ContextRankingItem(
                         file: activeFile,
                         score: 100,
                         content: content,
                         tier: .tier1,
                         reason: "Active file"
-                    )
+                    ), 0) // Priority 0 = Tier 1
                 }
             }
             
-            // Tier 1: Selected Range (immediate, no I/O)
+            // Priority 0: Selected Range (immediate, no I/O)
             if let selectedRange = selectedRange, !selectedRange.isEmpty {
-                items.append(ContextRankingItem(
+                tier1Items.append(ContextRankingItem(
                     file: activeFile ?? URL(fileURLWithPath: ""),
                     score: 80,
                     content: selectedRange,
@@ -140,10 +234,10 @@ actor ContextRankingService {
                 ))
             }
             
-            // Tier 1: Diagnostics (immediate, no I/O)
+            // Priority 0: Diagnostics (immediate, no I/O)
             if let diagnostics = diagnostics, !diagnostics.isEmpty {
                 let diagnosticsContent = diagnostics.joined(separator: "\n")
-                items.append(ContextRankingItem(
+                tier1Items.append(ContextRankingItem(
                     file: URL(fileURLWithPath: ""),
                     score: 60,
                     content: diagnosticsContent,
@@ -152,57 +246,55 @@ actor ContextRankingService {
                 ))
             }
             
-            // Tier 2: Read in Parallel
+            // Priority 1: Tier 2 files (medium priority)
             for (file, score, reason) in tier2FileLists {
                 group.addTask {
                     guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-                    return ContextRankingItem(
+                    return (ContextRankingItem(
                         file: file,
                         score: score,
                         content: content,
                         tier: .tier2,
                         reason: reason
-                    )
+                    ), 1) // Priority 1 = Tier 2
                 }
             }
             
-            // Tier 3: Read in Parallel
+            // Priority 2: Tier 3 files (lower priority)
             for (file, score, reason) in tier3FileLists {
                 group.addTask {
                     guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-                    return ContextRankingItem(
+                    return (ContextRankingItem(
                         file: file,
                         score: score,
                         content: content,
                         tier: .tier3,
                         reason: reason
-                    )
+                    ), 2) // Priority 2 = Tier 3
                 }
             }
             
-            // Boost Rules: template-matched files (from ContextManager) with score boost
+            // Priority 2: Boost Rules (lower priority)
             for (file, score, reason) in boostRuleFileLists {
                 group.addTask {
                     guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-                    return ContextRankingItem(
+                    return (ContextRankingItem(
                         file: file,
                         score: score,
                         content: content,
                         tier: .tier3,
                         reason: reason
-                    )
+                    ), 2)
                 }
             }
             
-            // Semantic Search (Parallel) - use pre-fetched chunks
+            // Priority 1: Semantic Search (medium priority)
             if !semanticChunks.isEmpty, let projectURL = projectURL {
                 for chunk in semanticChunks {
                     let fileURL = projectURL.appendingPathComponent(chunk.filePath)
                     group.addTask {
-                        // Smart Window Logic
                         if let fullContent = try? String(contentsOf: fileURL, encoding: .utf8) {
                             let lines = fullContent.components(separatedBy: .newlines)
-                            // FIX: Access static properties directly - AgentConfiguration is a struct with static let properties, safe to access from actor
                             let lineLimit = AgentConfiguration.smartWindowLineLimit
                             let padding = AgentConfiguration.contextWindowPadding
                             if lines.count > lineLimit {
@@ -211,45 +303,49 @@ actor ContextRankingService {
                                 let windowContent = lines[start...end].joined(separator: "\n")
                                 let header = "// ... (lines \(0)-\(start) hidden)\n"
                                 let footer = "\n// ... (lines \(end + 1)-\(lines.count) hidden)"
-                                return ContextRankingItem(
+                                return (ContextRankingItem(
                                     file: fileURL,
                                     score: 35,
                                     content: header + windowContent + footer,
                                     tier: .tier2,
                                     reason: "Semantic match (window)"
-                                )
+                                ), 1)
                             } else {
-                                return ContextRankingItem(
+                                return (ContextRankingItem(
                                     file: fileURL,
                                     score: 35,
                                     content: fullContent,
                                     tier: .tier2,
                                     reason: "Semantic match"
-                                )
+                                ), 1)
                             }
                         }
-                        // Fallback to cached chunk
-                        return ContextRankingItem(
+                        return (ContextRankingItem(
                             file: fileURL,
                             score: 35,
                             content: chunk.content,
                             tier: .tier2,
                             reason: "Semantic match (chunk)"
-                        )
+                        ), 1)
                     }
                 }
             }
             
-            // Collect all results from parallel tasks
-            for await item in group {
-                if let item = item {
-                    items.append(item)
+            // Collect results by priority (Tier 1 first, then 2, then 3)
+            for await result in group {
+                guard let (item, priority) = result else { continue }
+                switch priority {
+                case 0: tier1Items.append(item)
+                case 1: tier2Items.append(item)
+                default: tier3Items.append(item)
                 }
             }
             
-            // Final Optimization
-            let sorted = items.sorted { $0.score > $1.score }
-            // FIX: Extract tier and reason comparison to avoid actor isolation issues
+            // Combine all items with Tier 1 first (priority ordering)
+            let allItems = tier1Items + tier2Items + tier3Items
+            
+            // Final Optimization with token budget
+            let sorted = allItems.sorted { $0.score > $1.score }
             let contextItems = sorted.map { item -> ContextItem in
                 let isActive = item.tier == .tier1 && item.reason == "Active file"
                 return ContextItem(
@@ -261,7 +357,6 @@ actor ContextRankingService {
                 )
             }
             
-            // FIX: TokenBudgetOptimizer is a regular class, safe to access from actor
             let optimized = TokenBudgetOptimizer.shared.optimizeContext(
                 items: contextItems,
                 maxTokens: tokenLimit

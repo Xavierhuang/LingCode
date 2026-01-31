@@ -47,12 +47,7 @@ class AIViewModel: ObservableObject {
     // Performance metrics
     private let metricsService = PerformanceMetricsService.shared
     
-    // Use ModernAIService via ServiceContainer for async/await
     private let aiService: AIProviderProtocol = ServiceContainer.shared.ai
-    // Keep reference to ModernAIService for configuration
-    private var modernAIService: ModernAIService? {
-        ServiceContainer.shared.modernAIService
-    }
     private let actionExecutor = ActionExecutor.shared
     private let projectGenerator = ProjectGeneratorService.shared
     private let queueService = TaskQueueService.shared
@@ -791,7 +786,7 @@ class AIViewModel: ObservableObject {
                 // Track performance metrics
                 let requestEndTime = Date()
                 let latency = requestEndTime.timeIntervalSince(capturedContextStart)
-                let modelName = self.modernAIService?.currentModel ?? "unknown"
+                let modelName = self.aiService.currentModel
                 let inputTokens = (finalFullContext.count + userMessage.count) / 4
                 let outputTokens = assistantResponse.count / 4
                 
@@ -834,7 +829,7 @@ class AIViewModel: ObservableObject {
                     // Track error in metrics
                     let requestEndTime = Date()
                     let latency = requestEndTime.timeIntervalSince(capturedContextStart)
-                    let modelName = self.modernAIService?.currentModel ?? "unknown"
+                    let modelName = self.aiService.currentModel
                     let inputTokens = (finalFullContext.count + userMessage.count) / 4
                     
                     self.metricsService.recordMetric(
@@ -1532,19 +1527,11 @@ class AIViewModel: ObservableObject {
     }
     
     func setAPIKey(_ key: String, provider: AIProvider) {
-        // Update both old and new services for compatibility
-        AIService.shared.setAPIKey(key, provider: provider)
-        if let modernService = modernAIService {
-            modernService.setAPIKey(key, provider: provider)
-        }
+        aiService.setAPIKey(key, provider: provider)
     }
     
     func hasAPIKey() -> Bool {
-        // Check modern service first, fallback to old service
-        if let modernService = modernAIService {
-            return modernService.getAPIKey() != nil
-        }
-        return AIService.shared.getAPIKey() != nil
+        return aiService.getAPIKey() != nil
     }
     
     func explainCode(_ code: String) {
