@@ -496,7 +496,8 @@ struct EditorView: View {
                     images: [],
                     maxTokens: nil,
                     systemPrompt: systemPrompt,
-                    tools: nil
+                    tools: nil,
+                    forceToolName: nil
                 )
                 
                 // Process stream chunks

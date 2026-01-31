@@ -12,13 +12,15 @@ import Foundation
 protocol AIProviderProtocol {
     /// Stream a message and return chunks asynchronously
     /// FIX: Added tools parameter for agent capabilities
+    /// FIX: Added forceToolName to force a specific tool when agent is stuck
     func streamMessage(
         _ message: String,
         context: String?,
         images: [AttachedImage],
         maxTokens: Int?,
         systemPrompt: String?,
-        tools: [AITool]?
+        tools: [AITool]?,
+        forceToolName: String?
     ) -> AsyncThrowingStream<String, Error>
     
     /// Send a non-streaming message
@@ -65,7 +67,7 @@ enum AIError: Error, LocalizedError {
         case .rateLimitExceeded:
             return "Rate limit exceeded"
         case .timeout:
-            return "Request timed out (no response received)"
+            return "Request timed out. The AI service is taking too long to respond. Try again or use a simpler request."
         case .modelNotFound:
             return "Model not found or not yet available"
         }

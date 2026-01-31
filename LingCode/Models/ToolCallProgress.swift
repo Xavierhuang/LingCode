@@ -50,19 +50,19 @@ struct ToolCallProgress: Identifiable {
     var displayMessage: String {
         switch toolName {
         case "codebase_search":
-            return "🔍 Searching codebase..."
+            return "Searching codebase..."
         case "read_file":
-            return "📖 Reading file..."
+            return "Reading file..."
         case "write_file":
-            return "✏️ Writing file..."
+            return "Writing file..."
         case "run_terminal_command":
-            return "⚡ Running command..."
+            return "Running command..."
         case "search_web":
-            return "🌐 Searching web..."
+            return "Searching web..."
         case "read_directory":
-            return "📁 Reading directory..."
+            return "Reading directory..."
         default:
-            return "🔧 Executing \(toolName)..."
+            return "Executing \(toolName)..."
         }
     }
 }

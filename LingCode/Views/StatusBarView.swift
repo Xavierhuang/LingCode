@@ -10,7 +10,8 @@ import SwiftUI
 struct StatusBarView: View {
     @ObservedObject var editorState: EditorState
     let fontSize: CGFloat
-    
+    var editorViewModel: EditorViewModel? = nil
+
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.md) {
             if let document = editorState.activeDocument {
@@ -50,7 +51,10 @@ struct StatusBarView: View {
             }
             
             Spacer()
-            
+
+            CodebaseIndexStatusView(editorViewModel: editorViewModel)
+                .animation(DesignSystem.Animation.smooth, value: editorState.activeDocument?.filePath)
+
             HStack(spacing: DesignSystem.Spacing.md) {
                 Text("UTF-8")
                     .font(DesignSystem.Typography.caption2)

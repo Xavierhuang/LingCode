@@ -455,7 +455,8 @@ class AIViewModel: ObservableObject {
                     images: images,
                     maxTokens: maxTokens,
                     systemPrompt: systemPromptForRequest,
-                    tools: tools // FIX: Enable tools in Composer mode
+                    tools: tools, // FIX: Enable tools in Composer mode
+                    forceToolName: nil
                 )
                 
                 // FIX: Tool call handler for agent capabilities
@@ -1018,7 +1019,8 @@ class AIViewModel: ObservableObject {
                 images: [],
                 maxTokens: 4096,
                 systemPrompt: nil,
-                tools: tools
+                tools: tools,
+                forceToolName: nil
             )
             
             // Process follow-up response

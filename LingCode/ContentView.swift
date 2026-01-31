@@ -138,7 +138,8 @@ struct ContentView: View {
                 
                 StatusBarView(
                     editorState: viewModel.editorState,
-                    fontSize: viewModel.fontSize
+                    fontSize: viewModel.fontSize,
+                    editorViewModel: viewModel
                 )
             }
             .background(DesignSystem.Colors.primaryBackground)

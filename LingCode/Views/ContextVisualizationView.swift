@@ -10,7 +10,7 @@ import SwiftUI
 struct ContextVisualizationView: View {
     @ObservedObject var contextTracker = ContextTrackingService.shared
     @State private var isExpanded: Bool = true
-    
+
     var body: some View {
         if !contextTracker.currentContextSources.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
@@ -68,6 +68,7 @@ struct ContextVisualizationView: View {
                                 ))
                         }
                     }
+                    .animation(DesignSystem.Animation.smooth, value: contextTracker.currentContextSources.map(\.id))
                     .background(
                         RoundedRectangle(cornerRadius: 0)
                             .fill(Color(NSColor.controlBackgroundColor).opacity(0.3))

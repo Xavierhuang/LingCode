@@ -32,8 +32,8 @@ class ToolCallHandler {
         var detectedToolCalls: [ToolCall] = []
         
         // FIX: Detect tool call markers anywhere in the chunk (not just at start)
-        // Format: 🔧 TOOL_CALL:id:name:base64Input\n
-        let marker = "🔧 TOOL_CALL:"
+        // Format: TOOL_CALL:id:name:base64Input\n
+        let marker = "TOOL_CALL:"
         
         // Search for marker in the chunk (may be on a separate line or mixed with text)
         var searchRange = combinedChunk.startIndex..<combinedChunk.endIndex

@@ -39,7 +39,6 @@ struct TodoListView: View {
                             todo: todo,
                             index: index + 1,
                             onToggle: {
-                                // Toggle status (for manual marking)
                                 if let todoIndex = todos.firstIndex(where: { $0.id == todo.id }) {
                                     var updated = todos[todoIndex]
                                     if updated.status == .pending {
@@ -47,7 +46,9 @@ struct TodoListView: View {
                                     } else if updated.status == .completed {
                                         updated.status = .pending
                                     }
-                                    todos[todoIndex] = updated
+                                    withAnimation(DesignSystem.Animation.smooth) {
+                                        todos[todoIndex] = updated
+                                    }
                                 }
                             }
                         )
@@ -142,11 +143,13 @@ struct TodoItemRow: View {
             
             Spacer()
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
+        .padding(.vertical, DesignSystem.Spacing.xs)
+        .padding(.horizontal, DesignSystem.Spacing.sm)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(todo.status == .completed ? Color.green.opacity(0.05) : Color.clear)
+            RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
+                .fill(todo.status == .completed ? DesignSystem.Colors.success.opacity(0.08) : Color.clear)
         )
+        .animation(DesignSystem.Animation.smooth, value: todo.status)
+        .transition(.opacity.combined(with: .scale(scale: 0.98)))
     }
 }

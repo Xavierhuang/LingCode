@@ -140,6 +140,17 @@ class AgentHistoryService: ObservableObject {
         saveHistory()
     }
     
+    /// Mark a running task as failed (e.g. it was stuck waiting for approval or never finished).
+    func markAsFailed(_ id: UUID) {
+        guard let index = historyItems.firstIndex(where: { $0.id == id }) else { return }
+        var item = historyItems[index]
+        guard item.status == .running else { return }
+        item.status = .failed
+        item.endTime = Date()
+        historyItems[index] = item
+        saveHistory()
+    }
+    
     /// Clear all history
     func clearHistory() {
         historyItems.removeAll()

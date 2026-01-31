@@ -88,7 +88,7 @@ struct TerminalCommandBlock: View {
             // Output section
             if showOutput && (!output.isEmpty || isExecuting) {
                 Divider()
-                
+
                 VStack(alignment: .leading, spacing: 0) {
                     HStack {
                         Text("Output")
@@ -177,11 +177,14 @@ struct TerminalCommandBlock: View {
             .padding(12)
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .cornerRadius(8)
+        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
                 .stroke(borderColor, lineWidth: 1)
         )
+        .animation(DesignSystem.Animation.smooth, value: showOutput)
+        .animation(DesignSystem.Animation.smooth, value: hasExecuted)
+        .animation(DesignSystem.Animation.smooth, value: isExecuting)
         .onHover { hovering in
             isHovering = hovering
         }

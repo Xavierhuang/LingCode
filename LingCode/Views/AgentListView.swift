@@ -8,13 +8,22 @@
 import SwiftUI
 
 struct AgentListView: View {
+    @ObservedObject var coordinator: AgentCoordinator
     @StateObject private var historyService = AgentHistoryService.shared
-    @State private var selectedAgentId: UUID?
-    @Binding var selectedAgent: AgentHistoryItem?
-    
+    @Binding var selectedChatId: UUID?
+    let onNewAgent: () -> Void
+
+    /// History items to show: hide runs that are currently an agent's active task so the same run doesn't appear twice (agent row + history row).
+    private var historyToShow: [AgentHistoryItem] {
+        let currentTaskIds = Set(coordinator.agents.compactMap { $0.currentTask?.id })
+        return historyService.filteredHistory.filter { item in
+            if item.status != .running { return true }
+            return !currentTaskIds.contains(item.id)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            // Search bar
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
@@ -26,14 +35,10 @@ struct AgentListView: View {
             .cornerRadius(6)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            
+
             Divider()
-            
-            // New Agent button
-            Button(action: {
-                selectedAgent = nil
-                selectedAgentId = nil
-            }) {
+
+            Button(action: onNewAgent) {
                 HStack {
                     Image(systemName: "plus.circle.fill")
                         .foregroundColor(.accentColor)
@@ -45,35 +50,91 @@ struct AgentListView: View {
                 .padding(.vertical, 8)
             }
             .buttonStyle(PlainButtonStyle())
-            .background(selectedAgentId == nil ? Color.accentColor.opacity(0.1) : Color.clear)
-            
+
             Divider()
-            
-            // Agents list
+
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(historyService.filteredHistory) { agent in
-                        AgentListRow(
+                    ForEach(coordinator.agents) { agent in
+                        AgentListAgentRow(
                             agent: agent,
-                            isSelected: selectedAgentId == agent.id,
-                            onSelect: {
-                                selectedAgentId = agent.id
-                                selectedAgent = agent
-                            },
+                            isSelected: selectedChatId == agent.id,
+                            onSelect: { selectedChatId = agent.id }
+                        )
+                    }
+                    ForEach(historyToShow) { item in
+                        AgentListRow(
+                            agent: item,
+                            isSelected: selectedChatId == item.id,
+                            onSelect: { selectedChatId = item.id },
                             onDelete: {
-                                historyService.deleteItem(agent.id)
-                                if selectedAgentId == agent.id {
-                                    selectedAgent = nil
-                                    selectedAgentId = nil
+                                historyService.deleteItem(item.id)
+                                if selectedChatId == item.id {
+                                    selectedChatId = coordinator.agents.first?.id
                                 }
-                            }
+                            },
+                            onMarkAsFailed: (item.status == .running && Date().timeIntervalSince(item.startTime) > 5 * 60) ? { historyService.markAsFailed(item.id) } : nil
                         )
                     }
                 }
+                .frame(maxWidth: .infinity)
             }
         }
-        .frame(minWidth: 250, idealWidth: 300)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+struct AgentListAgentRow: View {
+    @ObservedObject var agent: AgentService
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Group {
+                    if !agent.steps.isEmpty {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 14))
+                    } else if agent.isRunning {
+                        PulseDot(color: .accentColor, size: 8, minScale: 0.75, maxScale: 1.0, minOpacity: 0.5, maxOpacity: 1.0, duration: 1.1)
+                    } else {
+                        Image(systemName: "bubble.left")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 14))
+                    }
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(agent.agentName)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    if !agent.steps.isEmpty {
+                        Text("\(agent.steps.count) step\(agent.steps.count == 1 ? "" : "s")")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    } else if agent.currentTask != nil {
+                        Text(agent.currentTask!.description.prefix(40) + (agent.currentTask!.description.count > 40 ? "..." : ""))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Idle")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -82,6 +143,7 @@ struct AgentListRow: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
+    var onMarkAsFailed: (() -> Void)? = nil
     
     var body: some View {
         Button(action: onSelect) {
@@ -96,9 +158,17 @@ struct AgentListRow: View {
                             .foregroundColor(.primary)
                             .lineLimit(1)
                         
-                        Text(agent.startTime, style: .relative)
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
+                        Group {
+                            if agent.status == .running && Date().timeIntervalSince(agent.startTime) > 5 * 60 {
+                                Text("Stalled")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.orange)
+                            } else {
+                                Text(agent.startTime, style: .relative)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
                     }
                     
                     Spacer()
@@ -129,6 +199,11 @@ struct AgentListRow: View {
         }
         .buttonStyle(PlainButtonStyle())
         .contextMenu {
+            if let onMarkAsFailed = onMarkAsFailed {
+                Button("Mark as failed") {
+                    onMarkAsFailed()
+                }
+            }
             Button("Delete", role: .destructive) {
                 onDelete()
             }
@@ -139,9 +214,13 @@ struct AgentListRow: View {
         Group {
             switch agent.status {
             case .running:
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 16, height: 16)
+                if Date().timeIntervalSince(agent.startTime) > 5 * 60 {
+                    Image(systemName: "clock.badge.exclamationmark")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 14))
+                } else {
+                    PulseDot(color: .accentColor, size: 8, minScale: 0.75, maxScale: 1.0, minOpacity: 0.5, maxOpacity: 1.0, duration: 1.1)
+                }
             case .completed:
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)

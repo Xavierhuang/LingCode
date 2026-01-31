@@ -77,7 +77,7 @@ struct CursorStreamingView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            StreamingHeaderView(viewModel: viewModel, projectURL: editorViewModel.rootFolderURL)
+            StreamingHeaderView(viewModel: viewModel, projectURL: editorViewModel.rootFolderURL, editorViewModel: editorViewModel)
             
             Rectangle()
                 .fill(DesignSystem.Colors.borderSubtle)
@@ -96,10 +96,13 @@ struct CursorStreamingView: View {
                 .frame(height: 1)
             
             // Apply button - shows when generation is complete and there are files to apply
-            // Show button bar if we have files, even if they're still marked as streaming
-            // (they'll be marked as complete when loading finishes)
             if !viewModel.isLoading && !parsedFiles.isEmpty {
                 applyButtonBar
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity.combined(with: .move(edge: .bottom))
+                    ))
+                    .animation(DesignSystem.Animation.smooth, value: parsedFiles.isEmpty)
             }
             
             StreamingInputView(
@@ -351,6 +354,25 @@ struct CursorStreamingView: View {
                     .foregroundColor(DesignSystem.Colors.textSecondary)
             }
             
+            // Pending tool calls (human-in-the-loop) - show during streaming so user can approve/reject
+            if !viewModel.toolCallProgresses.isEmpty {
+                ToolCallProgressListView(
+                    progresses: viewModel.toolCallProgresses,
+                    onApprove: { toolCallId in viewModel.approveToolCall(toolCallId) },
+                    onReject: { toolCallId in viewModel.rejectToolCall(toolCallId) }
+                )
+                .padding(.horizontal, DesignSystem.Spacing.md)
+                .padding(.vertical, DesignSystem.Spacing.sm)
+                .background(
+                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
+                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                )
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .top)),
+                    removal: .opacity.combined(with: .move(edge: .top))
+                ))
+            }
+
             // Show live streaming text so the user can see code as it's written
             if !streamingText.isEmpty {
                 ScrollViewReader { proxy in
@@ -513,9 +535,13 @@ struct CursorStreamingView: View {
                 .padding(.horizontal, DesignSystem.Spacing.md)
                 .padding(.vertical, DesignSystem.Spacing.sm)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
+                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
                 )
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .top)),
+                    removal: .opacity.combined(with: .move(edge: .top))
+                ))
             }
             
             // Terminal commands view

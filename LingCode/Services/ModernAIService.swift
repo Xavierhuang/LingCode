@@ -35,7 +35,8 @@ class ModernAIService: AIProviderProtocol {
         images: [AttachedImage] = [],
         maxTokens: Int? = nil,
         systemPrompt: String? = nil,
-        tools: [AITool]? = nil
+        tools: [AITool]? = nil,
+        forceToolName: String? = nil
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             // Cancel any existing request
@@ -135,6 +136,7 @@ class ModernAIService: AIProviderProtocol {
                                 maxTokens: maxTokens ?? 4096,
                                 systemPrompt: systemPrompt,
                                 tools: tools,
+                                forceToolName: forceToolName,
                                 continuation: continuation
                             )
                         } catch {
@@ -152,6 +154,7 @@ class ModernAIService: AIProviderProtocol {
                                         maxTokens: maxTokens ?? 4096,
                                         systemPrompt: systemPrompt,
                                         tools: tools,
+                                        forceToolName: forceToolName,
                                         continuation: continuation
                                     )
                                 } catch {
@@ -214,6 +217,7 @@ class ModernAIService: AIProviderProtocol {
         maxTokens: Int,
         systemPrompt: String?,
         tools: [AITool]?,
+        forceToolName: String?,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         // FIX: Get model with fallback for future dates
@@ -232,6 +236,7 @@ class ModernAIService: AIProviderProtocol {
                 maxTokens: maxTokens,
                 systemPrompt: systemPrompt,
                 tools: tools,
+                forceToolName: forceToolName,
                 model: modelToUse,
                 continuation: continuation
             )
@@ -251,6 +256,7 @@ class ModernAIService: AIProviderProtocol {
                     maxTokens: maxTokens,
                     systemPrompt: systemPrompt,
                     tools: tools,
+                    forceToolName: forceToolName,
                     model: modelToUse,
                     continuation: continuation
                 )
@@ -328,13 +334,18 @@ class ModernAIService: AIProviderProtocol {
             if let toolUseId = contentBlock["id"] as? String,
                let toolName = contentBlock["name"] as? String {
                 print("🔍 [ModernAIService] Tool use started: \(toolName) (ID: \(toolUseId))")
+                
+                // FIX: Yield a "heartbeat" signal so UI knows a tool is starting
+                // This prevents the UI from appearing frozen during large tool calls
+                continuation.yield("TOOL_STARTING:\(toolName)\n")
+                hasReceivedChunks = true
+                
                 // FIX: If there's a previous tool use, emit it first (shouldn't happen, but be safe)
                 if let previousToolUse = currentToolUse, !previousToolUse.partialJson.isEmpty {
                     print("🟡 [ModernAIService] New tool use started but previous tool use not emitted, emitting now")
                     if let jsonData = previousToolUse.partialJson.data(using: .utf8),
                        let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                        continuation.yield("🔧 TOOL_CALL:\(previousToolUse.id):\(previousToolUse.name):\(encodeToolInput(toolInput))\n")
-                        hasReceivedChunks = true
+                        continuation.yield("TOOL_CALL:\(previousToolUse.id):\(previousToolUse.name):\(encodeToolInput(toolInput))\n")
                     }
                 }
                 // Start tracking this tool use - input will come in deltas
@@ -342,8 +353,7 @@ class ModernAIService: AIProviderProtocol {
                 // Check if input is already complete (non-streaming case)
                 if let toolInput = contentBlock["input"] as? [String: Any], !toolInput.isEmpty {
                     print("🔍 [ModernAIService] Tool input provided in start event")
-                    continuation.yield("🔧 TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
-                    hasReceivedChunks = true
+                    continuation.yield("TOOL_CALL:\(toolUseId):\(toolName):\(encodeToolInput(toolInput))\n")
                     currentToolUse = nil // Clear tracking
                 }
             }
@@ -396,7 +406,7 @@ class ModernAIService: AIProviderProtocol {
                     if let jsonData = toolUse.partialJson.data(using: .utf8),
                        let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
                         print("🟢 [ModernAIService] Emitting tool call: \(toolUse.name)")
-                        continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                        continuation.yield("TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
                         hasReceivedChunks = true
                         currentToolUse = nil
                     } else {
@@ -475,7 +485,7 @@ class ModernAIService: AIProviderProtocol {
                         if let jsonData = fixedJson.data(using: .utf8),
                            let toolInput = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
                             print("🟡 [ModernAIService] Attempting to fix incomplete JSON by adding closing quote/brace")
-                            continuation.yield("🔧 TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
+                            continuation.yield("TOOL_CALL:\(toolUse.id):\(toolUse.name):\(encodeToolInput(toolInput))\n")
                             hasReceivedChunks = true
                         } else {
                             print("🔴 [ModernAIService] Could not fix incomplete JSON - missing required fields or malformed")
@@ -519,6 +529,7 @@ class ModernAIService: AIProviderProtocol {
         maxTokens: Int,
         systemPrompt: String?,
         tools: [AITool]?,
+        forceToolName: String?,
         model: String,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
@@ -583,15 +594,33 @@ class ModernAIService: AIProviderProtocol {
                 
                 return toolDict
             }
+            
+            // CRITICAL: Force Claude to use a tool by setting tool_choice
+            // If forceToolName is specified, force that specific tool (for stuck agents)
+            // Otherwise, use "any" to prevent Claude from responding with just text
+            if let forcedTool = forceToolName {
+                body["tool_choice"] = ["type": "tool", "name": forcedTool]
+                print("!!!! [ModernAIService] FORCING SPECIFIC TOOL: \(forcedTool) !!!!")
+            } else {
+                body["tool_choice"] = ["type": "any"]
+                print("🔧 [ModernAIService] Tool choice set to 'any' - forcing tool use")
+            }
+            print("🔧 [ModernAIService] Tools provided: \(tools.map { $0.name })")
         }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         // DEBUG: Log the actual model being used
         print("🔍 Making API request with model: '\(model)'")
+        print("🔧 Request has tools: \(body["tools"] != nil)")
+        print("🔧 Request has tool_choice: \(body["tool_choice"] != nil)")
+        if let toolChoice = body["tool_choice"] as? [String: Any] {
+            print("🔧 tool_choice value: \(toolChoice)")
+        }
         if let bodyData = request.httpBody,
            let bodyString = String(data: bodyData, encoding: .utf8) {
-            print("📤 Request body: \(bodyString)")
+            // Print first 2000 chars to see if tool_choice is included
+            print("📤 Request body (first 2000 chars): \(bodyString.prefix(2000))")
         }
         
         // Use URLSession.bytes(for:) for modern async streaming
@@ -654,10 +683,13 @@ class ModernAIService: AIProviderProtocol {
                                message.lowercased().contains("codebase_search") ||
                                message.lowercased().contains("analyze") ||
                                message.lowercased().contains("upgrade") ||
-                               message.lowercased().contains("refactor")
+                               message.lowercased().contains("refactor") ||
+                               message.lowercased().contains("tool") ||
+                               message.lowercased().contains("write_file")
         
-        // Use longer timeout for complex operations (15s) vs simple ones (6s)
-        let ttftTimeout: TimeInterval = isComplexOperation ? 15.0 : 6.0
+        // Use longer timeout for complex operations (60s) vs simple ones (30s)
+        // Agent operations need more time as Claude thinks before using tools
+        let ttftTimeout: TimeInterval = isComplexOperation ? 60.0 : 30.0
         
         let startTime = Date()
         var firstChunkTime: Date?

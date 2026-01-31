@@ -10,6 +10,7 @@ import SwiftUI
 struct StreamingHeaderView: View {
     @ObservedObject var viewModel: AIViewModel
     var projectURL: URL? = nil
+    var editorViewModel: EditorViewModel? = nil
 
     private var specPathLabel: String? {
         guard viewModel.projectMode, let url = projectURL else { return nil }
@@ -37,7 +38,7 @@ struct StreamingHeaderView: View {
             Spacer()
             
             // Codebase index status
-            CodebaseIndexStatusView(editorViewModel: nil)
+            CodebaseIndexStatusView(editorViewModel: editorViewModel)
             
             // Performance dashboard button (NEW - Better than Cursor)
             Button(action: {

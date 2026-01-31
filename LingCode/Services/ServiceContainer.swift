@@ -40,5 +40,5 @@ extension ServiceContainer {
     var latency: LatencyOptimizer { LatencyOptimizer.shared }
     var streaming: StreamingUpdateCoordinator { StreamingUpdateCoordinator.shared }
     var editIntent: EditIntentCoordinator { EditIntentCoordinator.shared }
-    var agent: AgentService { AgentService.shared }
+    var agentCoordinator: AgentCoordinator { AgentCoordinator.shared }
 }

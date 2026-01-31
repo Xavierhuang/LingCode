@@ -251,18 +251,18 @@ class ToolExecutionService {
         }()
         
         // Execute command synchronously (for tool use)
-        let (output, exitCode) = terminalService.executeSync(command, workingDirectory: workingDir)
+        let result = terminalService.executeSync(command, workingDirectory: workingDir)
         
-        if exitCode == 0 {
+        if result.exitCode == 0 {
             return ToolResult(
                 toolUseId: toolCall.id,
-                content: "Command output:\n```\n\(output)\n```",
+                content: "Command output:\n```\n\(result.output)\n```",
                 isError: false
             )
         } else {
             return ToolResult(
                 toolUseId: toolCall.id,
-                content: "Command failed (exit code \(exitCode)):\n```\n\(output)\n```",
+                content: "Command failed (exit code \(result.exitCode)):\n```\n\(result.output)\n```",
                 isError: true
             )
         }
@@ -330,7 +330,7 @@ class ToolExecutionService {
         }
         
         do {
-            let contents: [String]
+            var contents: [String]
             if recursive {
                 guard let enumerator = FileManager.default.enumerator(
                     at: dirURL,
@@ -344,11 +344,27 @@ class ToolExecutionService {
                     )
                 }
                 
-                contents = enumerator.compactMap { url -> String? in
-                    guard let url = url as? URL else { return nil }
+                let maxEntries = 2000
+                var count = 0
+                var list: [String] = []
+                while let url = enumerator.nextObject() as? URL, count < maxEntries {
                     let relativePath = url.path.replacingOccurrences(of: dirURL.path + "/", with: "")
                     let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                    return isDir ? "\(relativePath)/" : relativePath
+                    list.append(isDir ? "\(relativePath)/" : relativePath)
+                    count += 1
+                }
+                let truncated = count >= maxEntries
+                contents = list
+                if truncated {
+                    // Return partial result so the step completes instead of spinning forever
+                    let contentsText = contents.isEmpty
+                        ? "Directory is empty"
+                        : contents.joined(separator: "\n") + "\n\n(Truncated to first \(maxEntries) entries. Use a subdirectory or non-recursive read for smaller scope.)"
+                    return ToolResult(
+                        toolUseId: toolCall.id,
+                        content: "Directory contents (\(contents.count) items, truncated):\n```\n\(contentsText)\n```",
+                        isError: false
+                    )
                 }
             } else {
                 contents = try FileManager.default.contentsOfDirectory(atPath: dirURL.path)

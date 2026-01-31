@@ -160,7 +160,9 @@ class TimeTravelUndoService {
         )
     }
     
-    private func restoreFromSnapshot(_ snapshot: UndoSnapshot, in workspaceURL: URL) {
+    /// Restore workspace from snapshot
+    /// Made internal so extensions can use it
+    func restoreFromSnapshot(_ snapshot: UndoSnapshot, in workspaceURL: URL) {
         // Restore ASTs for each file
         for (fileURL, ast) in snapshot.asts {
             // Would restore file content from AST

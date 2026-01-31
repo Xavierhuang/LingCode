@@ -13,34 +13,36 @@ struct CodebaseIndexStatusView: View {
     var editorViewModel: EditorViewModel?
     
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DesignSystem.Spacing.sm) {
             if indexService.isIndexing {
                 ProgressView()
                     .scaleEffect(0.6)
                     .frame(width: 12, height: 12)
                 Text("Indexing...")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } else if let lastIndexDate = indexService.lastIndexDate {
+                    .font(DesignSystem.Typography.caption2)
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
+            } else if indexService.lastIndexDate != nil {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(DesignSystem.Colors.success)
                     .font(.caption)
                 Text("\(indexService.indexedFileCount) files")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(DesignSystem.Typography.caption2)
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
             } else {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
+                    .foregroundColor(DesignSystem.Colors.warning)
                     .font(.caption)
                 Text("Not indexed")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(DesignSystem.Typography.caption2)
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, DesignSystem.Spacing.sm)
+        .padding(.vertical, DesignSystem.Spacing.xs)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-        .cornerRadius(4)
+        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small))
+        .animation(DesignSystem.Animation.smooth, value: indexService.isIndexing)
+        .animation(DesignSystem.Animation.smooth, value: indexService.indexedFileCount)
         .onTapGesture {
             showDetails = true
         }
