@@ -2,7 +2,7 @@
 //  TimeTravelUndoService.swift
 //  LingCode
 //
-//  Time-travel undo with AST snapshots (not text-based)
+//  Time-travel undo with file content snapshots and AST metadata
 //
 
 import Foundation
@@ -10,6 +10,7 @@ import Foundation
 struct UndoSnapshot {
     let id: UUID
     let asts: [URL: [ASTSymbol]]
+    let fileContents: [URL: String]  // Store actual file contents for restoration
     let symbolIndex: [UUID: SymbolReference]
     let timestamp: Date
     let operation: UndoOperation
@@ -26,16 +27,20 @@ struct UndoSnapshot {
     var displayName: String {
         switch operation {
         case .rename(let old, let new):
-            return "⟲ Rename \(old) → \(new)"
+            return "Rename \(old) -> \(new)"
         case .refactor(let description):
-            return "⟲ Refactor: \(description)"
+            return "Refactor: \(description)"
         case .extractFunction(let name):
-            return "⟲ Extract function: \(name)"
+            return "Extract function: \(name)"
         case .multiFileEdit(let count):
-            return "⟲ Multi-file edit (\(count) files)"
+            return "Multi-file edit (\(count) files)"
         case .generic(let description):
-            return "⟲ \(description)"
+            return "\(description)"
         }
+    }
+    
+    var affectedFilesCount: Int {
+        return fileContents.count
     }
 }
 
@@ -56,30 +61,30 @@ class TimeTravelUndoService {
         in workspaceURL: URL
     ) -> UndoSnapshot {
         var asts: [URL: [ASTSymbol]] = [:]
-        // symbolIndex would be populated from actual symbol references
-        // For now, use empty dictionary as placeholder
+        var fileContents: [URL: String] = [:]
         let symbolIndex: [UUID: SymbolReference] = [:]
         
-        // Capture AST for each affected file
+        // Capture AST and file content for each affected file
         for fileURL in affectedFiles {
+            // Get AST symbols
             let ast = ASTIndex.shared.getSymbolsSync(for: fileURL)
             asts[fileURL] = ast
+            
+            // Store actual file content for restoration
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                fileContents[fileURL] = content
+            }
         }
         
         let snapshot = UndoSnapshot(
             id: UUID(),
             asts: asts,
+            fileContents: fileContents,
             symbolIndex: symbolIndex,
             timestamp: Date(),
             operation: operation,
             compressed: false
         )
-        
-        // Compress in background
-        compressionQueue.async {
-            _ = self.compressSnapshot(snapshot)
-            // Would store compressed version
-        }
         
         // Add to undo stack
         undoStack.append(snapshot)
@@ -161,35 +166,87 @@ class TimeTravelUndoService {
     }
     
     /// Restore workspace from snapshot
-    /// Made internal so extensions can use it
     func restoreFromSnapshot(_ snapshot: UndoSnapshot, in workspaceURL: URL) {
-        // Restore ASTs for each file
-        for (fileURL, ast) in snapshot.asts {
-            // Would restore file content from AST
-            // For now, placeholder
-            restoreFileFromAST(fileURL: fileURL, ast: ast, in: workspaceURL)
+        // Restore file contents
+        for (fileURL, content) in snapshot.fileContents {
+            restoreFile(fileURL: fileURL, content: content)
         }
         
-        // Restore symbol index
-        // Would update reference index
+        // Refresh AST index for restored files using reparse
+        for fileURL in snapshot.fileContents.keys {
+            Task {
+                // Trigger reparse by invalidating and refetching
+                await ASTIndex.shared.reparse(fileURL: fileURL, editRange: 0..<0, newText: "")
+            }
+        }
     }
     
-    private func restoreFileFromAST(fileURL: URL, ast: [ASTSymbol], in workspaceURL: URL) {
-        // Placeholder - would reconstruct file from AST
-        // This is complex and would require full AST-to-text conversion
+    private func restoreFile(fileURL: URL, content: String) {
+        do {
+            // Create backup before restore
+            let backupURL = fileURL.appendingPathExtension("lingcode_backup")
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try? FileManager.default.copyItem(at: fileURL, to: backupURL)
+            }
+            
+            // Restore content
+            try content.write(to: fileURL, atomically: true, encoding: .utf8)
+            
+            // Remove backup on success
+            try? FileManager.default.removeItem(at: backupURL)
+            
+            // Notify editors of change
+            NotificationCenter.default.post(
+                name: NSNotification.Name("TimeTravelFileRestored"),
+                object: nil,
+                userInfo: ["fileURL": fileURL]
+            )
+        } catch {
+            print("Failed to restore file \(fileURL.lastPathComponent): \(error)")
+        }
     }
     
     private func getModifiedFiles(in workspaceURL: URL) -> [URL] {
-        // Would track modified files
-        // For now, placeholder
-        return []
+        // Get files from undo stack that were modified
+        guard let lastSnapshot = undoStack.last else { return [] }
+        return Array(lastSnapshot.fileContents.keys)
     }
     
-    private func compressSnapshot(_ snapshot: UndoSnapshot) -> UndoSnapshot {
-        // Compress ASTs using diff-based compression
-        // Store only changes, not full ASTs
-        // For now, return as-is
-        return snapshot
+    /// Clear all undo/redo history
+    func clearHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+    }
+    
+    /// Get snapshot by ID
+    func getSnapshot(id: UUID) -> UndoSnapshot? {
+        return undoStack.first { $0.id == id } ?? redoStack.first { $0.id == id }
+    }
+    
+    /// Jump to specific snapshot (time travel)
+    func jumpToSnapshot(_ snapshotId: UUID, in workspaceURL: URL) -> Bool {
+        guard let snapshot = getSnapshot(id: snapshotId) else { return false }
+        
+        // Create snapshot of current state
+        let currentFiles = Array(Set(undoStack.flatMap { $0.fileContents.keys }))
+        let currentSnapshot = createSnapshot(
+            operation: .generic(description: "Before time travel"),
+            affectedFiles: currentFiles,
+            in: workspaceURL
+        )
+        
+        // Find position in undo stack
+        if let undoIndex = undoStack.firstIndex(where: { $0.id == snapshotId }) {
+            // Move all snapshots after this to redo
+            let snapshotsToRedo = Array(undoStack[(undoIndex + 1)...])
+            redoStack.append(contentsOf: snapshotsToRedo.reversed())
+            undoStack.removeLast(undoStack.count - undoIndex - 1)
+        }
+        
+        // Restore the target snapshot
+        restoreFromSnapshot(snapshot, in: workspaceURL)
+        
+        return true
     }
 }
 

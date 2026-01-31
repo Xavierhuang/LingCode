@@ -164,12 +164,6 @@ class PerformanceOptimizer {
     private let tokenCountCache = LRUCache<URL, Int>(maxSize: 100)
     private let symbolTableCache = LRUCache<URL, [ASTSymbol]>(maxSize: 50)
     
-    // MARK: - Speculative Context
-    
-    private var speculativeContext: String? = nil
-    private var speculativeContextTask: Task<Void, Never>? = nil
-    private var speculativeContextStartTime: Date? = nil
-    
     // MARK: - Request Tracking
     
     private var currentRequest: URLSessionTask? = nil
@@ -249,9 +243,8 @@ class PerformanceOptimizer {
         }
     }
     
-    // MARK: - Speculative Context
+    // MARK: - Speculative Context (delegated to ContextOrchestrator)
     
-    /// Start building context speculatively (on pause, cursor stop, selection change)
     func startSpeculativeContext(
         activeFile: URL?,
         selectedText: String?,
@@ -259,79 +252,23 @@ class PerformanceOptimizer {
         query: String?,
         onComplete: (() -> Void)? = nil
     ) {
-        speculativeContextTask?.cancel()
-        speculativeContextStartTime = Date()
-        
-        speculativeContextTask = Task {
-            let context = await buildContextSpeculatively(
+        Task { @MainActor in
+            ContextOrchestrator.shared.startSpeculativeContext(
                 activeFile: activeFile,
                 selectedText: selectedText,
                 projectURL: projectURL,
-                query: query
+                query: query,
+                onComplete: onComplete
             )
-            
-            if !Task.isCancelled {
-                await MainActor.run {
-                    self.speculativeContext = context
-                    self.speculativeContextStartTime = nil
-                    onComplete?()
-                }
-            }
         }
     }
     
-    private func buildContextSpeculatively(
-        activeFile: URL?,
-        selectedText: String?,
-        projectURL: URL?,
-        query: String?
-    ) async -> String {
-        let context = await ContextRankingService.shared.buildContext(
-            activeFile: activeFile,
-            selectedRange: selectedText,
-            diagnostics: nil,
-            projectURL: projectURL,
-            query: query ?? "",
-            tokenLimit: 8000
-        )
-        return context
-    }
-    
-    /// Get speculative context if available
-    /// Waits briefly for in-progress speculation if fresh enough
     func getSpeculativeContext() -> String? {
-        if let context = speculativeContext {
-            return context
-        }
-        
-        if let task = speculativeContextTask,
-           !task.isCancelled,
-           let startTime = speculativeContextStartTime,
-           Date().timeIntervalSince(startTime) < 1.5 {
-            
-            let startWait = Date()
-            while Date().timeIntervalSince(startWait) < 0.3 {
-                if let context = speculativeContext {
-                    return context
-                }
-                if task.isCancelled {
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            
-            if let context = speculativeContext {
-                return context
-            }
-        }
-        
-        return speculativeContext
+        ContextOrchestrator.shared.getSpeculativeContext()
     }
     
-    /// Clear speculative context
     func clearSpeculativeContext() {
-        speculativeContext = nil
-        speculativeContextTask?.cancel()
+        ContextOrchestrator.shared.clearSpeculativeContext()
     }
     
     // MARK: - Stream Parsing

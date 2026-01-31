@@ -100,7 +100,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
     // MARK: - Dependencies
     
     private let terminalService = TerminalExecutionService.shared
-    private let editIntentCoordinator = EditIntentCoordinator.shared
+    private let editSessionOrchestrator = EditSessionOrchestrator.shared
     
     // MARK: - Callbacks
     
@@ -247,7 +247,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
         updateTimer = nil
         updateTick = 0
         agentState = .idle
-        editIntentCoordinator.reset()
+        editSessionOrchestrator.reset()
     }
     
     /// Safe state update methods (ARCHITECTURE: Views should use these instead of direct mutation)
@@ -363,7 +363,7 @@ final class StreamingUpdateCoordinator: ObservableObject {
         isParsing = true
         lastParsedContentHash = contentHash
         
-        // Parse and validate using EditIntentCoordinator (ARCHITECTURE: All parsing/validation outside views)
+        // Parse and validate using EditSessionOrchestrator (ARCHITECTURE: All parsing/validation outside views)
         // Capture context values before creating Task to avoid concurrent access
         let isLoading = context.isLoading
         let projectURL = context.projectURL
@@ -389,10 +389,10 @@ final class StreamingUpdateCoordinator: ObservableObject {
                 return
             }
             
-            // ARCHITECTURE: Use EditIntentCoordinator for all parsing/validation
+            // ARCHITECTURE: Use EditSessionOrchestrator for all parsing/validation
             // This ensures state mutations happen asynchronously AFTER view updates
             // Note: httpStatus is not available in streaming context, will be checked at completion
-            let editResult = await self.editIntentCoordinator.parseAndValidate(
+            let editResult = await self.editSessionOrchestrator.parseAndValidate(
                 content: content,
                 userPrompt: userPrompt,
                 isLoading: isLoading,

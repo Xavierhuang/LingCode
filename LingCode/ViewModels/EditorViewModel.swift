@@ -434,17 +434,13 @@ class EditorViewModel: ObservableObject {
     // MARK: - Context for AI
     
     func getContextForAI(query: String? = nil) async -> String? {
-        // Use new Cursor-style context ranking with token budget optimization
-        let rankingService = ContextRankingService.shared
-        
         let activeFile = editorState.activeDocument?.filePath
         let selectedRange = editorState.selectedText.isEmpty ? nil : editorState.selectedText
-        let diagnostics: [String]? = nil // TODO: Integrate with diagnostics system
+        let diagnostics: [String]? = nil
         
-        // Start speculative context building if not already done
         if let activeFile = activeFile {
             Task {
-                LatencyOptimizer.shared.startSpeculativeContext(
+                ContextOrchestrator.shared.startSpeculativeContext(
                     activeFile: activeFile,
                     selectedText: selectedRange,
                     projectURL: rootFolderURL,
@@ -452,13 +448,10 @@ class EditorViewModel: ObservableObject {
                 )
             }
         }
-        
-        // Try to use speculative context first
-        if let speculative = LatencyOptimizer.shared.getSpeculativeContext() {
+        if let speculative = ContextOrchestrator.shared.getSpeculativeContext() {
             return speculative
         }
-        
-        let rankedContext = await rankingService.buildContext(
+        let rankedContext = await ContextOrchestrator.shared.buildContext(
             activeFile: activeFile,
             selectedRange: selectedRange,
             diagnostics: diagnostics,

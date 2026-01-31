@@ -12,28 +12,43 @@ struct StreamingHeaderView: View {
     var projectURL: URL? = nil
     var editorViewModel: EditorViewModel? = nil
 
-    private var specPathLabel: String? {
+    private var rulesFileName: String? {
         guard viewModel.projectMode, let url = projectURL else { return nil }
-        let raw = SpecPromptAssemblyService.loadWorkspaceRules(workspaceRootURL: url)
-        let hasRules = raw.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
-        return hasRules ? "Workspace rules applied" : "Using project prompt rules"
+        return SpecPromptAssemblyService.loadedRulesFileName(workspaceRootURL: url)
+    }
+
+    private var isLocalMode: Bool {
+        LocalOnlyService.shared.isLocalModeEnabled
     }
 
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.md) {
-            // Icon only (no text to avoid layout issues)
             Image(systemName: "sparkles")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundColor(DesignSystem.Colors.accent)
                 .help("AI Assistant")
 
-            if let label = specPathLabel {
-                Text(label)
+            if let name = rulesFileName {
+                Text(name)
                     .font(DesignSystem.Typography.caption1)
                     .foregroundColor(DesignSystem.Colors.textSecondary)
                     .lineLimit(1)
-                    .help("Deterministic prompt: core + WORKSPACE.md + task template")
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(DesignSystem.Colors.secondaryBackground.opacity(0.8))
+                    .cornerRadius(4)
+                    .help("Workspace rules loaded from this file")
             }
+
+            Text(isLocalMode ? "Local" : "Cloud")
+                .font(DesignSystem.Typography.caption1)
+                .foregroundColor(isLocalMode ? DesignSystem.Colors.success : DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background((isLocalMode ? DesignSystem.Colors.success : Color.clear).opacity(0.15))
+                .cornerRadius(4)
+                .help(isLocalMode ? "Using local model (Ollama)" : "Using cloud API")
             
             Spacer()
             

@@ -247,6 +247,10 @@ struct AIChatView: View {
             displayName = "@terminal"
         case .web:
             displayName = "@web"
+        case .docs:
+            displayName = "@docs"
+        case .notepad:
+            displayName = "@notepad"
         }
         
         let mention = Mention(type: type, value: value, displayName: displayName)
@@ -288,14 +292,14 @@ struct AIChatView: View {
     }
     
     private func sendMessageWithContext() {
-        // FIX: Build context asynchronously
+        // Build context asynchronously with @docs and @web support
         Task { @MainActor in
             // Get user's message to find relevant files
             let userQuery = viewModel.currentInput
             var context = await editorViewModel.getContextForAI(query: userQuery) ?? ""
             
-            // Build context from mentions
-            let mentionContext = MentionParser.shared.buildContextFromMentions(
+            // Build context from mentions (async for @docs and @web)
+            let mentionContext = await MentionParser.shared.buildContextFromMentionsAsync(
                 activeMentions,
                 projectURL: editorViewModel.rootFolderURL,
                 selectedText: editorViewModel.editorState.selectedText,

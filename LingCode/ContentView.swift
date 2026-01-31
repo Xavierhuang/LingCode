@@ -65,7 +65,12 @@ struct ContentView: View {
             
             // Main content area
             VStack(spacing: 0) {
-                BreadcrumbView(filePath: viewModel.editorState.activeDocument?.filePath)
+                BreadcrumbView(
+                    filePath: viewModel.editorState.activeDocument?.filePath,
+                    content: viewModel.editorState.activeDocument?.content,
+                    language: viewModel.editorState.activeDocument?.language,
+                    cursorLine: cursorLine(from: viewModel.editorState.cursorPosition, in: viewModel.editorState.activeDocument?.content ?? "")
+                )
                 
                 GeometryReader { geometry in
                     HStack(spacing: 0) {
@@ -513,7 +518,7 @@ struct ContentView: View {
             GlobalSearchView(viewModel: viewModel, isPresented: .constant(true))
             
         case .git:
-            GitPanelView(viewModel: viewModel)
+            GitPanelView(editorViewModel: viewModel)
             
         case .outline:
             SymbolOutlineView(viewModel: viewModel)
@@ -700,6 +705,12 @@ struct ContentView: View {
             )
             showReferences = true
         }
+    }
+    
+    private func cursorLine(from position: Int, in content: String) -> Int? {
+        guard position > 0, !content.isEmpty else { return 1 }
+        let prefix = content.prefix(min(position, content.count))
+        return prefix.components(separatedBy: .newlines).count
     }
 }
 

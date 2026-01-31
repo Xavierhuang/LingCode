@@ -2,449 +2,500 @@
 //  GitPanelView.swift
 //  LingCode
 //
-//  Created by Weijia Huang on 11/23/25.
+//  Git panel with commit, push, pull, and branch management
 //
 
 import SwiftUI
 
 struct GitPanelView: View {
-    @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var gitService = GitService.shared
+    @ObservedObject var editorViewModel: EditorViewModel
     @State private var commitMessage: String = ""
+    @State private var showBranchPicker: Bool = false
+    @State private var showCreateBranch: Bool = false
+    @State private var newBranchName: String = ""
     @State private var selectedFiles: Set<String> = []
     @State private var isCommitting: Bool = false
     @State private var isPushing: Bool = false
     @State private var isPulling: Bool = false
-    @State private var statusMessage: String?
-    @State private var branches: [String] = []
-    @State private var currentBranch: String = ""
-    @State private var showBranchPicker: Bool = false
+    @State private var showError: Bool = false
+    @State private var errorMessage: String = ""
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "arrow.triangle.branch")
-                Text("Source Control")
-                    .font(.headline)
-                Spacer()
-                
-                Button(action: refresh) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
+            // Header with branch info
+            headerView
             
             Divider()
             
-            // Branch selector
-            HStack {
-                Image(systemName: "arrow.triangle.branch")
-                    .foregroundColor(.secondary)
-                
-                Button(action: { showBranchPicker.toggle() }) {
-                    HStack {
-                        Text(currentBranch.isEmpty ? "No branch" : currentBranch)
-                            .font(.system(.body, design: .monospaced))
-                        Image(systemName: "chevron.down")
-                            .font(.caption)
-                    }
-                }
-                .buttonStyle(PlainButtonStyle())
-                .popover(isPresented: $showBranchPicker) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(branches, id: \.self) { branch in
-                            Button(action: {
-                                checkoutBranch(branch)
-                                showBranchPicker = false
-                            }) {
-                                HStack {
-                                    if branch == currentBranch {
-                                        Image(systemName: "checkmark")
-                                    }
-                                    Text(branch)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        }
-                    }
-                    .frame(minWidth: 200)
-                    .padding(.vertical, 8)
-                }
-                
-                Spacer()
-                
-                // Pull/Push buttons
-                HStack(spacing: 8) {
-                    Button(action: pull) {
-                        if isPulling {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        } else {
-                            Image(systemName: "arrow.down.circle")
-                        }
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Pull")
-                    .disabled(isPulling)
-                    
-                    Button(action: push) {
-                        if isPushing {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        } else {
-                            Image(systemName: "arrow.up.circle")
-                        }
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Push")
-                    .disabled(isPushing)
-                }
-            }
-            .padding()
-            
-            Divider()
-            
-            // Changed files
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    let status = getGitStatus()
-                    
-                    if status.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "checkmark.circle")
-                                .font(.system(size: 32))
-                                .foregroundColor(.green)
-                            Text("No changes")
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                    } else {
-                        ForEach(status, id: \.path) { file in
-                            GitFileRowView(
-                                file: file,
-                                isSelected: selectedFiles.contains(file.path),
-                                onToggle: {
-                                    if selectedFiles.contains(file.path) {
-                                        selectedFiles.remove(file.path)
-                                    } else {
-                                        selectedFiles.insert(file.path)
-                                    }
-                                },
-                                onOpen: {
-                                    openFile(file.path)
-                                }
-                            )
-                        }
-                    }
-                }
-            }
+            // Changes list
+            changesListView
             
             Divider()
             
             // Commit section
-            VStack(spacing: 8) {
-                TextField("Commit message", text: $commitMessage, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(3...5)
-                
-                HStack {
-                    Button(action: selectAll) {
-                        Text("Select All")
+            commitSection
+            
+            Divider()
+            
+            // Actions bar
+            actionsBar
+        }
+        .onAppear {
+            if let url = editorViewModel.rootFolderURL {
+                gitService.setRepository(url)
+            }
+        }
+        .alert("Git Error", isPresented: $showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
+        .sheet(isPresented: $showBranchPicker) {
+            branchPickerSheet
+        }
+        .sheet(isPresented: $showCreateBranch) {
+            createBranchSheet
+        }
+    }
+    
+    // MARK: - Header
+    
+    private var headerView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.triangle.branch")
+                .foregroundColor(.orange)
+            
+            // Branch button
+            Button(action: { showBranchPicker = true }) {
+                HStack(spacing: 4) {
+                    Text(gitService.currentBranch.isEmpty ? "No branch" : gitService.currentBranch)
+                        .fontWeight(.medium)
+                    Image(systemName: "chevron.down")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            Spacer()
+            
+            // Ahead/Behind indicator
+            if gitService.aheadBehind.ahead > 0 || gitService.aheadBehind.behind > 0 {
+                HStack(spacing: 8) {
+                    if gitService.aheadBehind.ahead > 0 {
+                        Label("\(gitService.aheadBehind.ahead)", systemImage: "arrow.up")
+                            .font(.caption)
+                            .foregroundColor(.green)
                     }
-                    .buttonStyle(.bordered)
-                    
-                    Spacer()
-                    
-                    Button(action: commit) {
-                        if isCommitting {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        } else {
-                            Text("Commit \(selectedFiles.isEmpty ? "" : "(\(selectedFiles.count))")")
+                    if gitService.aheadBehind.behind > 0 {
+                        Label("\(gitService.aheadBehind.behind)", systemImage: "arrow.down")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+            
+            // Refresh button
+            Button(action: { gitService.refreshStatus() }) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(gitService.isLoading)
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+    
+    // MARK: - Changes List
+    
+    private var changesListView: some View {
+        List {
+            if gitService.fileStatuses.isEmpty {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("No changes")
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 8)
+            } else {
+                // Staged changes
+                let stagedFiles = gitService.fileStatuses.filter { $0.isStaged }
+                if !stagedFiles.isEmpty {
+                    Section("Staged Changes") {
+                        ForEach(stagedFiles) { file in
+                            GitFileRow(file: file, onStage: { unstage(file) }, staged: true)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(commitMessage.isEmpty || selectedFiles.isEmpty || isCommitting)
                 }
+                
+                // Unstaged changes
+                let unstagedFiles = gitService.fileStatuses.filter { !$0.isStaged }
+                if !unstagedFiles.isEmpty {
+                    Section("Changes") {
+                        ForEach(unstagedFiles) { file in
+                            GitFileRow(file: file, onStage: { stage(file) }, staged: false)
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(SidebarListStyle())
+    }
+    
+    // MARK: - Commit Section
+    
+    private var commitSection: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Commit Message")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                
+                // Stage all button
+                if !gitService.fileStatuses.filter({ !$0.isStaged }).isEmpty {
+                    Button("Stage All") {
+                        stageAll()
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                }
+            }
+            
+            TextEditor(text: $commitMessage)
+                .font(.system(.body, design: .monospaced))
+                .frame(height: 60)
+                .padding(4)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(6)
+            
+            Button(action: commit) {
+                HStack {
+                    if isCommitting {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "checkmark.circle")
+                    }
+                    Text("Commit")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(commitMessage.isEmpty || gitService.fileStatuses.filter({ $0.isStaged }).isEmpty || isCommitting)
+        }
+        .padding(12)
+    }
+    
+    // MARK: - Actions Bar
+    
+    private var actionsBar: some View {
+        HStack(spacing: 12) {
+            // Fetch
+            Button(action: fetch) {
+                Label("Fetch", systemImage: "arrow.down.circle")
+            }
+            .buttonStyle(.bordered)
+            
+            // Pull
+            Button(action: pull) {
+                HStack(spacing: 4) {
+                    if isPulling {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "arrow.down")
+                    }
+                    Text("Pull")
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(isPulling)
+            
+            // Push
+            Button(action: push) {
+                HStack(spacing: 4) {
+                    if isPushing {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "arrow.up")
+                    }
+                    Text("Push")
+                    if gitService.aheadBehind.ahead > 0 {
+                        Text("(\(gitService.aheadBehind.ahead))")
+                            .font(.caption)
+                    }
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isPushing || gitService.aheadBehind.ahead == 0)
+            
+            Spacer()
+            
+            // More actions menu
+            Menu {
+                Button("New Branch...") { showCreateBranch = true }
+                Button("Stash Changes") { stash() }
+                Button("Pop Stash") { stashPop() }
+                Divider()
+                Button("Discard All Changes", role: .destructive) { discardAll() }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(BorderlessButtonMenuStyle())
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+    
+    // MARK: - Branch Picker Sheet
+    
+    private var branchPickerSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Switch Branch")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { showBranchPicker = false }
             }
             .padding()
             
-            // Status message
-            if let message = statusMessage {
-                HStack {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Spacer()
+            Divider()
+            
+            List {
+                Section("Local Branches") {
+                    ForEach(gitService.branches.filter { !$0.isRemote }) { branch in
+                        Button(action: { checkout(branch.name) }) {
+                            HStack {
+                                if branch.isCurrent {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.accentColor)
+                                }
+                                Text(branch.name)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
                 }
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+                
+                Section("Remote Branches") {
+                    ForEach(gitService.branches.filter { $0.isRemote }) { branch in
+                        Button(action: { checkout(branch.name) }) {
+                            HStack {
+                                Text(branch.name)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
             }
         }
+        .frame(width: 300, height: 400)
+    }
+    
+    // MARK: - Create Branch Sheet
+    
+    private var createBranchSheet: some View {
+        VStack(spacing: 16) {
+            Text("Create New Branch")
+                .font(.headline)
+            
+            TextField("Branch name", text: $newBranchName)
+                .textFieldStyle(.roundedBorder)
+            
+            HStack {
+                Button("Cancel") {
+                    newBranchName = ""
+                    showCreateBranch = false
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button("Create") {
+                    createBranch()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(newBranchName.isEmpty)
+            }
+        }
+        .padding(20)
         .frame(width: 300)
-        .onAppear {
-            refresh()
-        }
     }
     
-    private func getGitStatus() -> [GitFileStatus] {
-        guard let rootURL = viewModel.rootFolderURL else { return [] }
-        return GitService.shared.getStatus(for: rootURL)
+    // MARK: - Actions
+    
+    private func stage(_ file: GitFileStatus) {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.stage(files: [file.path], in: url)
+        handleResult(result)
     }
     
-    private func refresh() {
-        loadBranches()
-        loadCurrentBranch()
+    private func unstage(_ file: GitFileStatus) {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.unstage(files: [file.path], in: url)
+        handleResult(result)
     }
     
-    private func loadBranches() {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["branch", "--list"]
-        process.currentDirectoryURL = rootURL
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                branches = output
-                    .components(separatedBy: .newlines)
-                    .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "* ", with: "") }
-                    .filter { !$0.isEmpty }
-            }
-        } catch {}
-    }
-    
-    private func loadCurrentBranch() {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["branch", "--show-current"]
-        process.currentDirectoryURL = rootURL
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                currentBranch = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        } catch {}
-    }
-    
-    private func checkoutBranch(_ branch: String) {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["checkout", branch]
-        process.currentDirectoryURL = rootURL
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            currentBranch = branch
-            statusMessage = "Switched to branch '\(branch)'"
-        } catch {
-            statusMessage = "Error: \(error.localizedDescription)"
-        }
+    private func stageAll() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.stageAll(in: url)
+        handleResult(result)
     }
     
     private func commit() {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
+        guard let url = editorViewModel.rootFolderURL else { return }
         isCommitting = true
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Stage selected files
-            for file in selectedFiles {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                process.arguments = ["add", file]
-                process.currentDirectoryURL = rootURL
-                try? process.run()
-                process.waitUntilExit()
-            }
-            
-            // Commit
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["commit", "-m", commitMessage]
-            process.currentDirectoryURL = rootURL
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                DispatchQueue.main.async {
-                    isCommitting = false
-                    if process.terminationStatus == 0 {
-                        statusMessage = "Committed successfully"
-                        commitMessage = ""
-                        selectedFiles.removeAll()
-                    } else {
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        let output = String(data: data, encoding: .utf8) ?? "Unknown error"
-                        statusMessage = "Error: \(output)"
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    isCommitting = false
-                    statusMessage = "Error: \(error.localizedDescription)"
+        Task {
+            let result = gitService.commit(message: commitMessage, in: url)
+            await MainActor.run {
+                isCommitting = false
+                if result.success {
+                    commitMessage = ""
+                } else {
+                    handleResult(result)
                 }
             }
         }
     }
     
     private func push() {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
+        guard let url = editorViewModel.rootFolderURL else { return }
         isPushing = true
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["push"]
-            process.currentDirectoryURL = rootURL
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                DispatchQueue.main.async {
-                    isPushing = false
-                    statusMessage = process.terminationStatus == 0 ? "Pushed successfully" : "Push failed"
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    isPushing = false
-                    statusMessage = "Error: \(error.localizedDescription)"
-                }
+        Task {
+            let result = gitService.push(in: url)
+            await MainActor.run {
+                isPushing = false
+                handleResult(result)
             }
         }
     }
     
     private func pull() {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        
+        guard let url = editorViewModel.rootFolderURL else { return }
         isPulling = true
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["pull"]
-            process.currentDirectoryURL = rootURL
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                DispatchQueue.main.async {
-                    isPulling = false
-                    statusMessage = process.terminationStatus == 0 ? "Pulled successfully" : "Pull failed"
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    isPulling = false
-                    statusMessage = "Error: \(error.localizedDescription)"
-                }
+        Task {
+            let result = gitService.pull(in: url)
+            await MainActor.run {
+                isPulling = false
+                handleResult(result)
             }
         }
     }
     
-    private func selectAll() {
-        let status = getGitStatus()
-        selectedFiles = Set(status.map { $0.path })
+    private func fetch() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        _ = gitService.fetch(in: url)
     }
     
-    private func openFile(_ path: String) {
-        guard let rootURL = viewModel.rootFolderURL else { return }
-        let fileURL = rootURL.appendingPathComponent(path)
-        viewModel.openFile(at: fileURL)
+    private func checkout(_ branch: String) {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.checkoutBranch(name: branch, in: url)
+        handleResult(result)
+        showBranchPicker = false
+    }
+    
+    private func createBranch() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.createBranch(name: newBranchName, in: url)
+        handleResult(result)
+        if result.success {
+            newBranchName = ""
+            showCreateBranch = false
+        }
+    }
+    
+    private func stash() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.stash(in: url)
+        handleResult(result)
+    }
+    
+    private func stashPop() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.stashPop(in: url)
+        handleResult(result)
+    }
+    
+    private func discardAll() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        let result = gitService.discardAllChanges(in: url)
+        handleResult(result)
+    }
+    
+    private func handleResult(_ result: GitResult) {
+        gitService.refreshStatus()
+        if !result.success, let error = result.error {
+            errorMessage = error
+            showError = true
+        }
     }
 }
 
-struct GitFileRowView: View {
+// MARK: - Git File Row
+
+struct GitFileRow: View {
     let file: GitFileStatus
-    let isSelected: Bool
-    let onToggle: () -> Void
-    let onOpen: () -> Void
+    let onStage: () -> Void
+    let staged: Bool
     
     var body: some View {
-        HStack {
-            Button(action: onToggle) {
-                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                    .foregroundColor(isSelected ? .accentColor : .secondary)
-            }
-            .buttonStyle(PlainButtonStyle())
-            
+        HStack(spacing: 8) {
+            // Status indicator
             statusIcon
                 .frame(width: 16)
             
-            Button(action: onOpen) {
-                Text(file.path)
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .buttonStyle(PlainButtonStyle())
+            // File path
+            Text(file.path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
             
             Spacer()
+            
+            // Stage/Unstage button
+            Button(action: onStage) {
+                Image(systemName: staged ? "minus.circle" : "plus.circle")
+                    .foregroundColor(staged ? .orange : .green)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .help(staged ? "Unstage" : "Stage")
         }
-        .padding(.horizontal)
-        .padding(.vertical, 4)
-        .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+        .padding(.vertical, 2)
     }
     
     @ViewBuilder
-    var statusIcon: some View {
+    private var statusIcon: some View {
         switch file.status {
         case .modified:
-            Text("M")
-                .font(.caption)
-                .fontWeight(.bold)
+            Image(systemName: "pencil.circle.fill")
                 .foregroundColor(.orange)
         case .added:
-            Text("A")
-                .font(.caption)
-                .fontWeight(.bold)
+            Image(systemName: "plus.circle.fill")
                 .foregroundColor(.green)
         case .deleted:
-            Text("D")
-                .font(.caption)
-                .fontWeight(.bold)
+            Image(systemName: "minus.circle.fill")
                 .foregroundColor(.red)
         case .untracked:
-            Text("U")
-                .font(.caption)
-                .fontWeight(.bold)
+            Image(systemName: "questionmark.circle.fill")
                 .foregroundColor(.gray)
-        case .clean:
-            Text("")
+        case .renamed:
+            Image(systemName: "arrow.right.circle.fill")
+                .foregroundColor(.blue)
+        default:
+            Image(systemName: "circle")
+                .foregroundColor(.secondary)
         }
     }
 }
 
+#Preview {
+    GitPanelView(editorViewModel: EditorViewModel())
+        .frame(width: 350, height: 500)
+}

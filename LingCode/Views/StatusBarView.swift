@@ -52,6 +52,8 @@ struct StatusBarView: View {
             
             Spacer()
 
+            RunningCommandsIndicator()
+
             CodebaseIndexStatusView(editorViewModel: editorViewModel)
                 .animation(DesignSystem.Animation.smooth, value: editorState.activeDocument?.filePath)
 
@@ -92,6 +94,46 @@ struct StatusBarView: View {
             return text.distance(from: lineStart, to: beforeCursor.endIndex) + 1
         }
         return position + 1
+    }
+}
+
+// MARK: - Running commands / background jobs indicator
+/// Shows when a terminal command or background job is running so users know validation may be delayed.
+private struct RunningCommandsIndicator: View {
+    @ObservedObject private var terminal = TerminalExecutionService.shared
+
+    var body: some View {
+        Group {
+            if terminal.isExecuting {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 10, height: 10)
+                    Text("Command running")
+                        .font(DesignSystem.Typography.caption2)
+                        .foregroundColor(DesignSystem.Colors.textSecondary)
+                }
+                .padding(.horizontal, DesignSystem.Spacing.sm)
+                .padding(.vertical, 2)
+                .background(DesignSystem.Colors.surface)
+                .cornerRadius(DesignSystem.CornerRadius.small)
+                .help("A terminal command is running. Validation may be blocked until it finishes.")
+            } else if terminal.isBackgroundRunning {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(DesignSystem.Colors.textTertiary)
+                        .frame(width: 5, height: 5)
+                    Text("1 background job")
+                        .font(DesignSystem.Typography.caption2)
+                        .foregroundColor(DesignSystem.Colors.textSecondary)
+                }
+                .padding(.horizontal, DesignSystem.Spacing.sm)
+                .padding(.vertical, 2)
+                .background(DesignSystem.Colors.surface)
+                .cornerRadius(DesignSystem.CornerRadius.small)
+                .help("A background command is running. Validation may be delayed.")
+            }
+        }
     }
 }
 

@@ -2,7 +2,8 @@
 //  SyntaxHighlighter.swift
 //  LingCode
 //
-//  Created by Weijia Huang on 1/11/26.
+//  High-frequency UI: Tree-sitter for supported languages (incremental, fast for large files).
+//  SwiftSyntax is reserved for deep refactors and AICodeReviewService only.
 //
 
 import Foundation
@@ -42,8 +43,12 @@ struct SyntaxHighlighter {
         
         guard let languageString = language,
               let lang = Language(rawValue: languageString.lowercased()) else {
-            // No language specified, return with default foreground color only
             return attributedString
+        }
+        
+        let normalized = languageString.lowercased()
+        if normalized != "swift", TreeSitterUI.isLanguageSupported(normalized) {
+            return highlightWithTreeSitter(text, language: normalized, theme: theme)
         }
         
         switch lang {
@@ -177,6 +182,26 @@ struct SyntaxHighlighter {
         
         // Highlight booleans and null using theme keyword color
         highlightPattern(attributedString, pattern: "\\b(true|false|null)\\b", color: theme.keyword)
+    }
+    
+    private static func highlightWithTreeSitter(_ text: String, language: String, theme: CodeTheme) -> NSAttributedString {
+        let ranges = TreeSitterUI.highlightRanges(content: text, language: language)
+        let attributed = NSMutableAttributedString(string: text)
+        attributed.addAttribute(.foregroundColor, value: theme.foreground, range: NSRange(location: 0, length: text.utf16.count))
+        for (range, category) in ranges {
+            guard range.location >= 0, range.length >= 0, range.location + range.length <= text.utf16.count else { continue }
+            let color: NSColor
+            switch category {
+            case "keyword": color = theme.keyword
+            case "string": color = theme.string
+            case "comment": color = theme.comment
+            case "number": color = theme.number
+            case "type": color = theme.type
+            default: color = theme.foreground
+            }
+            attributed.addAttribute(.foregroundColor, value: color, range: range)
+        }
+        return attributed
     }
     
     private static func highlightPattern(_ attributedString: NSMutableAttributedString, pattern: String, color: NSColor, options: NSRegularExpression.Options = []) {

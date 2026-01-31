@@ -13,8 +13,8 @@ struct EditorView: View {
     @ObservedObject var viewModel: EditorViewModel
     @State private var showInlineEdit: Bool = false
     @State private var inlineEditInstruction: String = ""
-    @StateObject private var suggestionService = InlineSuggestionService.shared
     @State private var editorScrollView: NSScrollView?
+    @State private var isGeneratingSuggestion: Bool = false
     
     // MARK: - Rename State
     @State private var showRenameSheet = false
@@ -61,7 +61,7 @@ struct EditorView: View {
                             viewModel.updateDocumentContent(text)
                             
                             // 🟢 Trigger the "Hot Start" speculation - pre-fetch context when user pauses typing
-                            SpeculativeContextService.shared.onUserTyping(text: text)
+                            ContextOrchestrator.shared.onUserTyping(text: text)
                             
                             // Update diagnostics with current content (for unsaved changes)
                             if let fileURL = document.filePath {
@@ -114,7 +114,7 @@ struct EditorView: View {
                     }
                     
                     // Ghost text indicator
-                    if suggestionService.isLoading {
+                    if isGeneratingSuggestion {
                         VStack {
                             Spacer()
                             HStack {
@@ -523,7 +523,7 @@ struct EditorView: View {
                 
                 // Stream completed - run validation in background
                 Task.detached(priority: .userInitiated) {
-                    let validation = await EditOutputValidator.shared.validateEditOutput(responseText)
+                    let validation = await ValidationCoordinator.shared.validateEditOutput(responseText)
                     
                     // Switch to MainActor for UI updates
                     await MainActor.run {
@@ -604,7 +604,7 @@ struct EditorView: View {
         viewModel.applyEdits(editsToApply)
         
         let filesAfter = captureFileStatesAfterEdits(editsToApply: editsToApply)
-        let outcome = ExecutionOutcomeValidator.shared.validateOutcome(
+        let outcome = ValidationCoordinator.shared.validateOutcome(
             editsToApply: editsToApply,
             filesBefore: filesBefore,
             filesAfter: filesAfter

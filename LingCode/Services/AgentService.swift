@@ -567,12 +567,15 @@ class AgentService: ObservableObject, Identifiable {
     
     private func updateStep(_ id: UUID, status: AgentStepStatus? = nil, result: String? = nil, error: String? = nil, output: String? = nil, append: Bool = false) {
         if let index = steps.firstIndex(where: { $0.id == id }) {
-            if let st = status { steps[index].status = st }
-            if let e = error { steps[index].error = e }
+            // Create a mutable copy, update it, then reassign to trigger @Published
+            var updatedStep = steps[index]
+            if let st = status { updatedStep.status = st }
+            if let e = error { updatedStep.error = e }
             if let o = output {
-                if append { steps[index].output = (steps[index].output ?? "") + o }
-                else { steps[index].output = o }
+                if append { updatedStep.output = (updatedStep.output ?? "") + o }
+                else { updatedStep.output = o }
             }
+            steps[index] = updatedStep
         }
     }
 }

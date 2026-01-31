@@ -2,16 +2,25 @@
 //  TransactionHistory.swift
 //  EditorCore
 //
-//  Manages transaction history for undo/redo operations
+//  Manages transaction history for undo/redo operations.
+//  Uses structural sharing: first snapshot stored in full; subsequent entries store only
+//  deltas (edited files' "before" content) to keep memory low on 100k+ line codebases.
 //
 
 import Foundation
 
-/// Manages the history of applied and reverted transactions
+/// Single snapshot entry: either full state or delta from previous (only edited files).
+private enum SnapshotEntry: Equatable {
+    case full(TransactionSnapshot)
+    case delta(transactionId: UUID, timestamp: Date, fileSnapshots: [String: FileSnapshot])
+}
+
+/// Manages the history of applied and reverted transactions with delta storage.
 public class TransactionHistory {
     private var appliedTransactions: [EditTransaction] = []
     private var revertedTransactions: [EditTransaction] = []
-    private var snapshots: [UUID: TransactionSnapshot] = [:]
+    /// Structural sharing: first entry is full snapshot, rest are deltas (edited files only).
+    private var snapshotEntries: [SnapshotEntry] = []
     
     public let maxHistorySize: Int
     
@@ -19,21 +28,34 @@ public class TransactionHistory {
         self.maxHistorySize = maxHistorySize
     }
     
-    /// Record a transaction as applied
+    /// Record a transaction as applied. Stores full snapshot for first transaction,
+    /// then only deltas (before-state for edited files) for subsequent ones.
     public func recordApplied(
         _ transaction: EditTransaction,
         snapshot: TransactionSnapshot
     ) {
         appliedTransactions.append(transaction)
-        snapshots[transaction.id] = snapshot
         
-        // Maintain history size limit
-        if appliedTransactions.count > maxHistorySize {
-            let removed = appliedTransactions.removeFirst()
-            snapshots.removeValue(forKey: removed.id)
+        if snapshotEntries.isEmpty {
+            snapshotEntries.append(.full(snapshot))
+        } else {
+            let delta: [String: FileSnapshot] = Dictionary(
+                uniqueKeysWithValues: transaction.affectedFiles.compactMap { path in
+                    snapshot.fileSnapshots[path].map { (path, $0) }
+                }
+            )
+            snapshotEntries.append(.delta(
+                transactionId: snapshot.transactionId,
+                timestamp: snapshot.timestamp,
+                fileSnapshots: delta
+            ))
         }
         
-        // Clear redo stack when new transaction is applied
+        if appliedTransactions.count > maxHistorySize {
+            appliedTransactions.removeFirst()
+            snapshotEntries.removeFirst()
+        }
+        
         revertedTransactions.removeAll()
     }
     
@@ -42,40 +64,63 @@ public class TransactionHistory {
         revertedTransactions.append(transaction)
     }
     
-    /// Get the snapshot for a transaction (for undo)
+    /// Get the snapshot for a transaction (for undo). Reconstructs full snapshot by merging deltas.
     public func getSnapshot(for transactionId: UUID) -> TransactionSnapshot? {
-        return snapshots[transactionId]
+        guard let index = appliedTransactions.firstIndex(where: { $0.id == transactionId }) else {
+            return nil
+        }
+        guard index >= 0, index < snapshotEntries.count else { return nil }
+        let entry = snapshotEntries[index]
+        guard case .full(let full) = entry else {
+            return reconstructSnapshot(at: index)
+        }
+        return full
     }
     
-    /// Get the most recently applied transaction
+    private func reconstructSnapshot(at index: Int) -> TransactionSnapshot? {
+        guard index >= 0, index < snapshotEntries.count else { return nil }
+        switch snapshotEntries[index] {
+        case .full(let s):
+            return s
+        case .delta(let transactionId, let timestamp, let delta):
+            var merged: [String: FileSnapshot] = [:]
+            if index > 0, let prev = reconstructSnapshot(at: index - 1) {
+                merged = prev.fileSnapshots
+            }
+            for (path, fileSnapshot) in delta {
+                merged[path] = fileSnapshot
+            }
+            return TransactionSnapshot(
+                transactionId: transactionId,
+                timestamp: timestamp,
+                fileSnapshots: merged
+            )
+        }
+    }
+    
     public func getLastApplied() -> EditTransaction? {
         return appliedTransactions.last
     }
     
-    /// Get the most recently reverted transaction (for redo)
     public func getLastReverted() -> EditTransaction? {
         return revertedTransactions.last
     }
     
-    /// Check if undo is possible
     public func canUndo() -> Bool {
         return !appliedTransactions.isEmpty
     }
     
-    /// Check if redo is possible
     public func canRedo() -> Bool {
         return !revertedTransactions.isEmpty
     }
     
-    /// Get all applied transaction IDs
     public func getAppliedTransactionIds() -> [UUID] {
         return appliedTransactions.map { $0.id }
     }
     
-    /// Clear all history
     public func clear() {
         appliedTransactions.removeAll()
         revertedTransactions.removeAll()
-        snapshots.removeAll()
+        snapshotEntries.removeAll()
     }
 }

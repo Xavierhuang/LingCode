@@ -75,6 +75,13 @@ struct SettingsView: View {
                     .frame(width: 150)
             }
             Toggle("Word Wrap", isOn: $viewModel.wordWrap)
+            
+            // AI Autocomplete (Tab completion)
+            Toggle("AI Autocomplete (Tab)", isOn: Binding(
+                get: { InlineAutocompleteService.shared.isEnabled() },
+                set: { InlineAutocompleteService.shared.setEnabled($0) }
+            ))
+            .help("Show AI-powered code suggestions as ghost text. Press Tab to accept.")
         }
     }
     

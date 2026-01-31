@@ -41,8 +41,7 @@ class AIViewModel: ObservableObject {
     @Published var codeReviewResults: [String: CodeReviewResult] = [:] // file path -> review result
     @Published var isReviewingCode: Bool = false
     
-    // Context tracking
-    private let contextTracker = ContextTrackingService.shared
+    private let contextOrchestrator = ContextOrchestrator.shared
     
     // Performance metrics
     private let metricsService = PerformanceMetricsService.shared
@@ -283,17 +282,12 @@ class AIViewModel: ObservableObject {
         // IMPORTANT: Do NOT include "plan/think out loud" instructions when we need strict edit output.
         let fullContext = context ?? ""
         
-        let contextBuilder = CursorContextBuilder.shared
-        
         // Build context from editor state (if available)
         // ⚡️ SPEED CHECK: Do we have speculative context ready?
         var editorContext = ""
-        if let speculative = LatencyOptimizer.shared.getSpeculativeContext() {
-            print("⚡️ SPEED WIN: Used Speculative Context (0ms latency)")
+        if let speculative = contextOrchestrator.getSpeculativeContext() {
             editorContext = speculative
-            
-            // Clear it so we don't use stale data next time
-            LatencyOptimizer.shared.clearSpeculativeContext()
+            contextOrchestrator.clearSpeculativeContext()
         }
         // Note: Context building is now done inside the Task block to handle async properly
         
@@ -338,7 +332,7 @@ class AIViewModel: ObservableObject {
             let contextTime = Date().timeIntervalSince(capturedContextStart)
             LatencyOptimizer.shared.recordContextBuild(contextTime)
             // Clear previous context tracking
-            contextTracker.clearCurrentContext()
+            contextOrchestrator.clearCurrentContext()
             
             // Build context asynchronously if not already built
             var finalEditorContext = editorContext
@@ -348,25 +342,22 @@ class AIViewModel: ObservableObject {
                 
                 // Track active file context
                 if let activeFile = activeFile {
-                    contextTracker.trackContext(
+                    contextOrchestrator.trackContext(
                         type: .activeFile,
                         name: activeFile.lastPathComponent,
                         path: activeFile.path,
                         tokenCount: nil
                     )
                 }
-                
-                // Track selection context
                 if let selectedText = selectedText, !selectedText.isEmpty {
-                    contextTracker.trackContext(
+                    contextOrchestrator.trackContext(
                         type: .selectedText,
                         name: "Selection",
                         path: activeFile?.path,
                         tokenCount: selectedText.components(separatedBy: .whitespacesAndNewlines).count
                     )
                 }
-                
-                finalEditorContext = await ContextRankingService.shared.buildContext(
+                finalEditorContext = await contextOrchestrator.buildContext(
                     activeFile: activeFile,
                     selectedRange: selectedText,
                     diagnostics: nil,
@@ -375,7 +366,7 @@ class AIViewModel: ObservableObject {
                 )
                 
                 // Also add Cursor-style context for compatibility
-                let cursorContext = contextBuilder.buildContext(
+                let cursorContext = contextOrchestrator.buildCursorStyleContext(
                     editorState: editorVM.editorState,
                     cursorPosition: editorVM.editorState.cursorPosition,
                     selectedText: editorVM.editorState.selectedText,

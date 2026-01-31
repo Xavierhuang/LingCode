@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		6A77CED82F2DC4F20091CF65 /* EditorParsers in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9741312F170931004027AD /* EditorParsers */; };
 		6A9741302F170931004027AC /* EditorCore in Frameworks */ = {isa = PBXBuildFile; productRef = 6A97412F2F170931004027AC /* EditorCore */; };
 		6A9CA1482F1A8E8200E5C691 /* SwiftBasicFormat in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1472F1A8E8200E5C691 /* SwiftBasicFormat */; };
 		6A9CA14A2F1A8E8200E5C691 /* SwiftCompilerPlugin in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1492F1A8E8200E5C691 /* SwiftCompilerPlugin */; };
@@ -39,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6A77CED82F2DC4F20091CF65 /* EditorParsers in Frameworks */,
 				6A9CA15E2F1A8E8200E5C691 /* SwiftSyntaxBuilder in Frameworks */,
 				6A9CA1482F1A8E8200E5C691 /* SwiftBasicFormat in Frameworks */,
 				6A9CA14C2F1A8E8200E5C691 /* SwiftDiagnostics in Frameworks */,
@@ -99,6 +101,7 @@
 			name = LingCode;
 			packageProductDependencies = (
 				6A97412F2F170931004027AC /* EditorCore */,
+				6A9741312F170931004027AD /* EditorParsers */,
 				6A9CA1472F1A8E8200E5C691 /* SwiftBasicFormat */,
 				6A9CA1492F1A8E8200E5C691 /* SwiftCompilerPlugin */,
 				6A9CA14B2F1A8E8200E5C691 /* SwiftDiagnostics */,
@@ -422,6 +425,11 @@
 		6A97412F2F170931004027AC /* EditorCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = EditorCore;
+		};
+		6A9741312F170931004027AD /* EditorParsers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6A97412E2F170931004027AC /* XCLocalSwiftPackageReference "EditorCore" */;
+			productName = EditorParsers;
 		};
 		6A9CA1472F1A8E8200E5C691 /* SwiftBasicFormat */ = {
 			isa = XCSwiftPackageProductDependency;

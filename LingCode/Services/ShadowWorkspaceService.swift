@@ -178,15 +178,16 @@ class ShadowWorkspaceService {
 
     /// Verifies that the given files compile in a shadow workspace before applying.
     /// Uses pre-warmed shadow when available for minimal latency.
-    func verifyFilesInShadow(files: [StreamingFileInfo], originalWorkspace: URL, completion: @escaping (Bool, String) -> Void) {
+    /// Completion: success, message, and optional verification duration in seconds (nil if no build was run).
+    func verifyFilesInShadow(files: [StreamingFileInfo], originalWorkspace: URL, completion: @escaping (Bool, String, TimeInterval?) -> Void) {
         let projectURL = originalWorkspace.standardizedFileURL
         ensureShadowWarmed(for: projectURL) { [weak self] shadowURL in
             guard let self = self, let shadowURL = shadowURL else {
-                completion(false, "Could not create shadow workspace.")
+                completion(false, "Could not create shadow workspace.", nil)
                 return
             }
             guard let first = files.first else {
-                completion(true, "No files to verify.")
+                completion(true, "No files to verify.", nil)
                 return
             }
             do {
@@ -199,9 +200,10 @@ class ShadowWorkspaceService {
                 }
                 let hasPackageSwift = self.fileManager.fileExists(atPath: shadowURL.appendingPathComponent("Package.swift").path)
                 guard hasPackageSwift else {
-                    completion(true, "No Package.swift; skipped build.")
+                    completion(true, "No Package.swift; skipped build.", nil)
                     return
                 }
+                let startTime = Date()
                 TerminalExecutionService.shared.execute(
                     "swift build 2>&1",
                     workingDirectory: shadowURL,
@@ -209,11 +211,12 @@ class ShadowWorkspaceService {
                     onOutput: { _ in },
                     onError: { _ in },
                     onComplete: { exitCode in
-                        completion(exitCode == 0, exitCode == 0 ? "Build successful." : "Compilation failed.")
+                        let duration = Date().timeIntervalSince(startTime)
+                        completion(exitCode == 0, exitCode == 0 ? "Build successful." : "Compilation failed.", duration)
                     }
                 )
             } catch {
-                completion(false, "Shadow setup failed: \(error.localizedDescription)")
+                completion(false, "Shadow setup failed: \(error.localizedDescription)", nil)
             }
         }
     }

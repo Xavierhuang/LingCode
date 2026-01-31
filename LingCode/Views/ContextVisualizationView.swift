@@ -8,11 +8,11 @@
 import SwiftUI
 
 struct ContextVisualizationView: View {
-    @ObservedObject var contextTracker = ContextTrackingService.shared
+    @ObservedObject var contextOrchestrator = ContextOrchestrator.shared
     @State private var isExpanded: Bool = true
 
     var body: some View {
-        if !contextTracker.currentContextSources.isEmpty {
+        if !contextOrchestrator.currentContextSources.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 // Header
                 Button(action: {
@@ -33,7 +33,7 @@ struct ContextVisualizationView: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(.blue)
                             
-                            Text("Context (\(contextTracker.currentContextSources.count))")
+                            Text("Context (\(contextOrchestrator.currentContextSources.count))")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(.primary)
                         }
@@ -41,8 +41,8 @@ struct ContextVisualizationView: View {
                         Spacer()
                         
                         // Token count
-                        if contextTracker.totalTokenUsage > 0 {
-                            Text("\(contextTracker.totalTokenUsage) tokens")
+                        if contextOrchestrator.totalTokenUsage > 0 {
+                            Text("\(contextOrchestrator.totalTokenUsage) tokens")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
@@ -60,7 +60,7 @@ struct ContextVisualizationView: View {
                 // Context sources
                 if isExpanded {
                     VStack(spacing: 0) {
-                        ForEach(contextTracker.currentContextSources) { source in
+                        ForEach(contextOrchestrator.currentContextSources) { source in
                             ContextSourceRow(source: source)
                                 .transition(.asymmetric(
                                     insertion: .move(edge: .top).combined(with: .opacity),
@@ -68,7 +68,7 @@ struct ContextVisualizationView: View {
                                 ))
                         }
                     }
-                    .animation(DesignSystem.Animation.smooth, value: contextTracker.currentContextSources.map(\.id))
+                    .animation(DesignSystem.Animation.smooth, value: contextOrchestrator.currentContextSources.map(\.id))
                     .background(
                         RoundedRectangle(cornerRadius: 0)
                             .fill(Color(NSColor.controlBackgroundColor).opacity(0.3))

@@ -176,10 +176,10 @@ struct SimpleChatView: View {
     private func sendMessage() {
         guard !viewModel.currentInput.isEmpty || !activeMentions.isEmpty || !imageContextService.attachedImages.isEmpty else { return }
         
-        // FIX: Build context asynchronously
+        // Build context asynchronously with @docs and @web support
         Task { @MainActor in
             var context = await editorViewModel.getContextForAI() ?? ""
-            let mentionContext = MentionParser.shared.buildContextFromMentions(
+            let mentionContext = await MentionParser.shared.buildContextFromMentionsAsync(
                 activeMentions,
                 projectURL: editorViewModel.rootFolderURL,
                 selectedText: editorViewModel.editorState.selectedText,

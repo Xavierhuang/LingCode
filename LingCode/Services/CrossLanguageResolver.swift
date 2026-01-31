@@ -8,6 +8,10 @@
 
 import Foundation
 
+#if canImport(EditorParsers)
+import EditorParsers
+#endif
+
 /// Cross-language relationship between symbols in different languages
 struct CrossLanguageRelationship {
     let sourceSymbol: String

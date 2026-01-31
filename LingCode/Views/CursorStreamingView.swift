@@ -29,7 +29,7 @@ struct CursorStreamingView: View {
     @State private var showUndoConfirmation = false
     @State private var isApplyingFiles = false // Track if files are currently being applied
     @State private var isVerifying: Bool = false // Track if shadow verification is in progress
-    @State private var verificationStatus: VerificationStatus? = nil // Verification result
+    @State private var verificationStatus: CursorStreamingVerificationStatus? = nil // Verification result
     @State private var showStackDialog = false // Show Graphite stacking dialog
     @State private var stackingPlan: StackingPlan? = nil // AI-generated stacking plan
     @State private var isCreatingStack = false // Track stack creation progress
@@ -41,10 +41,7 @@ struct CursorStreamingView: View {
     @State private var performanceDashboardObserver: NSObjectProtocol?
     private let fileActionHandler = FileActionHandler.shared
     
-    enum VerificationStatus {
-        case success
-        case failure(String)
-    }
+    // Use shared CursorStreamingVerificationStatus from StreamingApplyBar.swift
     
     // Check if changes are large enough to warrant stacking
     private var shouldOfferStacking: Bool {
@@ -307,196 +304,37 @@ struct CursorStreamingView: View {
     }
     
     // AGENT STATE: Render based on explicit state - never blank
+    // Views extracted to StreamingStateViews.swift for maintainability
+    @ViewBuilder
     private var agentStateView: some View {
-        Group {
-            switch updateCoordinator.agentState {
-            case .idle:
-                emptyStateView
-                
-            case .streaming:
-                generatingView
-                
-            case .validating:
-                validatingView
-                
-            case .blocked(let reason):
-                blockedView(reason: reason)
-                
-            case .empty:
-                emptyOutputView
-                
-            case .ready(let edits):
-                readyView(edits: edits)
+        switch updateCoordinator.agentState {
+        case .idle:
+            StreamingEmptyStateView()
+            
+        case .streaming:
+            StreamingGeneratingView(
+                streamingText: streamingText,
+                toolCallProgresses: viewModel.toolCallProgresses,
+                onApprove: { viewModel.approveToolCall($0) },
+                onReject: { viewModel.rejectToolCall($0) }
+            )
+            
+        case .validating:
+            StreamingValidatingView()
+            
+        case .blocked(let reason):
+            StreamingBlockedView(reason: reason) {
+                // Blocked state will clear on next message
+            }
+            
+        case .empty:
+            StreamingEmptyOutputView { }
+            
+        case .ready(let edits):
+            StreamingReadyView(editCount: edits.count) {
+                autoApplyAllFiles()
             }
         }
-    }
-    
-    private var generatingView: some View {
-        VStack(spacing: DesignSystem.Spacing.lg) {
-            // Animated progress indicator
-            ZStack {
-                Circle()
-                    .stroke(Color.blue.opacity(0.2), lineWidth: 3)
-                    .frame(width: 40, height: 40)
-                
-                ProgressView()
-                    .scaleEffect(1.2)
-                    .tint(.blue)
-            }
-            
-            VStack(spacing: DesignSystem.Spacing.sm) {
-                Text("Generating...")
-                    .font(DesignSystem.Typography.title3)
-                    .foregroundColor(DesignSystem.Colors.textPrimary)
-                
-                Text("AI is writing code")
-                    .font(DesignSystem.Typography.caption1)
-                    .foregroundColor(DesignSystem.Colors.textSecondary)
-            }
-            
-            // Pending tool calls (human-in-the-loop) - show during streaming so user can approve/reject
-            if !viewModel.toolCallProgresses.isEmpty {
-                ToolCallProgressListView(
-                    progresses: viewModel.toolCallProgresses,
-                    onApprove: { toolCallId in viewModel.approveToolCall(toolCallId) },
-                    onReject: { toolCallId in viewModel.rejectToolCall(toolCallId) }
-                )
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .padding(.vertical, DesignSystem.Spacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
-                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-                )
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .move(edge: .top)),
-                    removal: .opacity.combined(with: .move(edge: .top))
-                ))
-            }
-
-            // Show live streaming text so the user can see code as it's written
-            if !streamingText.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            // Header
-                            HStack {
-                                Image(systemName: "text.bubble")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.blue)
-                                Text("Live Preview")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-                            .padding(.horizontal, DesignSystem.Spacing.sm)
-                            .padding(.vertical, DesignSystem.Spacing.xs)
-                            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-                            
-                            // Content
-                            Text(streamingText)
-                                .font(.system(size: 11, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(DesignSystem.Spacing.sm)
-                                .id("streaming-live")
-                        }
-                    }
-                    .frame(maxHeight: 300)
-                    .background(
-                        RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
-                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.medium)
-                                    .stroke(Color.blue.opacity(0.2), lineWidth: 1)
-                            )
-                    )
-                    .onChange(of: streamingText.count) { _, _ in
-                        withAnimation(.none) {
-                            proxy.scrollTo("streaming-live", anchor: .bottom)
-                        }
-                    }
-                }
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DesignSystem.Spacing.xxl)
-    }
-    
-    private var validatingView: some View {
-        VStack(spacing: DesignSystem.Spacing.lg) {
-            // Animated validation indicator
-            ZStack {
-                Circle()
-                    .stroke(Color.orange.opacity(0.2), lineWidth: 3)
-                    .frame(width: 40, height: 40)
-                
-                ProgressView()
-                    .scaleEffect(1.2)
-                    .tint(.orange)
-            }
-            
-            VStack(spacing: DesignSystem.Spacing.sm) {
-                Text("Validating output...")
-                    .font(DesignSystem.Typography.title3)
-                    .foregroundColor(DesignSystem.Colors.textPrimary)
-                
-                Text("Checking code safety and correctness")
-                    .font(DesignSystem.Typography.caption1)
-                    .foregroundColor(DesignSystem.Colors.textSecondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DesignSystem.Spacing.xxl)
-    }
-    
-    private func blockedView(reason: String) -> some View {
-        VStack(spacing: DesignSystem.Spacing.md) {
-            Image(systemName: "exclamationmark.shield.fill")
-                .font(.system(size: 32))
-                .foregroundColor(.orange)
-            
-            Text("Output blocked by Edit Mode")
-                .font(DesignSystem.Typography.title3)
-                .foregroundColor(DesignSystem.Colors.textPrimary)
-            
-            Text(reason)
-                .font(DesignSystem.Typography.body)
-                .foregroundColor(DesignSystem.Colors.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DesignSystem.Spacing.xxl)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.orange.opacity(0.1))
-        )
-        .padding()
-    }
-    
-    private var emptyOutputView: some View {
-        VStack(spacing: DesignSystem.Spacing.lg) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 40))
-                .foregroundColor(DesignSystem.Colors.textTertiary)
-                .symbolEffect(.pulse, options: .repeating)
-            
-            VStack(spacing: DesignSystem.Spacing.xs) {
-                Text("No edits produced")
-                    .font(DesignSystem.Typography.title3)
-                    .foregroundColor(DesignSystem.Colors.textPrimary)
-                
-                Text("The AI response did not contain any file edits.")
-                    .font(DesignSystem.Typography.body)
-                    .foregroundColor(DesignSystem.Colors.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DesignSystem.Spacing.xxl)
-        .padding(.horizontal, DesignSystem.Spacing.lg)
     }
     
     private func readyView(edits: [StreamingFileInfo]) -> some View {
@@ -565,29 +403,6 @@ struct CursorStreamingView: View {
                 }
             }
         }
-    }
-    
-    private var emptyStateView: some View {
-        VStack(spacing: DesignSystem.Spacing.lg) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 48))
-                .foregroundColor(DesignSystem.Colors.accent)
-                .symbolEffect(.pulse, options: .repeating)
-            
-            VStack(spacing: DesignSystem.Spacing.xs) {
-                Text("AI Assistant Ready")
-                    .font(DesignSystem.Typography.title3)
-                    .foregroundColor(DesignSystem.Colors.textPrimary)
-                
-                Text("Ask me anything or request code changes")
-                    .font(DesignSystem.Typography.body)
-                    .foregroundColor(DesignSystem.Colors.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DesignSystem.Spacing.xxl)
-        .padding(.horizontal, DesignSystem.Spacing.lg)
     }
     
     private func runAllCommands() {
@@ -916,208 +731,54 @@ struct CursorStreamingView: View {
     // - Internal analysis
     // - Raw streamed tokens
     
-    // MARK: - Apply Button Bar
+    // MARK: - Apply Button Bar (Extracted to StreamingApplyBar.swift)
     
     private var applyButtonBar: some View {
-        HStack(spacing: DesignSystem.Spacing.md) {
-            // File count badge
-            HStack(spacing: 6) {
-                Image(systemName: "doc.text.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.blue)
-                Text("\(parsedFiles.count) File\(parsedFiles.count == 1 ? "" : "s")")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.primary)
-            }
-            .padding(.horizontal, DesignSystem.Spacing.sm)
-            .padding(.vertical, DesignSystem.Spacing.xs)
-            .background(
-                RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
-                    .fill(Color.blue.opacity(0.1))
-            )
-            
-            Spacer()
-            
-            // Undo button
-            Button(action: {
-                // Show confirmation before clearing files
-                showUndoConfirmation = true
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 10, weight: .medium))
-                    Text("Undo")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .padding(.vertical, DesignSystem.Spacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
-                        .fill(Color(NSColor.controlBackgroundColor))
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-            .help("Remove all files from view")
-            
-            Button(action: {
-                // Toggle keep status for all files
+        StreamingApplyBar(
+            fileCount: parsedFiles.count,
+            keptFilesCount: keptFiles.count,
+            allFilesKept: keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty,
+            shouldOfferStacking: shouldOfferStacking,
+            isVerifying: isVerifying,
+            isApplyingFiles: isApplyingFiles,
+            verificationStatus: verificationStatus,
+            onUndo: { showUndoConfirmation = true },
+            onToggleKeepAll: {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                     if keptFiles.count == parsedFiles.count {
-                        // All files are kept, unkeep all
                         keptFiles.removeAll()
                     } else {
-                        // Keep all files
                         keptFiles = Set(parsedFiles.map { $0.id })
                     }
                 }
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty ? "bookmark.fill" : "bookmark")
-                        .font(.system(size: 10, weight: .medium))
-                    Text(keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty ? "Unkeep" : "Keep")
-                        .font(.system(size: 12, weight: .medium))
+            },
+            onReview: { showReviewView = true },
+            onStack: {
+                showStackDialog = true
+                createStackingPlan()
+            },
+            onApplyAll: { showBatchApplyConfirmation = true }
+        )
+        .alert("Clear All Files?", isPresented: $showUndoConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear", role: .destructive) {
+                let filesToRemove = parsedFiles.filter { !keptFiles.contains($0.id) }
+                for file in filesToRemove {
+                    updateCoordinator.removeFile(file.id)
                 }
-                .foregroundColor(keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty ? .purple : .secondary)
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .padding(.vertical, DesignSystem.Spacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
-                        .fill(keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty ? Color.purple.opacity(0.1) : Color(NSColor.controlBackgroundColor))
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-            .help(keptFiles.count == parsedFiles.count && !parsedFiles.isEmpty ? "Unkeep all files" : "Keep files visible without applying")
-            
-            Button(action: {
-                showReviewView = true
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "eye.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Review")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, DesignSystem.Spacing.md)
-                .padding(.vertical, DesignSystem.Spacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
-                        .fill(Color.accentColor)
-                        .shadow(color: Color.accentColor.opacity(0.3), radius: 4, x: 0, y: 2)
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-            .help("Review all file changes")
-            .alert("Clear All Files?", isPresented: $showUndoConfirmation) {
-                Button("Cancel", role: .cancel) { }
-                Button("Clear", role: .destructive) {
-                    // ARCHITECTURE: Use safe state update method instead of direct mutation
-                    // Clear all files except kept ones
-                    let filesToRemove = parsedFiles.filter { !keptFiles.contains($0.id) }
-                    for file in filesToRemove {
-                        updateCoordinator.removeFile(file.id)
-                    }
-                    // If all files were kept, clear the keptFiles set
-                    if filesToRemove.isEmpty {
-                        keptFiles.removeAll()
-                    }
-                    print("✅ Cleared \(filesToRemove.count) file(s) (kept \(keptFiles.count) file(s))")
-                }
-            } message: {
-                let keptCount = parsedFiles.filter { keptFiles.contains($0.id) }.count
-                let removableCount = parsedFiles.count - keptCount
-                if keptCount > 0 {
-                    Text("This will remove \(removableCount) file\(removableCount == 1 ? "" : "s") from the view. \(keptCount) kept file\(keptCount == 1 ? "" : "s") will remain visible. Files will remain on disk if they were already applied.")
-                } else {
-                    Text("This will remove all \(parsedFiles.count) file\(parsedFiles.count == 1 ? "" : "s") from the view. The files will remain on disk if they were already applied.")
+                if filesToRemove.isEmpty {
+                    keptFiles.removeAll()
                 }
             }
-            
-            // Smart Stack badge (shown when changes are large)
-            if shouldOfferStacking && GraphiteService.shared.isGraphiteInstalled() {
-                Button(action: {
-                    showStackDialog = true
-                    createStackingPlan()
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.stack.3d.up")
-                            .font(.system(size: 11, weight: .medium))
-                        Text("Stack it?")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundColor(.blue)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.1))
-                    .cornerRadius(4)
-                }
-                .buttonStyle(PlainButtonStyle())
+        } message: {
+            let keptCount = parsedFiles.filter { keptFiles.contains($0.id) }.count
+            let removableCount = parsedFiles.count - keptCount
+            if keptCount > 0 {
+                Text("This will remove \(removableCount) file\(removableCount == 1 ? "" : "s") from the view.")
+            } else {
+                Text("This will remove all \(parsedFiles.count) file\(parsedFiles.count == 1 ? "" : "s") from the view.")
             }
-            
-            // Verification badge (shown when verification is complete)
-            if let status = verificationStatus {
-                HStack(spacing: 4) {
-                    switch status {
-                    case .success:
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundColor(.green)
-                        Text("Compiles")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.green)
-                    case .failure:
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.red)
-                        Text("Build Failed")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.red)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(4)
-            }
-            
-            Button(action: {
-                // Show confirmation dialog before applying
-                showBatchApplyConfirmation = true
-            }) {
-                HStack(spacing: 6) {
-                    if isVerifying {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 12, height: 12)
-                            .tint(.white)
-                    } else if isApplyingFiles {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                            .frame(width: 12, height: 12)
-                            .tint(.white)
-                    } else {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    Text(isVerifying ? "Verifying..." : (isApplyingFiles ? "Applying..." : "Apply All"))
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, DesignSystem.Spacing.lg)
-                .padding(.vertical, DesignSystem.Spacing.sm)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.CornerRadius.small)
-                        .fill((isVerifying || isApplyingFiles) ? Color.accentColor.opacity(0.7) : Color.accentColor)
-                        .shadow(color: (isVerifying || isApplyingFiles) ? Color.clear : Color.accentColor.opacity(0.4), radius: 6, x: 0, y: 3)
-                )
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(isVerifying || isApplyingFiles)
-            .scaleEffect(isVerifying || isApplyingFiles ? 0.98 : 1.0)
-            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isVerifying || isApplyingFiles)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
     }
     
     private var hasFilesToApply: Bool {
@@ -1184,10 +845,10 @@ struct CursorStreamingView: View {
     }
     
     // Handle loading completion (called after coordinator flushes updates)
-    // ARCHITECTURE: All parsing/validation happens in EditIntentCoordinator
+    // ARCHITECTURE: All parsing/validation happens in EditSessionOrchestrator
     // Views only observe state, never mutate it during render
     private func handleLoadingComplete() {
-        // Final validation is handled by EditIntentCoordinator via StreamingUpdateCoordinator
+        // Final validation is handled by EditSessionOrchestrator via StreamingUpdateCoordinator
         // No direct parsing or state mutation here - coordinator handles it
         // This ensures state updates happen asynchronously AFTER view updates
         
@@ -1326,11 +987,12 @@ struct CursorStreamingView: View {
         ShadowWorkspaceService.shared.verifyFilesInShadow(
             files: filesToApply,
             originalWorkspace: projectURL
-        ) { (success: Bool, message: String) in
+        ) { (success: Bool, message: String, durationSeconds: TimeInterval?) in
             DispatchQueue.main.async {
                 isVerifying = false
-                verificationStatus = success ? .success : .failure(message)
-                
+                let durationMs = durationSeconds.map { Int($0 * 1000) }
+                verificationStatus = success ? .success(verificationTimeMs: durationMs) : .failure(message)
+
                 if success {
                     print("✅ Shadow verification passed - applying files")
                     applyFilesDirectly(filesToApply)
@@ -1524,13 +1186,13 @@ struct CursorStreamingView: View {
             // Clear verification status for new request
             verificationStatus = nil
 
-            // FIX: Build context asynchronously
+            // Build context asynchronously with @docs and @web support
             Task { @MainActor in
                 // Pass user message as query to detect website modifications and include existing files
                 var context = await editorViewModel.getContextForAI(query: userRequest) ?? ""
 
-                // Build context from mentions
-                let mentionContext = MentionParser.shared.buildContextFromMentions(
+                // Build context from mentions (async for @docs and @web)
+                let mentionContext = await MentionParser.shared.buildContextFromMentionsAsync(
                     activeMentions,
                     projectURL: editorViewModel.rootFolderURL,
                     selectedText: editorViewModel.editorState.selectedText,

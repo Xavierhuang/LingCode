@@ -12,14 +12,24 @@ struct AgentListView: View {
     @StateObject private var historyService = AgentHistoryService.shared
     @Binding var selectedChatId: UUID?
     let onNewAgent: () -> Void
+    @State private var renameItemId: UUID?
+    @State private var renameText: String = ""
 
-    /// History items to show: hide runs that are currently an agent's active task so the same run doesn't appear twice (agent row + history row).
-    private var historyToShow: [AgentHistoryItem] {
-        let currentTaskIds = Set(coordinator.agents.compactMap { $0.currentTask?.id })
-        return historyService.filteredHistory.filter { item in
-            if item.status != .running { return true }
-            return !currentTaskIds.contains(item.id)
-        }
+    private var currentTaskIds: Set<UUID> {
+        Set(coordinator.agents.compactMap { $0.currentTask?.id })
+    }
+
+    private func excludeActiveTask(_ item: AgentHistoryItem) -> Bool {
+        if item.status != .running { return true }
+        return !currentTaskIds.contains(item.id)
+    }
+
+    private var pinnedToShow: [AgentHistoryItem] {
+        historyService.pinnedHistory.filter(excludeActiveTask)
+    }
+
+    private var unpinnedToShow: [AgentHistoryItem] {
+        historyService.unpinnedHistory.filter(excludeActiveTask)
     }
 
     var body: some View {
@@ -55,6 +65,33 @@ struct AgentListView: View {
 
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    if !pinnedToShow.isEmpty {
+                        SectionHeader(title: "Pinned")
+                        ForEach(pinnedToShow) { item in
+                            AgentListRow(
+                                agent: item,
+                                isSelected: selectedChatId == item.id,
+                                onSelect: { selectedChatId = item.id; historyService.markAsRead(item.id) },
+                                onDelete: {
+                                    historyService.deleteItem(item.id)
+                                    if selectedChatId == item.id { selectedChatId = coordinator.agents.first?.id }
+                                },
+                                onMarkAsFailed: (item.status == .running && Date().timeIntervalSince(item.startTime) > 5 * 60) ? { historyService.markAsFailed(item.id) } : nil,
+                                onTogglePin: { historyService.togglePin(item.id) },
+                                onDuplicate: {
+                                    if let newId = historyService.duplicateItem(item.id) { selectedChatId = newId }
+                                },
+                                onRename: {
+                                    renameText = item.displayDescription
+                                    renameItemId = item.id
+                                },
+                                onMarkAsUnread: { historyService.markAsUnread(item.id) },
+                                isPinned: true
+                            )
+                        }
+                    }
+
+                    SectionHeader(title: "Agents")
                     ForEach(coordinator.agents) { agent in
                         AgentListAgentRow(
                             agent: agent,
@@ -62,18 +99,26 @@ struct AgentListView: View {
                             onSelect: { selectedChatId = agent.id }
                         )
                     }
-                    ForEach(historyToShow) { item in
+                    ForEach(unpinnedToShow) { item in
                         AgentListRow(
                             agent: item,
                             isSelected: selectedChatId == item.id,
-                            onSelect: { selectedChatId = item.id },
+                            onSelect: { selectedChatId = item.id; historyService.markAsRead(item.id) },
                             onDelete: {
                                 historyService.deleteItem(item.id)
-                                if selectedChatId == item.id {
-                                    selectedChatId = coordinator.agents.first?.id
-                                }
+                                if selectedChatId == item.id { selectedChatId = coordinator.agents.first?.id }
                             },
-                            onMarkAsFailed: (item.status == .running && Date().timeIntervalSince(item.startTime) > 5 * 60) ? { historyService.markAsFailed(item.id) } : nil
+                            onMarkAsFailed: (item.status == .running && Date().timeIntervalSince(item.startTime) > 5 * 60) ? { historyService.markAsFailed(item.id) } : nil,
+                            onTogglePin: { historyService.togglePin(item.id) },
+                            onDuplicate: {
+                                if let newId = historyService.duplicateItem(item.id) { selectedChatId = newId }
+                            },
+                            onRename: {
+                                renameText = item.displayDescription
+                                renameItemId = item.id
+                            },
+                            onMarkAsUnread: { historyService.markAsUnread(item.id) },
+                            isPinned: false
                         )
                     }
                 }
@@ -82,6 +127,29 @@ struct AgentListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
+        .alert("Rename Agent", isPresented: Binding(get: { renameItemId != nil }, set: { if !$0 { renameItemId = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameItemId = nil }
+            Button("OK") {
+                if let id = renameItemId { historyService.renameItem(id, name: renameText) }
+                renameItemId = nil
+            }
+        } message: {
+            Text("Enter a display name for this agent run.")
+        }
+    }
+}
+
+private struct SectionHeader: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
     }
 }
 
@@ -144,20 +212,27 @@ struct AgentListRow: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
     var onMarkAsFailed: (() -> Void)? = nil
-    
+    var onTogglePin: (() -> Void)? = nil
+    var onDuplicate: (() -> Void)? = nil
+    var onRename: (() -> Void)? = nil
+    var onMarkAsUnread: (() -> Void)? = nil
+    var isPinned: Bool = false
+
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    // Status icon
+                    if agent.isUnread {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                    }
                     statusIcon
-                    
                     VStack(alignment: .leading, spacing: 2) {
                         Text(agent.displayDescription)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.primary)
                             .lineLimit(1)
-                        
                         Group {
                             if agent.status == .running && Date().timeIntervalSince(agent.startTime) > 5 * 60 {
                                 Text("Stalled")
@@ -170,11 +245,8 @@ struct AgentListRow: View {
                             }
                         }
                     }
-                    
                     Spacer()
                 }
-                
-                // Subtitle with file info
                 if !agent.filesChanged.isEmpty {
                     HStack(spacing: 4) {
                         if agent.linesAdded > 0 || agent.linesRemoved > 0 {
@@ -188,7 +260,7 @@ struct AgentListRow: View {
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
-                    .padding(.leading, 24)
+                    .padding(.leading, agent.isUnread ? 20 : 24)
                 }
             }
             .padding(.horizontal, 12)
@@ -199,6 +271,26 @@ struct AgentListRow: View {
         }
         .buttonStyle(PlainButtonStyle())
         .contextMenu {
+            if let onTogglePin = onTogglePin {
+                Button(isPinned ? "Unpin" : "Pin") {
+                    onTogglePin()
+                }
+            }
+            if let onDuplicate = onDuplicate {
+                Button("Duplicate") {
+                    onDuplicate()
+                }
+            }
+            if let onMarkAsUnread = onMarkAsUnread, !agent.isUnread {
+                Button("Mark as Unread") {
+                    onMarkAsUnread()
+                }
+            }
+            if let onRename = onRename {
+                Button("Rename") {
+                    onRename()
+                }
+            }
             if let onMarkAsFailed = onMarkAsFailed {
                 Button("Mark as failed") {
                     onMarkAsFailed()

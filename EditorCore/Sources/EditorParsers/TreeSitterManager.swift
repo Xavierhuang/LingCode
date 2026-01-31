@@ -145,19 +145,15 @@ public class TreeSitterManager {
             return []
         }
         
-        // Parse the code
-        guard let tree = try? parser.parse(content) else {
+        guard let mutableTree = try? parser.parse(content) else {
             return []
         }
-        
-        // Execute Query to extract symbols
-        return extractSymbols(from: tree, content: content, language: normalized, fileURL: fileURL)
+        return extractSymbols(from: mutableTree, content: content, language: normalized, fileURL: fileURL)
     }
     
-    private func extractSymbols(from tree: Tree, content: String, language: String, fileURL: URL) -> [TreeSitterSymbol] {
+    private func extractSymbols(from tree: MutableTree, content: String, language: String, fileURL: URL) -> [TreeSitterSymbol] {
         var symbols: [TreeSitterSymbol] = []
         
-        // Get the S-Expression Query for this language
         guard let querySExpr = getQueryForLanguage(language),
               let parser = parsers[language],
               let languagePtr = parser.language,
@@ -166,8 +162,7 @@ public class TreeSitterManager {
             return []
         }
         
-        // Execute Query
-        let cursor = query.execute(node: tree.rootNode, in: tree)
+        let cursor = query.execute(in: tree)
         
         // Map Matches to TreeSitterSymbol
         for match in cursor {
@@ -181,9 +176,9 @@ public class TreeSitterManager {
                 let captureName = capture.name
                 let node = capture.node
                 
-                // Map Range (Tree-sitter uses Point(row, col))
-                startLine = Int(node.startPoint.row)
-                endLine = Int(node.endPoint.row)
+                // Map Range (Tree-sitter Point via pointRange)
+                startLine = Int(node.pointRange.lowerBound.row)
+                endLine = Int(node.pointRange.upperBound.row)
                 
                 // Extract name from "name" capture
                 if captureName == "name" {
@@ -336,12 +331,10 @@ public class TreeSitterManager {
             return []
         }
         
-        // Parse the code
-        guard let tree = try? parser.parse(content) else {
+        guard let mutableTree = try? parser.parse(content) else {
             return []
         }
         
-        // Get relationship query for this language
         guard let querySExpr = getRelationshipQueryForLanguage(normalized),
               let languagePtr = parser.language,
               let queryData = querySExpr.data(using: .utf8),
@@ -349,8 +342,7 @@ public class TreeSitterManager {
             return []
         }
         
-        // Execute Query
-        let cursor = query.execute(node: tree.rootNode, in: tree)
+        let cursor = query.execute(in: mutableTree)
         var relationships: [TreeSitterRelationship] = []
         
         for match in cursor {
@@ -403,6 +395,70 @@ public class TreeSitterManager {
         }
         
         return relationships
+    }
+    
+    // MARK: - High-frequency UI: Syntax highlighting (incremental, fast for large files)
+    
+    /// Highlight ranges for syntax highlighting. Use for high-frequency UI; reserve SwiftSyntax for deep refactors/AICodeReviewService.
+    /// Returns (range, category) where category is "keyword", "string", "comment", "number", or "type".
+    public func highlightRanges(content: String, language: String) -> [(NSRange, String)] {
+        let normalized = language.lowercased()
+        guard let parser = parsers[normalized] else {
+            return []
+        }
+        guard let mutableTree = try? parser.parse(content) else {
+            return []
+        }
+        guard let root = mutableTree.rootNode else {
+            return []
+        }
+        var result: [(NSRange, String)] = []
+        collectHighlightRanges(from: root, in: mutableTree, content: content, into: &result)
+        return result.sorted { $0.0.location < $1.0.location }
+    }
+    
+    private func collectHighlightRanges(from node: Node, in tree: MutableTree, content: String, into result: inout [(NSRange, String)]) {
+        guard let category = highlightCategory(for: node.nodeType) else {
+            for i in 0..<node.childCount {
+                if let child = node.child(at: i) {
+                    collectHighlightRanges(from: child, in: tree, content: content, into: &result)
+                }
+            }
+            return
+        }
+        guard let nsRange = byteRangeToNSRange(content: content, byteRange: node.byteRange) else {
+            return
+        }
+        result.append((nsRange, category))
+    }
+    
+    private func highlightCategory(for nodeType: String?) -> String? {
+        guard let t = nodeType?.lowercased() else { return nil }
+        if t.contains("string") || t == "string_content" { return "string" }
+        if t.contains("comment") { return "comment" }
+        if t.contains("number") || t == "float" || t == "integer" { return "number" }
+        if t == "keyword" || t == "type" || t.contains("keyword") { return "keyword" }
+        if t == "type_identifier" || t.hasSuffix("_type") { return "type" }
+        return nil
+    }
+    
+    /// Parser uses UTF-16; tree byte ranges are in UTF-16 code units (2 bytes per unit).
+    private func byteRangeToNSRange(content: String, byteRange: Range<UInt32>) -> NSRange? {
+        let startUnit = Int(byteRange.lowerBound) / 2
+        let endUnit = Int(byteRange.upperBound) / 2
+        let utf16Count = content.utf16.count
+        guard startUnit >= 0, endUnit <= utf16Count, startUnit <= endUnit else {
+            return nil
+        }
+        return NSRange(location: startUnit, length: endUnit - startUnit)
+    }
+    
+    /// Symbol breadcrumbs at a given line (for high-frequency UI). Use Tree-sitter; reserve SwiftSyntax for deep refactors.
+    public func symbolBreadcrumbs(content: String, language: String, fileURL: URL, cursorLine: Int) -> [String] {
+        let symbols = parse(content: content, language: language, fileURL: fileURL)
+        let containing = symbols.filter { $0.range.contains(cursorLine) }
+        let sorted = containing.sorted { ($0.range.upperBound - $0.range.lowerBound) < ($1.range.upperBound - $1.range.lowerBound) }
+        return sorted.map { $0.name }
     }
     
     /// Get relationship extraction queries for each language
@@ -613,26 +669,18 @@ public struct TreeSitterRelationship {
 }
 
 extension TreeSitterManager {
-    /// Extract string from byte range (Tree-sitter uses byte offsets)
+    /// Extract string from byte range. Parser uses UTF-16; byte range is in UTF-16 code units (2 bytes per unit).
     private func extractStringFromByteRange(content: String, byteRange: Range<UInt32>) -> String {
-        let startOffset = Int(byteRange.lowerBound)
-        let endOffset = Int(byteRange.upperBound)
-        
-        // Convert byte offsets to String indices
-        guard startOffset < content.utf8.count, endOffset <= content.utf8.count else {
+        let startUnit = Int(byteRange.lowerBound) / 2
+        let endUnit = Int(byteRange.upperBound) / 2
+        let utf16Count = content.utf16.count
+        guard startUnit >= 0, endUnit <= utf16Count, startUnit < endUnit else {
             return ""
         }
-        
-        let utf8 = content.utf8
-        guard let startIndex = utf8.index(utf8.startIndex, offsetBy: startOffset, limitedBy: utf8.endIndex),
-              let endIndex = utf8.index(utf8.startIndex, offsetBy: endOffset, limitedBy: utf8.endIndex) else {
-            return ""
-        }
-        
-        // Convert UTF8 view slice to String
-        let utf8Slice = utf8[startIndex..<endIndex]
-        return String(decoding: utf8Slice, as: UTF8.self)
+        let nsRange = NSRange(location: startUnit, length: endUnit - startUnit)
+        return (content as NSString).substring(with: nsRange)
     }
+}
 
 #else
 // Fallback when Tree-sitter is not available
@@ -646,6 +694,18 @@ public class TreeSitterManager {
     }
     
     public func parse(content: String, language: String, fileURL: URL) -> [TreeSitterSymbol] {
+        return []
+    }
+    
+    public func extractRelationships(content: String, language: String, fileURL: URL, knownClasses: Set<String>) -> [TreeSitterRelationship] {
+        return []
+    }
+    
+    public func highlightRanges(content: String, language: String) -> [(NSRange, String)] {
+        return []
+    }
+    
+    public func symbolBreadcrumbs(content: String, language: String, fileURL: URL, cursorLine: Int) -> [String] {
         return []
     }
 }
@@ -664,7 +724,7 @@ public struct TreeSitterSymbol {
     public let file: URL
     public let range: Range<Int>
     public let signature: String?
-    public let parent: String?  // Parent symbol name (e.g., class containing this method)
+    public let parent: String?
     
     public init(name: String, kind: Kind, file: URL, range: Range<Int>, signature: String?, parent: String? = nil) {
         self.name = name
@@ -673,6 +733,27 @@ public struct TreeSitterSymbol {
         self.range = range
         self.signature = signature
         self.parent = parent
+    }
+}
+
+public struct TreeSitterRelationship {
+    public enum RelationshipType {
+        case instantiation
+        case methodCall
+        case propertyAccess
+        case typeReference
+    }
+    
+    public let targetSymbol: String
+    public let relationshipType: RelationshipType
+    public let context: String
+    public let file: URL
+    
+    public init(targetSymbol: String, relationshipType: RelationshipType, context: String, file: URL) {
+        self.targetSymbol = targetSymbol
+        self.relationshipType = relationshipType
+        self.context = context
+        self.file = file
     }
 }
 #endif

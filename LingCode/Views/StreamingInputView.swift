@@ -296,6 +296,10 @@ struct StreamingInputView: View {
             displayName = "@terminal"
         case .web:
             displayName = "@web"
+        case .docs:
+            displayName = "@docs"
+        case .notepad:
+            displayName = "@notepad"
         }
         
         let mention = Mention(type: type, value: value, displayName: displayName)

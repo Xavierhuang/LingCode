@@ -38,19 +38,25 @@ enum SpecPromptAssemblyService {
     /// Returns nil if no rules file found or unreadable.
     static func loadWorkspaceRules(workspaceRootURL: URL?) -> String? {
         guard let root = workspaceRootURL else { return nil }
-        
-        // Priority order: WORKSPACE.md > .cursorrules > .lingcode > .lingrules
+        return loadedRulesFile(workspaceRootURL: root)?.content
+    }
+    
+    /// Name of the rules file that was loaded (e.g. "WORKSPACE.md", ".cursorrules") for UI display.
+    static func loadedRulesFileName(workspaceRootURL: URL?) -> String? {
+        loadedRulesFile(workspaceRootURL: workspaceRootURL)?.fileName
+    }
+    
+    private static func loadedRulesFile(workspaceRootURL: URL?) -> (fileName: String, content: String)? {
+        guard let root = workspaceRootURL else { return nil }
         let fileNames = [workspaceFileName, cursorRulesFileName] + legacyRuleFileNames
-        
         for fileName in fileNames {
             let fileURL = root.appendingPathComponent(fileName)
             if FileManager.default.fileExists(atPath: fileURL.path),
                let content = try? String(contentsOf: fileURL, encoding: .utf8),
                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return content
+                return (fileName, content)
             }
         }
-        
         return nil
     }
 

@@ -260,9 +260,109 @@ class LocalModelService {
     /// Get offline mode badge text
     var offlineModeBadge: String? {
         if isOfflineModeActive {
-            return "⚡ Offline mode active"
+            return "Offline mode active"
         }
         return nil
+    }
+    
+    // MARK: - Autocomplete Support
+    
+    /// Check if local model is available for a specific task
+    func isLocalModelAvailable(for task: AITask) -> Bool {
+        switch task {
+        case .autocomplete:
+            return localModelsAvailable.contains(.deepSeekCoder67B) || 
+                   localModelsAvailable.contains(.starcoder2) ||
+                   isOllamaAvailable()
+        case .inlineEdit, .refactor:
+            return localModelsAvailable.contains(.qwen7B) || isOllamaAvailable()
+        default:
+            return !localModelsAvailable.isEmpty || isOllamaAvailable()
+        }
+    }
+    
+    /// Check if Ollama is running locally
+    private func isOllamaAvailable() -> Bool {
+        // Check if Ollama is running by hitting its API
+        guard let url = URL(string: "http://localhost:11434/api/tags") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.0  // Quick timeout for availability check
+        
+        let semaphore = DispatchSemaphore(value: 0)
+        var isAvailable = false
+        
+        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                isAvailable = true
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + 1.5)
+        
+        return isAvailable
+    }
+    
+    /// Complete text using local model (for autocomplete)
+    func complete(
+        prompt: String,
+        maxTokens: Int = 100,
+        temperature: Double = 0.2,
+        stopSequences: [String] = []
+    ) async throws -> String {
+        // Try Ollama first (most common local setup)
+        if isOllamaAvailable() {
+            return try await completeWithOllama(prompt: prompt, maxTokens: maxTokens, temperature: temperature, stopSequences: stopSequences)
+        }
+        
+        // Fall back to local model files
+        let model: LocalModel = localModelsAvailable.contains(.deepSeekCoder67B) ? .deepSeekCoder67B : .starcoder2
+        return try await runInference(model: model, prompt: prompt, maxTokens: maxTokens, temperature: temperature)
+    }
+    
+    /// Complete using Ollama API
+    private func completeWithOllama(
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+        stopSequences: [String]
+    ) async throws -> String {
+        guard let url = URL(string: "http://localhost:11434/api/generate") else {
+            throw LocalModelError.inferenceFailed("Invalid Ollama URL")
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30.0
+        
+        // Use a fast code model - prefer deepseek-coder, qwen2.5-coder, or codellama
+        let body: [String: Any] = [
+            "model": "qwen2.5-coder:1.5b",  // Fast, small model for completions
+            "prompt": prompt,
+            "stream": false,
+            "options": [
+                "num_predict": maxTokens,
+                "temperature": temperature,
+                "stop": stopSequences
+            ]
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw LocalModelError.inferenceFailed("Ollama request failed")
+        }
+        
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let responseText = json["response"] as? String else {
+            throw LocalModelError.inferenceFailed("Invalid Ollama response")
+        }
+        
+        return responseText
     }
 }
 

@@ -548,3 +548,26 @@ struct TSQuery {
         }
     }
 }
+
+// MARK: - High-frequency UI (syntax highlighting, breadcrumbs) via Tree-sitter
+// Use Tree-sitter for UI; reserve SwiftSyntax for deep refactors and AICodeReviewService.
+
+#if canImport(EditorParsers)
+enum TreeSitterUI {
+    static func isLanguageSupported(_ language: String) -> Bool {
+        TreeSitterManager.shared.isLanguageSupported(language.lowercased())
+    }
+    static func highlightRanges(content: String, language: String) -> [(NSRange, String)] {
+        TreeSitterManager.shared.highlightRanges(content: content, language: language)
+    }
+    static func symbolBreadcrumbs(content: String, language: String, fileURL: URL, cursorLine: Int) -> [String] {
+        TreeSitterManager.shared.symbolBreadcrumbs(content: content, language: language, fileURL: fileURL, cursorLine: cursorLine)
+    }
+}
+#else
+enum TreeSitterUI {
+    static func isLanguageSupported(_ language: String) -> Bool { false }
+    static func highlightRanges(content: String, language: String) -> [(NSRange, String)] { [] }
+    static func symbolBreadcrumbs(content: String, language: String, fileURL: URL, cursorLine: Int) -> [String] { [] }
+}
+#endif

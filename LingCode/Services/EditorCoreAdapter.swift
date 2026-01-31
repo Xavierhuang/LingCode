@@ -676,19 +676,19 @@ public class InlineEditSession {
     func completeStreaming() {
         // Validate completion gate before allowing completion
         // This ensures session only completes when all safety conditions are met
-        let validation = SessionCompletionValidator.shared.validateCompletion(
+        let (canComplete, gateError) = ValidationCoordinator.shared.checkCompletionGate(
             httpStatus: nil, // HTTP status checked earlier in pipeline
             responseLength: model.streamingText.count,
-            parsedFiles: [], // Parsed files checked in EditIntentCoordinator
+            parsedFiles: [], // Parsed files checked in EditSessionOrchestrator
             proposedEdits: model.proposedEdits,
             validationErrors: model.validationErrors.flatMap { $0.issues.map { $0.message } }
         )
         
-        if !validation.canComplete {
+        if !canComplete {
             // Completion gate failed - transition to error state
-            let errorMsg = validation.errorMessage ?? "Session cannot complete due to validation failure"
+            let errorMsg = gateError ?? "Session cannot complete due to validation failure"
             model.status = .error(errorMsg)
-            model.errorMessage = validation.errorMessage
+            model.errorMessage = gateError
             model.recordTimelineEvent(.error(message: errorMsg), description: "Completion gate failed: \(errorMsg)")
             return
         }
@@ -792,7 +792,7 @@ final class EditorCoreAdapter: ObservableObject {
         
         // SAFETY GUARDS: Validate plan before execution
         let fileContents = Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0.content) })
-        let sizeEstimate = ExecutionOutcomeValidator.shared.estimateChangeSize(
+        let sizeEstimate = ValidationCoordinator.shared.estimateChangeSize(
             plan: executionPlan,
             files: fileContents
         )

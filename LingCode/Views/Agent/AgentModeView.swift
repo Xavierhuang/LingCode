@@ -93,8 +93,17 @@ struct AgentModeView: View {
     
     // MARK: - Header
     
+    private var agentRulesFileName: String? {
+        guard let url = editorViewModel.rootFolderURL else { return nil }
+        return SpecPromptAssemblyService.loadedRulesFileName(workspaceRootURL: url)
+    }
+    
+    private var agentIsLocalMode: Bool {
+        LocalOnlyService.shared.isLocalModeEnabled
+    }
+    
     private var headerView: some View {
-        HStack {
+        HStack(spacing: 12) {
             Image(systemName: "sparkles")
                 .foregroundColor(.purple)
             Text("Autonomous Agent")
@@ -109,6 +118,26 @@ struct AgentModeView: View {
                         .foregroundColor(.secondary)
                 }
             }
+            
+            if let name = agentRulesFileName {
+                Text(name)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(4)
+                    .help("Workspace rules loaded")
+            }
+            
+            Text(agentIsLocalMode ? "Local" : "Cloud")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(agentIsLocalMode ? .green : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background((agentIsLocalMode ? Color.green : Color.clear).opacity(0.12))
+                .cornerRadius(4)
+                .help(agentIsLocalMode ? "Using local model" : "Using cloud API")
             
             Spacer()
             

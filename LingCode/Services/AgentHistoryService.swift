@@ -22,6 +22,9 @@ struct AgentHistoryItem: Identifiable, Codable {
     var filesChanged: [String]
     var linesAdded: Int
     var linesRemoved: Int
+    var isPinned: Bool
+    var customName: String?
+    var isUnread: Bool
     
     enum AgentTaskStatus: String, Codable {
         case running
@@ -30,16 +33,75 @@ struct AgentHistoryItem: Identifiable, Codable {
         case cancelled
     }
     
+    init(id: UUID, description: String, projectURL: URL?, startTime: Date, endTime: Date? = nil, status: AgentTaskStatus, steps: [AgentStepHistory], result: AgentTaskResult? = nil, filesChanged: [String], linesAdded: Int, linesRemoved: Int, isPinned: Bool = false, customName: String? = nil, isUnread: Bool = false) {
+        self.id = id
+        self.description = description
+        self.projectURL = projectURL
+        self.startTime = startTime
+        self.endTime = endTime
+        self.status = status
+        self.steps = steps
+        self.result = result
+        self.filesChanged = filesChanged
+        self.linesAdded = linesAdded
+        self.linesRemoved = linesRemoved
+        self.isPinned = isPinned
+        self.customName = customName
+        self.isUnread = isUnread
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case id, description, projectURL, startTime, endTime, status, steps, result, filesChanged, linesAdded, linesRemoved
+        case isPinned, customName, isUnread
+    }
+    
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        description = try c.decode(String.self, forKey: .description)
+        projectURL = try c.decodeIfPresent(URL.self, forKey: .projectURL)
+        startTime = try c.decode(Date.self, forKey: .startTime)
+        endTime = try c.decodeIfPresent(Date.self, forKey: .endTime)
+        status = try c.decode(AgentTaskStatus.self, forKey: .status)
+        steps = try c.decode([AgentStepHistory].self, forKey: .steps)
+        result = try c.decodeIfPresent(AgentTaskResult.self, forKey: .result)
+        filesChanged = try c.decode([String].self, forKey: .filesChanged)
+        linesAdded = try c.decode(Int.self, forKey: .linesAdded)
+        linesRemoved = try c.decode(Int.self, forKey: .linesRemoved)
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        customName = try c.decodeIfPresent(String.self, forKey: .customName)
+        isUnread = try c.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(description, forKey: .description)
+        try c.encode(projectURL, forKey: .projectURL)
+        try c.encode(startTime, forKey: .startTime)
+        try c.encode(endTime, forKey: .endTime)
+        try c.encode(status, forKey: .status)
+        try c.encode(steps, forKey: .steps)
+        try c.encode(result, forKey: .result)
+        try c.encode(filesChanged, forKey: .filesChanged)
+        try c.encode(linesAdded, forKey: .linesAdded)
+        try c.encode(linesRemoved, forKey: .linesRemoved)
+        try c.encode(isPinned, forKey: .isPinned)
+        try c.encode(customName, forKey: .customName)
+        try c.encode(isUnread, forKey: .isUnread)
+    }
+    
     var duration: TimeInterval? {
         guard let endTime = endTime else { return nil }
         return endTime.timeIntervalSince(startTime)
     }
     
     var displayDescription: String {
-        if description.count > 50 {
-            return String(description.prefix(50)) + "..."
+        let base = customName ?? description
+        if base.count > 50 {
+            return String(base.prefix(50)) + "..."
         }
-        return description
+        return base
     }
 }
 
@@ -96,6 +158,7 @@ class AgentHistoryService: ObservableObject {
         let filesChanged = extractFilesChanged(from: steps)
         let (linesAdded, linesRemoved) = calculateLineChanges(from: steps)
         
+        let existing = historyItems.first { $0.id == task.id }
         let historyItem = AgentHistoryItem(
             id: task.id,
             description: task.description,
@@ -107,7 +170,10 @@ class AgentHistoryService: ObservableObject {
             result: result,
             filesChanged: filesChanged,
             linesAdded: linesAdded,
-            linesRemoved: linesRemoved
+            linesRemoved: linesRemoved,
+            isPinned: existing?.isPinned ?? false,
+            customName: existing?.customName,
+            isUnread: existing?.isUnread ?? false
         )
         
         // Update or add item
@@ -120,18 +186,35 @@ class AgentHistoryService: ObservableObject {
         saveHistory()
     }
     
-    /// Get filtered history based on search query
+    /// Get filtered history based on search query (pinned first, then by date)
     var filteredHistory: [AgentHistoryItem] {
+        let base: [AgentHistoryItem]
         if searchQuery.isEmpty {
-            return historyItems
+            base = historyItems
+        } else {
+            let query = searchQuery.lowercased()
+            base = historyItems.filter { item in
+                let desc = (item.customName ?? item.description).lowercased()
+                return desc.contains(query) ||
+                    item.description.lowercased().contains(query) ||
+                    item.filesChanged.contains(where: { $0.lowercased().contains(query) }) ||
+                    item.steps.contains(where: { $0.description.lowercased().contains(query) })
+            }
         }
-        
-        let query = searchQuery.lowercased()
-        return historyItems.filter { item in
-            item.description.lowercased().contains(query) ||
-            item.filesChanged.contains(where: { $0.lowercased().contains(query) }) ||
-            item.steps.contains(where: { $0.description.lowercased().contains(query) })
+        return base.sorted { a, b in
+            if a.isPinned != b.isPinned { return a.isPinned }
+            return a.startTime > b.startTime
         }
+    }
+    
+    /// Pinned items from filtered history
+    var pinnedHistory: [AgentHistoryItem] {
+        filteredHistory.filter { $0.isPinned }
+    }
+    
+    /// Unpinned items from filtered history
+    var unpinnedHistory: [AgentHistoryItem] {
+        filteredHistory.filter { !$0.isPinned }
     }
     
     /// Delete an agent history item
@@ -148,6 +231,59 @@ class AgentHistoryService: ObservableObject {
         item.status = .failed
         item.endTime = Date()
         historyItems[index] = item
+        saveHistory()
+    }
+    
+    /// Toggle pin for an item
+    func togglePin(_ id: UUID) {
+        guard let index = historyItems.firstIndex(where: { $0.id == id }) else { return }
+        historyItems[index].isPinned.toggle()
+        saveHistory()
+    }
+    
+    /// Duplicate an item (new id, same description and metadata; for re-run or variation)
+    func duplicateItem(_ id: UUID) -> UUID? {
+        guard let item = historyItems.first(where: { $0.id == id }) else { return nil }
+        let newItem = AgentHistoryItem(
+            id: UUID(),
+            description: item.description,
+            projectURL: item.projectURL,
+            startTime: Date(),
+            endTime: nil,
+            status: .running,
+            steps: [],
+            result: nil,
+            filesChanged: [],
+            linesAdded: 0,
+            linesRemoved: 0,
+            isPinned: false,
+            customName: item.customName.map { "\($0) (copy)" },
+            isUnread: true
+        )
+        historyItems.insert(newItem, at: 0)
+        saveHistory()
+        return newItem.id
+    }
+    
+    /// Rename an item (custom display name)
+    func renameItem(_ id: UUID, name: String) {
+        guard let index = historyItems.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        historyItems[index].customName = trimmed.isEmpty ? nil : trimmed
+        saveHistory()
+    }
+    
+    /// Mark an item as unread
+    func markAsUnread(_ id: UUID) {
+        guard let index = historyItems.firstIndex(where: { $0.id == id }) else { return }
+        historyItems[index].isUnread = true
+        saveHistory()
+    }
+    
+    /// Mark an item as read (clear unread)
+    func markAsRead(_ id: UUID) {
+        guard let index = historyItems.firstIndex(where: { $0.id == id }) else { return }
+        historyItems[index].isUnread = false
         saveHistory()
     }
     

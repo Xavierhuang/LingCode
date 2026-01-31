@@ -217,17 +217,15 @@ struct GhostTextEditor: NSViewRepresentable {
             let content = textView.string
             
             let lines = content.components(separatedBy: .newlines)
-            let lineNumber = content.prefix(position).components(separatedBy: .newlines).count
             let last200Lines = Array(lines.suffix(200)).joined(separator: "\n")
             
             let context = AutocompleteContext(
                 fileContent: content,
-                cursorPosition: lineNumber,
+                cursorPosition: position,
                 last200Lines: last200Lines,
-                language: language ?? "swift"
+                language: language ?? "swift",
+                filePath: nil  // Will be set by parent if available
             )
-            
-            print("🧠 Requesting Suggestion...")
             
             let powerSettings = PerformanceOptimizer.shared.getPowerSavingSettings()
             if powerSettings.reduceAutocompleteFrequency { return }
@@ -236,8 +234,7 @@ struct GhostTextEditor: NSViewRepresentable {
                 context: context,
                 onSuggestion: { suggestion in
                     if let suggestion = suggestion {
-                        print("✨ Suggestion Received: '\(suggestion.currentText)'")
-                        textView.ghostText = suggestion.currentText
+                        textView.ghostText = suggestion.text
                     }
                 },
                 onCancel: {}
