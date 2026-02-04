@@ -414,7 +414,76 @@ This file is:
 
 ---
 
-## 7. Roadmap: Closing Remaining Gaps
+## 7. Multi-Agent System (Subagents)
+
+### The Problem: Limited Delegation (Cursor)
+
+Cursor's subagents are primarily for background exploration. LingCode provides **8 specialized subagent types** that can run in parallel.
+
+### LingCode's Specialized Subagents
+
+| Subagent | Purpose | Capabilities |
+|----------|---------|--------------|
+| **Coder** | Write clean, efficient code | write_file, read_file, terminal |
+| **Reviewer** | Find issues, suggest improvements | read_file, codebase_search |
+| **Tester** | Write comprehensive tests | write_file, read_file, terminal |
+| **Documenter** | Generate documentation | write_file, read_file |
+| **Debugger** | Find and fix bugs | read_file, terminal, codebase_search |
+| **Researcher** | Gather information | read_file, codebase_search, web_search |
+| **Refactorer** | Improve code structure | write_file, read_file, codebase_search |
+| **Architect** | Design system structure | read_file, codebase_search |
+
+### Parallel Execution
+
+LingCode runs up to 3 subagents concurrently:
+
+```
+┌─────────────────────────────────────────┐
+│  Task: "Add user authentication"        │
+├─────────────────────────────────────────┤
+│  [1] Researcher ████████░░ Running      │
+│  [2] Architect  ████████░░ Running      │
+│  [3] Coder      ░░░░░░░░░░ Pending      │
+│  [4] Tester     ░░░░░░░░░░ Pending      │
+│  [5] Reviewer   ░░░░░░░░░░ Pending      │
+└─────────────────────────────────────────┘
+       │
+       v
+  Results flow to next agent
+```
+
+### Task Breakdown
+
+For complex tasks, LingCode automatically creates a pipeline:
+
+1. **Researcher** - Understand the codebase
+2. **Architect** - Design the approach  
+3. **Coder** - Implement the solution
+4. **Tester** - Write tests
+5. **Reviewer** - Check the implementation
+
+### Quick Actions
+
+One-click delegation from the Subagent panel:
+- **Review Code** - Get instant code review
+- **Write Tests** - Generate test coverage
+- **Add Docs** - Generate documentation
+- **Refactor** - Improve code structure
+
+### Subagent Comparison
+
+| Feature | LingCode | Cursor |
+|---------|----------|--------|
+| Specialized agent types | 8 types | Generic only |
+| Parallel execution | Up to 3 concurrent | Limited |
+| Task breakdown | Automatic pipeline | Manual |
+| Quick actions UI | Yes | No |
+| Agent-specific prompts | Yes | No |
+| Capability restrictions | Per-agent | Global |
+
+---
+
+## 8. Roadmap: Closing Remaining Gaps
 
 ### Currently Implementing
 
@@ -422,9 +491,8 @@ This file is:
 |---------|------------|-----------------|
 | MCP (Model Context Protocol) | Yes | In Progress |
 | Skills (/commit, /review) | Yes | Planned |
-| Subagents | Yes | Planned |
-| CLI Agent | Yes | Planned |
-| Bugbot (PR Review) | Yes | Planned |
+| CLI Agent | Yes | Available |
+| Bugbot (PR Review) | Yes | Available |
 
 ### LingCode-Exclusive (Cursor Doesn't Have)
 
@@ -435,10 +503,115 @@ This file is:
 | True Offline | Full functionality without internet |
 | Prompt Transparency | Inspectable WORKSPACE.md precedence |
 | Native Performance | 5x faster, 5x less memory |
+| One-Click Deploy | Integrated deployment to Vercel, Netlify, etc. |
+| Specialized Subagents | 8 agent types with parallel execution |
 
 ---
 
-## 8. Decision Guide
+## 9. Deployment: One-Click Deploy
+
+### The Problem: No Built-in Deployment (Cursor)
+
+Cursor has no native deployment support. Developers must:
+
+- Manually run CLI commands in terminal
+- Switch to separate deployment dashboards
+- No pre-deploy validation
+- No deployment history tracking
+- No WORKSPACE.md integration
+
+### LingCode's Solution: Integrated Deployment
+
+LingCode provides one-click deployment with pre-validation:
+
+```
+┌─────────────────────────────────────────┐
+│         DEPLOY VALIDATION GATE          │
+│  ┌─────────────────────────────────┐    │
+│  │  Stage 1: Run Tests             │    │  npm test / pytest
+│  └─────────────────────────────────┘    │
+│            │                            │
+│  ┌─────────────────────────────────┐    │
+│  │  Stage 2: Build Check           │    │  npm run build
+│  └─────────────────────────────────┘    │
+│            │                            │
+│  ┌─────────────────────────────────┐    │
+│  │  Stage 3: Env Validation        │    │  Check required vars
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+       │
+       v
+Only if ALL pass: Execute deploy
+```
+
+### Supported Platforms
+
+| Platform | CLI | Auto-Detected |
+|----------|-----|---------------|
+| Vercel | `vercel` | Next.js, React, Vue |
+| Netlify | `netlify` | Static sites, SPA |
+| Railway | `railway` | Node.js, Python |
+| Fly.io | `fly` | Docker, Go, Rust |
+| Heroku | `heroku` | Python, Node.js |
+| Docker | `docker` | Any containerized app |
+
+### WORKSPACE.md Integration
+
+Configure deployment in your versioned project rules:
+
+```markdown
+## Deployment
+- Target: Vercel
+- Branch: main
+- Build Command: npm run build
+- Environment: production
+- Pre-deploy: npm test
+```
+
+This keeps deployment config:
+- Versioned in git with your code
+- Inspectable and auditable
+- Shared across the team
+- Consistent with LingCode's transparency philosophy
+
+### Deployment UI
+
+```
+┌─────────────────────────────────────────┐
+│  [Cloud Icon] Deploy                    │
+│  Project: Next.js                       │
+├─────────────────────────────────────────┤
+│  [Checkmark] Ready to deploy            │
+│                                         │
+│  [========== Deploy Now ==========]     │
+│                                         │
+├─────────────────────────────────────────┤
+│  Configuration                          │
+│  ┌─────────────────────────────────┐    │
+│  │ [V] Vercel - main (production)  │ [*]│
+│  │ [N] Netlify - staging           │ [ ]│
+│  └─────────────────────────────────┘    │
+├─────────────────────────────────────────┤
+│  Last deploy: 2 min ago                 │
+│  https://myapp.vercel.app               │
+└─────────────────────────────────────────┘
+```
+
+### Deployment Comparison
+
+| Feature | LingCode | Cursor |
+|---------|----------|--------|
+| One-click deploy | Yes | No |
+| Pre-deploy validation | Yes (tests + build) | No |
+| Platform integrations | 6+ platforms | None |
+| Deploy config in WORKSPACE.md | Yes | No |
+| Deployment history | Yes | No |
+| Project type auto-detection | Yes | No |
+| Environment management | Yes | No |
+
+---
+
+## 10. Decision Guide
 
 ### Choose LingCode If You:
 
@@ -447,6 +620,7 @@ This file is:
 - Want faster performance on macOS
 - Require strong data integrity guarantees
 - Prefer native app experience
+- Want integrated deployment workflow
 
 ### Choose Cursor If You:
 
@@ -457,7 +631,7 @@ This file is:
 
 ---
 
-## 9. Metrics to Watch
+## 11. Metrics to Watch
 
 ### LingCode Tracks
 
@@ -477,7 +651,7 @@ This file is:
 
 ---
 
-## 10. Conclusion
+## 12. Conclusion
 
 LingCode beats Cursor on:
 
@@ -486,6 +660,8 @@ LingCode beats Cursor on:
 3. **Integrity:** Single write pipeline with atomic transactions
 4. **Privacy:** True local-first with Ollama support
 5. **Auditability:** Deterministic prompts via WORKSPACE.md
+6. **Deployment:** One-click deploy with pre-validation to 6+ platforms
+7. **Multi-Agent:** 8 specialized subagents with parallel execution
 
 LingCode matches Cursor on:
 
@@ -499,4 +675,4 @@ LingCode matches Cursor on:
 
 ---
 
-*This document is updated as both products evolve. Last updated: January 2026*
+*This document is updated as both products evolve. Last updated: February 2026*
