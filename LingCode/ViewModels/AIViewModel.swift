@@ -1517,6 +1517,18 @@ class AIViewModel: ObservableObject {
         createdFiles = []
     }
     
+    /// Load a conversation from history
+    func loadConversation(_ historyItem: ConversationHistoryItem) {
+        // Clear current state
+        clearConversation()
+        
+        // Load messages from history
+        for messageHistory in historyItem.messages {
+            let message = messageHistory.toAIMessage()
+            conversation.messages.append(message)
+        }
+    }
+    
     func setAPIKey(_ key: String, provider: AIProvider) {
         aiService.setAPIKey(key, provider: provider)
     }

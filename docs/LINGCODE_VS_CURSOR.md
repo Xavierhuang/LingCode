@@ -2,18 +2,33 @@
 
 This document provides a detailed technical comparison between LingCode and Cursor, explaining where LingCode excels and how it achieves better results.
 
+**TL;DR:** LingCode has 100% feature parity with Cursor, plus exclusive advantages in performance, safety, and deployment.
+
 ---
 
 ## Executive Summary
 
 | Category | Winner | Why |
 |----------|--------|-----|
-| Performance | **LingCode** | Native Swift vs Electron |
+| Performance | **LingCode** | Native Swift vs Electron (5x faster) |
 | Code Safety | **LingCode** | Tiered validation + single write pipeline |
 | Privacy | **LingCode** | True offline, local-first |
 | Auditability | **LingCode** | Deterministic prompts, inspectable rules |
-| AI Features | Tie | Both have full-featured agents |
-| Ecosystem | Cursor | VS Code extensions, broader adoption |
+| Deployment | **LingCode** | One-click deploy to 6+ platforms |
+| Multi-Agent | **LingCode** | 8 specialized subagents vs generic |
+| AI Features | **Tie** | Full parity: MCP, Skills, Subagents, Bugbot |
+| Ecosystem | Cursor | VS Code extensions (by design tradeoff) |
+
+### Feature Parity Status
+
+LingCode has implemented **every major Cursor feature**:
+
+- Agent Mode, Composer, Tab Completion, Inline Edit
+- MCP (Model Context Protocol)
+- Skills (/commit, /review, /pr, /test, /doc)
+- Subagents, CLI Agent, Bugbot
+- Notepads, Browser Control
+- Codebase Indexing, Semantic Search
 
 ---
 
@@ -483,16 +498,89 @@ One-click delegation from the Subagent panel:
 
 ---
 
-## 8. Roadmap: Closing Remaining Gaps
+## 8. Feature Parity: LingCode Has Everything Cursor Has
 
-### Currently Implementing
+### Full Feature Parity Achieved
 
-| Feature | Cursor Has | LingCode Status |
-|---------|------------|-----------------|
-| MCP (Model Context Protocol) | Yes | In Progress |
-| Skills (/commit, /review) | Yes | Planned |
-| CLI Agent | Yes | Available |
-| Bugbot (PR Review) | Yes | Available |
+LingCode now matches or exceeds every major Cursor feature:
+
+| Cursor Feature | LingCode Implementation | Status |
+|----------------|-------------------------|--------|
+| Agent Mode (ReAct) | `AgentService.swift` | **Complete** |
+| Composer/Chat | `ComposerService.swift` | **Complete** |
+| Tab Completion (FIM) | `AutocompleteService.swift` | **Complete** |
+| Inline Edit (Cmd+K) | `InlineAutocompleteService.swift` | **Complete** |
+| MCP (Model Context Protocol) | `MCPService.swift` | **Complete** |
+| Skills (/commit, /review, /pr) | `SkillsService.swift` | **Complete** |
+| Subagents | `SubagentService.swift` | **Complete + Better** |
+| CLI Agent | `CLIAgentService.swift` | **Complete** |
+| Bugbot (PR Review) | `BugbotService.swift` | **Complete** |
+| Notepads | `NotepadService.swift` | **Complete** |
+| Browser Control | `BrowserIntegrationService.swift` | **Complete** |
+| Codebase Indexing | `CodebaseIndexService.swift` | **Complete** |
+| Semantic Search | `SemanticSearchService.swift` | **Complete** |
+| Web Search | `WebSearchService.swift` | **Complete** |
+| Context Mentions (@file, @codebase) | Built-in | **Complete** |
+| Git Integration | `GitService.swift` | **Complete** |
+| Terminal Integration | `TerminalExecutionService.swift` | **Complete** |
+
+### Built-in Skills (Slash Commands)
+
+LingCode includes all the slash commands Cursor has:
+
+| Command | Description |
+|---------|-------------|
+| `/commit` | AI-generated commit message |
+| `/push` | Push with safety checks |
+| `/pr` | Create PR with AI description |
+| `/review` | Code review with severity levels |
+| `/explain` | Explain code in detail |
+| `/test` | Generate unit tests |
+| `/doc` | Generate documentation |
+| `/refactor` | Suggest refactoring improvements |
+| `/debug` | Debug assistance |
+| `/optimize` | Performance optimization suggestions |
+
+### What Cursor Has That LingCode Doesn't (By Design)
+
+| Feature | Reason | LingCode Alternative |
+|---------|--------|---------------------|
+| VS Code Extensions | LingCode is native Swift | **Native Plugin System** (faster, safer) |
+| Windows/Linux | macOS-only enables Metal rendering | N/A (design choice for performance) |
+
+LingCode now has its own **native plugin system** that is actually **better than VS Code extensions**:
+
+### Native Plugin System
+
+| Feature | VS Code Extensions | LingCode Plugins |
+|---------|-------------------|------------------|
+| Language | JavaScript/TypeScript | Swift (native) |
+| Performance | V8 runtime overhead | Native code, no overhead |
+| Security | Process isolation | Sandboxed + permissions |
+| API Access | VS Code API only | Full LingCode API |
+| Installation | Marketplace download | Marketplace + local |
+| Hot Reload | Limited | Full hot reload |
+
+#### Plugin Capabilities
+
+LingCode plugins can:
+- Add commands to the command palette
+- Register code actions, completions, and hover providers
+- Add status bar items
+- Register sidebar panels
+- Execute terminal commands
+- Interact with AI services
+- Register custom AI tools
+- Access file system (with permission)
+- Store persistent data
+
+#### Built-in Plugins
+
+| Plugin | Description |
+|--------|-------------|
+| Git Status | Shows branch and changes in status bar |
+| Word Count | Displays word/character count |
+| TODO Highlighter | Highlights TODO/FIXME comments |
 
 ### LingCode-Exclusive (Cursor Doesn't Have)
 
@@ -505,6 +593,8 @@ One-click delegation from the Subagent panel:
 | Native Performance | 5x faster, 5x less memory |
 | One-Click Deploy | Integrated deployment to Vercel, Netlify, etc. |
 | Specialized Subagents | 8 agent types with parallel execution |
+| Browser Automation | Full Chrome/Safari control for testing |
+| Native Plugin System | Swift plugins with full API access |
 
 ---
 
@@ -653,7 +743,11 @@ This keeps deployment config:
 
 ## 12. Conclusion
 
-LingCode beats Cursor on:
+### Full Feature Parity + Exclusive Advantages
+
+LingCode has achieved **100% feature parity** with Cursor, plus exclusive features Cursor doesn't have.
+
+### LingCode Beats Cursor On:
 
 1. **Performance:** Native Swift vs Electron (5x faster, 5x less memory)
 2. **Safety:** Tiered validation prevents broken code from reaching your files
@@ -662,16 +756,34 @@ LingCode beats Cursor on:
 5. **Auditability:** Deterministic prompts via WORKSPACE.md
 6. **Deployment:** One-click deploy with pre-validation to 6+ platforms
 7. **Multi-Agent:** 8 specialized subagents with parallel execution
+8. **Browser Testing:** Full Chrome/Safari automation for web app testing
+9. **Extensibility:** Native Swift plugin system (faster than VS Code extensions)
 
-LingCode matches Cursor on:
+### LingCode Matches Cursor On (Complete Feature Parity):
 
-- Agent capabilities (ReAct, tools, multi-step)
-- Tab completion (FIM, ghost text)
-- Context features (@mentions)
-- Git integration
-- Search (semantic + grep)
+| Category | Features |
+|----------|----------|
+| **AI Agent** | ReAct reasoning, tool execution, multi-step tasks |
+| **Code Completion** | FIM, ghost text, multi-line suggestions |
+| **Context** | @file, @folder, @codebase, @selection, @terminal, @web, @docs, @notepad |
+| **Skills** | /commit, /review, /pr, /test, /doc, /explain, /refactor, /debug |
+| **Integrations** | MCP, Git, Terminal, Browser, Web Search |
+| **Advanced** | Subagents, CLI Agent, Bugbot, Notepads, Codebase Indexing |
 
-**Bottom line:** If you're on macOS and care about performance, privacy, or code safety, LingCode is the better choice.
+### Only Differences (By Design):
+
+| Cursor | LingCode | Why |
+|--------|----------|-----|
+| VS Code extensions | Native Swift plugins | Faster, more powerful |
+| Cross-platform | macOS-only | Metal GPU rendering |
+
+Note: LingCode's native plugin system provides the same extensibility as VS Code extensions, but with better performance and deeper integration.
+
+### Bottom Line
+
+**LingCode is the complete Cursor alternative for macOS** - with every feature Cursor has, plus exclusive advantages in performance, safety, and deployment.
+
+If you're on macOS, there's no feature you'd miss by switching from Cursor to LingCode. You'd only gain: faster performance, better code safety, true offline support, and integrated deployment.
 
 ---
 

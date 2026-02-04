@@ -15,6 +15,7 @@ struct AIChatView: View {
     @State private var activeMentions: [Mention] = []
     @State private var showFileSelector: Bool = false
     @State private var showProjectGenerator: Bool = false
+    @State private var showHistoryPanel: Bool = false
     @AppStorage("AIChatView.viewMode") private var viewMode: AIViewMode = .agent  // Default to Agent mode
     @StateObject private var imageContextService = ImageContextService.shared
     @State private var shouldAutoScroll: Bool = true  // Track if we should auto-scroll
@@ -58,6 +59,18 @@ struct AIChatView: View {
                             RoundedRectangle(cornerRadius: 6)
                                 .stroke(Color(NSColor.separatorColor), lineWidth: 0.5)
                         )
+                        
+                        // History button
+                        Button(action: { showHistoryPanel.toggle() }) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.system(size: 14))
+                                .foregroundColor(showHistoryPanel ? .accentColor : DesignSystem.Colors.textSecondary)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .help("Conversation History")
+                        .popover(isPresented: $showHistoryPanel, arrowEdge: .bottom) {
+                            ConversationHistoryPanel(viewModel: viewModel, isPresented: $showHistoryPanel)
+                        }
                         
                         // New Project button
                         Button(action: { showProjectGenerator = true }) {
@@ -128,9 +141,7 @@ struct AIChatView: View {
     
     private func modeButton(_ mode: AIViewMode, icon: String, label: String, shortcut: String? = nil) -> some View {
         Button(action: {
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
-                viewMode = mode
-            }
+            switchToMode(mode)
         }) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: viewMode == mode ? .semibold : .regular))
@@ -141,6 +152,24 @@ struct AIChatView: View {
         }
         .buttonStyle(PlainButtonStyle())
         .help("\(label) mode\(shortcut.map { " (\($0))" } ?? "")")
+    }
+    
+    /// Switch modes with proper state cleanup
+    private func switchToMode(_ mode: AIViewMode) {
+        guard viewMode != mode else { return }
+        
+        // Clear state from previous mode to avoid confusion
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+            // Clear streaming state when leaving any mode
+            StreamingUpdateCoordinator.shared.reset()
+            
+            // Clear the AIViewModel state if leaving non-agent modes
+            if viewMode != .agent {
+                viewModel.cancelGeneration()
+            }
+            
+            viewMode = mode
+        }
     }
     
     // Removed leftEdgeCollapseButton - using ContentView's resizable divider instead
