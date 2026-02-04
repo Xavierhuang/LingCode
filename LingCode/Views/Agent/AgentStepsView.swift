@@ -25,6 +25,31 @@ struct AgentStepsView: View {
         }
         return false
     }
+    
+    /// Filter steps to avoid redundant "Task Complete" cards
+    /// Only show the final .complete step, filter out intermediate ones
+    private var filteredSteps: [AgentStep] {
+        var result: [AgentStep] = []
+        var lastCompleteStep: AgentStep?
+        
+        for step in agent.steps {
+            if step.type == .complete {
+                // Keep track of the last complete step
+                lastCompleteStep = step
+            } else {
+                // Add non-complete steps
+                result.append(step)
+            }
+        }
+        
+        // Only add the final complete step if agent is not running
+        // (If running, more steps might come, so don't show "complete" yet)
+        if !agent.isRunning, let completeStep = lastCompleteStep {
+            result.append(completeStep)
+        }
+        
+        return result
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -42,7 +67,9 @@ struct AgentStepsView: View {
                         }
                     }
                     
-                    ForEach(agent.steps) { step in
+                    // Filter out intermediate "Task Complete" steps - only show the final one
+                    // This prevents multiple "Task Complete" cards from stacking up
+                    ForEach(filteredSteps) { step in
                         AgentStepRow(step: step)
                             .id(step.id)
                             .transition(.asymmetric(
