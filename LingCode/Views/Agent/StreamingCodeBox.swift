@@ -40,21 +40,15 @@ struct StreamingCodeBox: View {
     
     private var fileHeaderView: some View {
         HStack(spacing: 6) {
-            if let name = fileName {
+            if let name = fileName, !name.isEmpty {
                 Image(systemName: "doc.text.fill")
                     .font(.system(size: 10))
                     .foregroundColor(fileColor(for: name))
                 Text(name)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(.primary)
-            } else {
-                Image(systemName: "doc.text.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(.blue)
-                Text("New file")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
             }
+            // Don't show anything if no filename - the parent card already shows status
             Spacer()
             if isStreaming {
                 streamingBadge
@@ -122,11 +116,8 @@ struct StreamingCodeBox: View {
         HStack(spacing: 8) {
             ProgressView()
                 .scaleEffect(0.5)
-            Text("Generating code...")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .padding(12)
         .id("placeholder")
     }

@@ -42,7 +42,7 @@ struct AgentModeView: View {
                     Divider()
                     inputAreaView
                 }
-                .frame(width: showAgentList ? geometry.size.width / 2 : geometry.size.width)
+                .frame(minWidth: 400, maxWidth: .infinity)
                 
                 if showAgentList {
                     Rectangle()
@@ -57,7 +57,7 @@ struct AgentModeView: View {
                             selectedChatId = agent.id
                         }
                     )
-                    .frame(width: geometry.size.width / 2)
+                    .frame(minWidth: 220, maxWidth: 300)
                 }
             }
         }
