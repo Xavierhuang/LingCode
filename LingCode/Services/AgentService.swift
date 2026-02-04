@@ -137,6 +137,12 @@ class AgentService: ObservableObject, Identifiable {
     // MARK: - Core Loop
 
     private func runNextIteration(task: AgentTask, projectURL: URL?, originalContext: String?, images: [AttachedImage] = [], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void) {
+        // Ensure previous action is complete before starting new iteration
+        guard currentActionStep == nil else {
+            // Previous step still running - this shouldn't happen, but guard against it
+            return
+        }
+        
         iterationCount += 1
         streamingText = ""
         
@@ -192,7 +198,9 @@ class AgentService: ObservableObject, Identifiable {
                     accumulatedResponse += chunk
                     
                     // Handle heartbeat - convert thinking step to action step
-                    if chunk.contains("TOOL_STARTING:") {
+                    // Only process the FIRST tool starting marker, ignore subsequent ones
+                    // This ensures one tool executes at a time
+                    if chunk.contains("TOOL_STARTING:") && self.currentActionStep == nil {
                         if let range = chunk.range(of: "TOOL_STARTING:"),
                            let endRange = chunk.range(of: "\n", range: range.upperBound..<chunk.endIndex) {
                             let toolName = String(chunk[range.upperBound..<endRange.lowerBound])
