@@ -111,6 +111,23 @@ struct EditorView: View {
                         } label: {
                             Label("Rename Symbol", systemImage: "pencil.and.outline")
                         }
+                        
+                        // Open in Browser - for web files
+                        if let filePath = document.filePath, isWebFile(filePath) {
+                            Divider()
+                            
+                            Button {
+                                openInBrowser(filePath)
+                            } label: {
+                                Label("Open in Browser", systemImage: "safari")
+                            }
+                            
+                            Button {
+                                startLiveServer(filePath)
+                            } label: {
+                                Label("Start Live Server", systemImage: "play.circle")
+                            }
+                        }
                     }
                     
                     // Ghost text indicator
@@ -1207,5 +1224,54 @@ extension EditorView {
         // Update cursor position
         let newPosition = position + suggestion.text.count
         viewModel.updateSelection("", position: newPosition)
+    }
+    
+    // MARK: - Browser Preview
+    
+    /// Check if file is a web file that can be previewed
+    private func isWebFile(_ filePath: URL) -> Bool {
+        let webExtensions = ["html", "htm", "xhtml", "svg"]
+        return webExtensions.contains(filePath.pathExtension.lowercased())
+    }
+    
+    /// Open file directly in default browser
+    private func openInBrowser(_ filePath: URL) {
+        NSWorkspace.shared.open(filePath)
+    }
+    
+    /// Start a simple live server for the file
+    private func startLiveServer(_ filePath: URL) {
+        let directory = filePath.deletingLastPathComponent()
+        let fileName = filePath.lastPathComponent
+        
+        // Try to find an available port
+        let port = 3000
+        
+        Task {
+            // Check if Python is available for simple HTTP server
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = ["-m", "http.server", String(port)]
+            process.currentDirectoryURL = directory
+            
+            do {
+                try process.run()
+                
+                // Wait a moment for server to start
+                try await Task.sleep(nanoseconds: 500_000_000)
+                
+                // Open in browser
+                if let url = URL(string: "http://localhost:\(port)/\(fileName)") {
+                    await MainActor.run {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            } catch {
+                // Fallback: just open the file directly
+                await MainActor.run {
+                    NSWorkspace.shared.open(filePath)
+                }
+            }
+        }
     }
 }
