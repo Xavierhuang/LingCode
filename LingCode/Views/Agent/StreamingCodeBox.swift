@@ -47,11 +47,11 @@ struct StreamingCodeBox: View {
                 Text(name)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(.primary)
-            } else if isStreaming {
+            } else {
                 Image(systemName: "doc.text.fill")
                     .font(.system(size: 10))
                     .foregroundColor(.blue)
-                Text("Generating code...")
+                Text("New file")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(.secondary)
             }

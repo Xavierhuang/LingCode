@@ -145,11 +145,20 @@ struct AgentStepRow: View {
     @ViewBuilder
     private var statusText: some View {
         if step.status == .running {
-            HStack(spacing: 6) {
-                PulseDot(color: .accentColor, size: 6, minScale: 0.8, maxScale: 1.0, minOpacity: 0.5, maxOpacity: 1.0, duration: 0.8)
-                Text(isFileWriteStep ? "Writing..." : (isFileReadStep ? "Reading..." : "Processing..."))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            // Don't show "Writing..." or "Reading..." if we have content boxes that already show status
+            if isFileWriteStep && hasWriteContent {
+                // StreamingCodeBox already shows "Writing" badge - don't duplicate
+                EmptyView()
+            } else if isFileReadStep && step.output != nil && !(step.output ?? "").isEmpty {
+                // FileReadBox already shows "Reading" badge - don't duplicate
+                EmptyView()
+            } else {
+                HStack(spacing: 6) {
+                    PulseDot(color: .accentColor, size: 6, minScale: 0.8, maxScale: 1.0, minOpacity: 0.5, maxOpacity: 1.0, duration: 0.8)
+                    Text(isFileWriteStep ? "Writing..." : (isFileReadStep ? "Reading..." : "Processing..."))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         } else if step.status == .completed && (isFileWriteStep || isFileReadStep) {
             Text("Success")
