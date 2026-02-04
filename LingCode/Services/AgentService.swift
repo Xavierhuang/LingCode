@@ -243,7 +243,20 @@ class AgentService: ObservableObject, Identifiable {
                     
                     let (_, toolCalls) = ToolCallHandler.shared.processChunk(chunk, projectURL: projectURL)
                     detectedToolCalls.append(contentsOf: toolCalls)
-                    if !detectedToolCalls.isEmpty { break }
+                    // Don't break immediately - continue streaming to get full content
+                    // Only break if we have tool calls AND it's not a write_file (which needs content)
+                    if !detectedToolCalls.isEmpty {
+                        let isWriteFile = detectedToolCalls.contains { $0.name == "write_file" }
+                        if !isWriteFile {
+                            break
+                        }
+                        // For write_file, check if we have content before breaking
+                        if let tc = detectedToolCalls.first(where: { $0.name == "write_file" }),
+                           let content = tc.input["content"]?.value as? String,
+                           !content.isEmpty {
+                            break
+                        }
+                    }
                 }
                 
                 self.clearThinkingStep()
