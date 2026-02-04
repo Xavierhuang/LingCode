@@ -201,7 +201,7 @@ class MentionParser {
                 
             case .notepad:
                 // Include notepad content
-                let notepadContext = NotepadService.shared.buildContext(notepadName: mention.value.isEmpty ? nil : mention.value)
+                let notepadContext = NotepadService.shared.getContextForQuery(mention.value)
                 context += "\n\n" + notepadContext
             }
         }
@@ -326,7 +326,7 @@ class MentionParser {
                 }
                 
             case .notepad:
-                let notepadContext = NotepadService.shared.buildContext(notepadName: mention.value.isEmpty ? nil : mention.value)
+                let notepadContext = NotepadService.shared.getContextForQuery(mention.value)
                 context += "\n\n" + notepadContext
             }
         }
