@@ -6,35 +6,73 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct TabBarView: View {
     @ObservedObject var editorState: EditorState
     let onClose: (UUID) -> Void
     @State private var hoveredTabId: UUID?
     
+    /// Check if current file is previewable in browser
+    private var canPreviewInBrowser: Bool {
+        guard let doc = editorState.activeDocument,
+              let path = doc.filePath else { return false }
+        let ext = path.pathExtension.lowercased()
+        return ["html", "htm", "xhtml", "svg"].contains(ext)
+    }
+    
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(editorState.documents) { document in
-                    TabItemView(
-                        document: document,
-                        isActive: editorState.activeDocumentId == document.id,
-                        isHovered: hoveredTabId == document.id,
-                        onSelect: {
-                            withAnimation(DesignSystem.Animation.quick) {
-                                editorState.setActiveDocument(document.id)
+        HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(editorState.documents) { document in
+                        TabItemView(
+                            document: document,
+                            isActive: editorState.activeDocumentId == document.id,
+                            isHovered: hoveredTabId == document.id,
+                            onSelect: {
+                                withAnimation(DesignSystem.Animation.quick) {
+                                    editorState.setActiveDocument(document.id)
+                                }
+                            },
+                            onClose: {
+                                onClose(document.id)
+                            },
+                            onHover: { hovering in
+                                withAnimation(DesignSystem.Animation.quick) {
+                                    hoveredTabId = hovering ? document.id : nil
+                                }
                             }
-                        },
-                        onClose: {
-                            onClose(document.id)
-                        },
-                        onHover: { hovering in
-                            withAnimation(DesignSystem.Animation.quick) {
-                                hoveredTabId = hovering ? document.id : nil
-                            }
-                        }
-                    )
+                        )
+                    }
                 }
+            }
+            
+            Spacer()
+            
+            // Browser preview button for HTML files
+            if canPreviewInBrowser {
+                HStack(spacing: 8) {
+                    Divider()
+                        .frame(height: 20)
+                    
+                    Button(action: openInBrowser) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "safari")
+                                .font(.system(size: 12))
+                            Text("Preview")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.1))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help("Open in Browser")
+                }
+                .padding(.trailing, 12)
             }
         }
         .frame(height: 36)
@@ -45,6 +83,12 @@ struct TabBarView: View {
                 .frame(height: 1),
             alignment: .bottom
         )
+    }
+    
+    private func openInBrowser() {
+        guard let doc = editorState.activeDocument,
+              let path = doc.filePath else { return }
+        NSWorkspace.shared.open(path)
     }
 }
 
