@@ -41,11 +41,13 @@ class AgentService: ObservableObject, Identifiable {
     private var failedActions: Set<String> = []
     private var recentActions: [String] = []
     private var recentlyWrittenFiles: Set<String> = []
+    private var searchQueries: [String] = []  // Track search queries to detect loops
     private let maxRecentActions = 5
     private let maxDoneRejectionsNoWrites = 1
     private var doneRejectedNoWritesCount = 0
     private var noToolUseCount = 0
     private let maxNoToolUseRetries = 2
+    private let maxRepeatedSearches = 2  // Stop after 2 searches for same/similar query
 
     // Approval context
     private class PendingExecutionContext {
@@ -81,6 +83,7 @@ class AgentService: ObservableObject, Identifiable {
         failedActions.removeAll()
         recentActions.removeAll()
         recentlyWrittenFiles.removeAll()
+        searchQueries.removeAll()
         clearThinkingStep()
         for step in steps where step.status == .running {
             updateStep(step.id, status: .cancelled)
@@ -403,6 +406,22 @@ class AgentService: ObservableObject, Identifiable {
                 onComplete(false, "No search query provided")
                 return
             }
+            
+            // Check for repeated searches - if we've searched for this before, skip
+            let normalizedQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            let similarSearchCount = searchQueries.filter { 
+                $0.lowercased().contains(normalizedQuery) || normalizedQuery.contains($0.lowercased())
+            }.count
+            
+            if similarSearchCount >= maxRepeatedSearches {
+                onOutput("Search skipped: Already searched for '\(query)' multiple times. Try a different approach.")
+                failedActions.insert("search:\(normalizedQuery)")
+                onComplete(false, "Repeated search detected - try writing code instead")
+                return
+            }
+            
+            searchQueries.append(normalizedQuery)
+            
             webSearch.search(query: query) { results in
                 let summary = results.prefix(5).map { "- \($0.title): \($0.snippet.prefix(100))" }.joined(separator: "\n")
                 onOutput("Search results:\n\(summary)")
@@ -556,6 +575,7 @@ class AgentService: ObservableObject, Identifiable {
     private func resetForNewTask(_ task: AgentTask) {
         isCancelled = false; isRunning = true; steps = []; iterationCount = 0
         actionHistory.removeAll(); failedActions.removeAll(); recentActions.removeAll()
+        searchQueries.removeAll()  // Clear search history
         currentThinkingStep = nil; currentActionStep = nil; currentTask = task
     }
 
