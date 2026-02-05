@@ -97,8 +97,12 @@ class AgentService: ObservableObject, Identifiable {
     }
     
     func runTask(_ taskDescription: String, projectURL: URL?, context: String?, images: [AttachedImage] = [], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            print("[AgentService] Already running, ignoring runTask call")
+            return
+        }
         
+        print("[AgentService] Starting task: \(taskDescription.prefix(100))...")
         let task = AgentTask(description: taskDescription, projectURL: projectURL, startTime: Date())
         resetForNewTask(task)
         AgentHistoryService.shared.saveAgentTask(task, steps: [], result: nil, status: .running)
@@ -143,9 +147,16 @@ class AgentService: ObservableObject, Identifiable {
     // MARK: - Core Loop
 
     private func runNextIteration(task: AgentTask, projectURL: URL?, originalContext: String?, images: [AttachedImage] = [], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void) {
+        // Don't start new iteration if already stopped/cancelled
+        guard isRunning && !isCancelled else {
+            print("[AgentService] Skipping iteration - agent not running or cancelled")
+            return
+        }
+        
         // Ensure previous action is complete before starting new iteration
         guard currentActionStep == nil else {
             // Previous step still running - this shouldn't happen, but guard against it
+            print("[AgentService] Skipping iteration - action still in progress")
             return
         }
         
@@ -194,14 +205,26 @@ class AgentService: ObservableObject, Identifiable {
                 
                 let forceToolName = (self.iterationCount >= 8 && filesWrittenCount == 0 && requiresModifications) ? "write_file" : nil
                 
+                print("[AgentService] Calling AI with \(agentTools.count) tools, forceToolName: \(forceToolName ?? "none")")
                 let stream = aiService.streamMessage(prompt, context: originalContext, images: images, maxTokens: nil, systemPrompt: nil, tools: agentTools, forceToolName: forceToolName)
                 
                 var accumulatedResponse = ""
                 var detectedToolCalls: [ToolCall] = []
+                var chunkCount = 0
                 
                 for try await chunk in stream {
-                    if isCancelled || Task.isCancelled { break }
+                    chunkCount += 1
+                    if isCancelled || Task.isCancelled {
+                        print("[AgentService] Breaking due to cancellation")
+                        break
+                    }
                     accumulatedResponse += chunk
+                    
+                    // Debug: log first few chunks
+                    if chunkCount <= 5 {
+                        let preview = chunk.prefix(100).replacingOccurrences(of: "\n", with: "\\n")
+                        print("[AgentService] Chunk \(chunkCount): \(preview)...")
+                    }
                     
                     // Handle heartbeat - convert thinking step to action step
                     // Only process the FIRST tool starting marker, ignore subsequent ones
@@ -248,14 +271,19 @@ class AgentService: ObservableObject, Identifiable {
                     }
                     
                     let (_, toolCalls) = ToolCallHandler.shared.processChunk(chunk, projectURL: projectURL)
-                    detectedToolCalls.append(contentsOf: toolCalls)
-                    // Break as soon as we detect tool calls - content will come from flush()
-                    // The StreamParser collects the full content internally
-                    if !detectedToolCalls.isEmpty {
-                        break
+                    if !toolCalls.isEmpty {
+                        print("[AgentService] Detected \(toolCalls.count) tool calls: \(toolCalls.map { $0.name })")
+                        detectedToolCalls.append(contentsOf: toolCalls)
+                        // Only break for non-write tools - write_file needs full content
+                        let hasWriteFile = toolCalls.contains { $0.name == "write_file" }
+                        if !hasWriteFile {
+                            print("[AgentService] Breaking for non-write tool")
+                            break
+                        }
                     }
                 }
                 
+                print("[AgentService] Stream ended, received \(chunkCount) chunks, accumulated \(accumulatedResponse.count) chars")
                 self.clearThinkingStep()
                 
                 // Flush any remaining tool calls - this often contains the complete content
@@ -296,17 +324,27 @@ class AgentService: ObservableObject, Identifiable {
                     }
                 }
                 
-                // Execute tool
+                // Execute tool - check if it's a "done" action to finalize instead of continuing
+                let isDoneAction = decision.action.lowercased() == "done"
+                
                 await MainActor.run {
                     self.executeDecision(decision, projectURL: projectURL, onOutput: { output in
                         self.updateStep(finalStep.id, output: output, append: true)
                     }, onComplete: { success, output in
                         self.updateStep(finalStep.id, status: success ? .completed : .failed, error: success ? nil : output)
-                        self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                        
+                        // If this was a "done" action, finalize the task instead of continuing
+                        if isDoneAction {
+                            print("[AgentService] Done action completed - finalizing task")
+                            self.finalize(success: true, error: nil, projectURL: projectURL, onComplete: onComplete)
+                        } else {
+                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                        }
                     })
                 }
 
             } catch {
+                print("[AgentService] Error in iteration: \(error.localizedDescription)")
                 self.finalize(success: false, error: error.localizedDescription, projectURL: projectURL, onComplete: onComplete)
             }
         }
@@ -439,20 +477,32 @@ class AgentService: ObservableObject, Identifiable {
         case "file":
             guard let path = decision.filePath else { onComplete(false, "No path"); return }
             
-            // Check for repeated file reads
-            let normalizedPath = path.lowercased()
-            let readCount = filesReadThisTask[normalizedPath] ?? 0
+            // Normalize the path for comparison (handle relative/absolute, case differences)
+            let url = (projectURL ?? URL(fileURLWithPath: "")).appendingPathComponent(path)
+            let normalizedPath = url.standardizedFileURL.path.lowercased()
             
-            if readCount >= maxRepeatedFileReads {
-                onOutput("File '\(path)' was already read \(readCount) times. The content is in the history above. Please proceed with your task using that information.")
+            // Also check just the filename for simple cases
+            let filename = url.lastPathComponent.lowercased()
+            
+            // Check for repeated file reads using both full path and filename
+            let readCountByPath = filesReadThisTask[normalizedPath] ?? 0
+            let readCountByFilename = filesReadThisTask[filename] ?? 0
+            let totalReadCount = max(readCountByPath, readCountByFilename)
+            
+            print("[AgentService] File read check: '\(path)' -> normalized: '\(normalizedPath)', filename: '\(filename)', read count: \(totalReadCount)")
+            
+            if totalReadCount >= maxRepeatedFileReads {
+                print("[AgentService] BLOCKING repeated file read for: \(path)")
+                onOutput("File '\(path)' was already read \(totalReadCount) times. The content is in the history above. Please proceed with your task using that information.")
                 failedActions.insert("file:\(normalizedPath)")
                 onComplete(false, "File already read - use existing content from history")
                 return
             }
             
-            filesReadThisTask[normalizedPath] = readCount + 1
+            // Track by both path and filename
+            filesReadThisTask[normalizedPath] = totalReadCount + 1
+            filesReadThisTask[filename] = totalReadCount + 1
             
-            let url = (projectURL ?? URL(fileURLWithPath: "")).appendingPathComponent(path)
             if let content = try? String(contentsOf: url) {
                 onOutput(content)
                 onComplete(true, "Read file")

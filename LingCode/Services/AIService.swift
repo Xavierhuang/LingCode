@@ -99,9 +99,11 @@ class AIService: AIProviderProtocol {
             let task = Task { @MainActor in
                 do {
                     guard let apiKey = apiKey else {
+                        print("[AIService] ERROR: API Key not set")
                         continuation.finish(throwing: NSError(domain: "AIService", code: 401, userInfo: [NSLocalizedDescriptionKey: "API Key not set"]))
                         return
                     }
+                    print("[AIService] Starting stream with provider: \(provider.rawValue), key length: \(apiKey.count)")
                     
                     if LocalOnlyService.shared.isLocalModeEnabled && LocalOnlyService.shared.isLocalModelAvailable() {
                         try await handleLocalStreaming(message: message, context: context, continuation: continuation)
@@ -145,9 +147,11 @@ class AIService: AIProviderProtocol {
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async throws {
         let modelToUse = getAvailableModel()
+        print("[AIService] Anthropic request starting with model: \(modelToUse)")
         do {
             try await performAnthropicRequest(message: message, context: context, images: images, apiKey: apiKey, maxTokens: maxTokens, systemPrompt: systemPrompt, tools: tools, forceToolName: forceToolName, model: modelToUse, continuation: continuation)
         } catch {
+            print("[AIService] Anthropic error: \(error.localizedDescription), code: \((error as NSError).code)")
             if (error as NSError).code == 429 || (error as NSError).code == 404 {
                 continuation.yield("[Switching to Fallback Model...]\n")
                 try await performAnthropicRequest(message: message, context: context, images: images, apiKey: apiKey, maxTokens: maxTokens, systemPrompt: systemPrompt, tools: tools, forceToolName: forceToolName, model: AnthropicModel.haiku45.rawValue, continuation: continuation)
@@ -191,20 +195,32 @@ class AIService: AIProviderProtocol {
         let timeoutLimit: TimeInterval = isDeepSearch ? 60.0 : 30.0
         let requestStartTime = Date()
         
+        print("[AIService] Sending request to Anthropic API...")
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            throw NSError(domain: "AIService", code: (response as? HTTPURLResponse)?.statusCode ?? 500, userInfo: nil)
-        }
-        lastHTTPStatusCode = httpResponse.statusCode
+        let httpResponse = response as? HTTPURLResponse
+        let statusCode = httpResponse?.statusCode ?? 0
+        print("[AIService] Received HTTP status: \(statusCode)")
         
+        guard let httpResp = httpResponse, (200...299).contains(httpResp.statusCode) else {
+            print("[AIService] HTTP Error: \(statusCode)")
+            throw NSError(domain: "AIService", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(statusCode) error from Anthropic API"])
+        }
+        lastHTTPStatusCode = httpResp.statusCode
+        
+        var lineCount = 0
         for try await line in bytes.lines {
+            lineCount += 1
             if !hasReceivedChunks && Date().timeIntervalSince(requestStartTime) > timeoutLimit {
+                print("[AIService] Timeout waiting for response")
                 throw NSError(domain: "AIService", code: 408, userInfo: [NSLocalizedDescriptionKey: "AI is taking too long to think. Try a smaller context."])
             }
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("data: ") {
                 let jsonStr = String(trimmed.dropFirst(6))
-                if jsonStr == "[DONE]" { break }
+                if jsonStr == "[DONE]" {
+                    print("[AIService] Received [DONE] after \(lineCount) lines")
+                    break
+                }
                 guard let data = jsonStr.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let type = json["type"] as? String else { continue }
@@ -212,6 +228,7 @@ class AIService: AIProviderProtocol {
                 case "content_block_start":
                     if let cb = json["content_block"] as? [String: Any], cb["type"] as? String == "tool_use" {
                         currentToolUse = (id: cb["id"] as! String, name: cb["name"] as! String, partialJson: "")
+                        print("[AIService] Tool starting: \(cb["name"] ?? "unknown")")
                         continuation.yield("TOOL_STARTING:\(cb["name"]!)\n")
                     }
                 case "content_block_delta":
@@ -222,17 +239,26 @@ class AIService: AIProviderProtocol {
                     }
                 case "content_block_stop":
                     if let tool = currentToolUse {
+                        print("[AIService] Tool complete: \(tool.name), json length: \(tool.partialJson.count)")
                         continuation.yield("TOOL_CALL:\(tool.id):\(tool.name):\(encodeToolInput(tool.partialJson))\n")
                         currentToolUse = nil
                     }
                 case "message_stop":
+                    print("[AIService] Message stop received")
                     continuation.finish()
+                    return
                 case "error":
+                    if let error = json["error"] as? [String: Any] {
+                        print("[AIService] API Error: \(error)")
+                    }
                     throw NSError(domain: "AIService", code: 500, userInfo: nil)
                 default: break
                 }
             }
         }
+        // Stream ended without message_stop - finish gracefully
+        print("[AIService] Stream ended after \(lineCount) lines (no message_stop)")
+        continuation.finish()
     }
     
     // MARK: - Helpers
