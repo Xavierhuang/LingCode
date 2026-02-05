@@ -42,12 +42,14 @@ class AgentService: ObservableObject, Identifiable {
     private var recentActions: [String] = []
     private var recentlyWrittenFiles: Set<String> = []
     private var searchQueries: [String] = []  // Track search queries to detect loops
+    private var filesReadThisTask: [String: Int] = [:]  // Track how many times each file was read
     private let maxRecentActions = 5
     private let maxDoneRejectionsNoWrites = 1
     private var doneRejectedNoWritesCount = 0
     private var noToolUseCount = 0
     private let maxNoToolUseRetries = 2
     private let maxRepeatedSearches = 2  // Stop after 2 searches for same/similar query
+    private let maxRepeatedFileReads = 2  // Stop after 2 reads of same file
 
     // Approval context
     private class PendingExecutionContext {
@@ -84,6 +86,7 @@ class AgentService: ObservableObject, Identifiable {
         recentActions.removeAll()
         recentlyWrittenFiles.removeAll()
         searchQueries.removeAll()
+        filesReadThisTask.removeAll()
         clearThinkingStep()
         for step in steps where step.status == .running {
             updateStep(step.id, status: .cancelled)
@@ -246,28 +249,33 @@ class AgentService: ObservableObject, Identifiable {
                     
                     let (_, toolCalls) = ToolCallHandler.shared.processChunk(chunk, projectURL: projectURL)
                     detectedToolCalls.append(contentsOf: toolCalls)
-                    // Don't break immediately - continue streaming to get full content
-                    // Only break if we have tool calls AND it's not a write_file (which needs content)
+                    // Break as soon as we detect tool calls - content will come from flush()
+                    // The StreamParser collects the full content internally
                     if !detectedToolCalls.isEmpty {
-                        let isWriteFile = detectedToolCalls.contains { $0.name == "write_file" }
-                        if !isWriteFile {
-                            break
-                        }
-                        // For write_file, check if we have content before breaking
-                        if let tc = detectedToolCalls.first(where: { $0.name == "write_file" }),
-                           let content = tc.input["content"]?.value as? String,
-                           !content.isEmpty {
-                            break
-                        }
+                        break
                     }
                 }
                 
                 self.clearThinkingStep()
                 
+                // Flush any remaining tool calls - this often contains the complete content
                 let flushedToolCalls = ToolCallHandler.shared.flush()
-                detectedToolCalls.append(contentsOf: flushedToolCalls)
                 
-                guard let toolCall = detectedToolCalls.first, let decision = self.convertToolCallToDecision(toolCall) else {
+                // Prefer flushed tool calls as they're more complete
+                // The flush() call returns fully parsed tool calls with all content
+                var allToolCalls = flushedToolCalls
+                if allToolCalls.isEmpty {
+                    allToolCalls = detectedToolCalls
+                } else {
+                    // If we have flushed calls, merge with detected ones (avoid duplicates)
+                    for tc in detectedToolCalls {
+                        if !allToolCalls.contains(where: { $0.id == tc.id }) {
+                            allToolCalls.append(tc)
+                        }
+                    }
+                }
+                
+                guard let toolCall = allToolCalls.first, let decision = self.convertToolCallToDecision(toolCall) else {
                     self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
                     return
                 }
@@ -430,6 +438,20 @@ class AgentService: ObservableObject, Identifiable {
             
         case "file":
             guard let path = decision.filePath else { onComplete(false, "No path"); return }
+            
+            // Check for repeated file reads
+            let normalizedPath = path.lowercased()
+            let readCount = filesReadThisTask[normalizedPath] ?? 0
+            
+            if readCount >= maxRepeatedFileReads {
+                onOutput("File '\(path)' was already read \(readCount) times. The content is in the history above. Please proceed with your task using that information.")
+                failedActions.insert("file:\(normalizedPath)")
+                onComplete(false, "File already read - use existing content from history")
+                return
+            }
+            
+            filesReadThisTask[normalizedPath] = readCount + 1
+            
             let url = (projectURL ?? URL(fileURLWithPath: "")).appendingPathComponent(path)
             if let content = try? String(contentsOf: url) {
                 onOutput(content)
@@ -575,7 +597,7 @@ class AgentService: ObservableObject, Identifiable {
     private func resetForNewTask(_ task: AgentTask) {
         isCancelled = false; isRunning = true; steps = []; iterationCount = 0
         actionHistory.removeAll(); failedActions.removeAll(); recentActions.removeAll()
-        searchQueries.removeAll()  // Clear search history
+        searchQueries.removeAll(); filesReadThisTask.removeAll()  // Clear search and read history
         currentThinkingStep = nil; currentActionStep = nil; currentTask = task
     }
 
