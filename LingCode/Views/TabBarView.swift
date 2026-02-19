@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 
 struct TabBarView: View {
     @ObservedObject var editorState: EditorState
@@ -19,6 +20,12 @@ struct TabBarView: View {
               let path = doc.filePath else { return false }
         let ext = path.pathExtension.lowercased()
         return ["html", "htm", "xhtml", "svg"].contains(ext)
+    }
+    
+    /// True when the active document has AI change highlighting (greenish background on changed code)
+    private var hasAIChangeHighlighting: Bool {
+        guard let doc = editorState.activeDocument else { return false }
+        return !doc.aiGeneratedRanges.isEmpty
     }
     
     var body: some View {
@@ -50,9 +57,31 @@ struct TabBarView: View {
             
             Spacer()
             
-            // Browser preview button for HTML files
-            if canPreviewInBrowser {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                // Accept changes: clear AI change highlighting so background returns to normal
+                if hasAIChangeHighlighting {
+                    Divider()
+                        .frame(height: 20)
+                    
+                    Button(action: acceptChangesAndClearHighlight) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 12))
+                            Text("Accept changes")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.1))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help("Clear change highlighting and use normal background")
+                }
+                
+                // Browser preview button for HTML files
+                if canPreviewInBrowser {
                     Divider()
                         .frame(height: 20)
                     
@@ -72,8 +101,8 @@ struct TabBarView: View {
                     .buttonStyle(PlainButtonStyle())
                     .help("Open in Browser")
                 }
-                .padding(.trailing, 12)
             }
+            .padding(.trailing, 12)
         }
         .frame(height: 36)
         .background(DesignSystem.Colors.secondaryBackground)
@@ -89,6 +118,14 @@ struct TabBarView: View {
         guard let doc = editorState.activeDocument,
               let path = doc.filePath else { return }
         NSWorkspace.shared.open(path)
+    }
+    
+    /// Clear AI change highlighting on the active document so the code uses the normal background again
+    private func acceptChangesAndClearHighlight() {
+        guard let doc = editorState.activeDocument else { return }
+        doc.clearAIHighlighting()
+        // Force views that show the editor to re-render so they pass the new empty aiGeneratedRanges and the highlight actually clears
+        editorState.objectWillChange.send()
     }
 }
 

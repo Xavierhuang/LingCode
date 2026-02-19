@@ -338,6 +338,13 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
                     textView.setSelectedRange(selectedRange)
                 }
                 applySyntaxHighlighting(to: textView, language: language)
+                context.coordinator.lastAIHighlightCount = aiGeneratedRanges.count
+            } else {
+                // Re-apply only when aiGeneratedRanges actually changed (e.g. "Accept changes" cleared highlight) to avoid CPU hot loop
+                if context.coordinator.lastAIHighlightCount != aiGeneratedRanges.count {
+                    applySyntaxHighlighting(to: textView, language: language)
+                    context.coordinator.lastAIHighlightCount = aiGeneratedRanges.count
+                }
             }
         }
         
@@ -377,6 +384,8 @@ struct GhostTextEditorWithLineNumbers: NSViewRepresentable {
         var language: String?
         
         var isLocalUpdate = false
+        /// Last count of aiGeneratedRanges we applied; used to re-apply only when "Accept changes" clears highlight (avoids CPU hot loop)
+        var lastAIHighlightCount: Int = -1
         private var debounceTimer: Timer?
         
         func setup(textView: GhostTextNSTextView, lineNumbersView: LineNumbersNSView, containerView: EditorContainerView, diagnosticsOverlay: DiagnosticsOverlayView) {

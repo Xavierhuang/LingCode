@@ -50,6 +50,7 @@ class AgentService: ObservableObject, Identifiable {
     private let maxNoToolUseRetries = 2
     private let maxRepeatedSearches = 2  // Stop after 2 searches for same/similar query
     private let maxRepeatedFileReads = 2  // Stop after 2 reads of same file
+    private var incompleteWriteRetryCount = 0  // Retry once when write_file stream ends early
 
     // Approval context
     private class PendingExecutionContext {
@@ -87,6 +88,7 @@ class AgentService: ObservableObject, Identifiable {
         recentlyWrittenFiles.removeAll()
         searchQueries.removeAll()
         filesReadThisTask.removeAll()
+        incompleteWriteRetryCount = 0
         clearThinkingStep()
         for step in steps where step.status == .running {
             updateStep(step.id, status: .cancelled)
@@ -146,7 +148,7 @@ class AgentService: ObservableObject, Identifiable {
 
     // MARK: - Core Loop
 
-    private func runNextIteration(task: AgentTask, projectURL: URL?, originalContext: String?, images: [AttachedImage] = [], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void) {
+    private func runNextIteration(task: AgentTask, projectURL: URL?, originalContext: String?, images: [AttachedImage] = [], onStepUpdate: @escaping (AgentStep) -> Void, onComplete: @escaping (AgentTaskResult) -> Void, isRetry: Bool = false) {
         // Don't start new iteration if already stopped/cancelled
         guard isRunning && !isCancelled else {
             print("[AgentService] Skipping iteration - agent not running or cancelled")
@@ -160,7 +162,12 @@ class AgentService: ObservableObject, Identifiable {
             return
         }
         
-        iterationCount += 1
+        if isRetry {
+            print("[AgentService] Retrying iteration after incomplete write_file response")
+        } else {
+            iterationCount += 1
+            incompleteWriteRetryCount = 0
+        }
         streamingText = ""
         
         guard !shouldAbortIteration(projectURL: projectURL, onComplete: onComplete) else { return }
@@ -206,7 +213,9 @@ class AgentService: ObservableObject, Identifiable {
                 let forceToolName = (self.iterationCount >= 8 && filesWrittenCount == 0 && requiresModifications) ? "write_file" : nil
                 
                 print("[AgentService] Calling AI with \(agentTools.count) tools, forceToolName: \(forceToolName ?? "none")")
-                let stream = aiService.streamMessage(prompt, context: originalContext, images: images, maxTokens: nil, systemPrompt: nil, tools: agentTools, forceToolName: forceToolName)
+                // Use higher max_tokens when tools are present so the model can complete large write_file payloads (avoids stream ending before TOOL_CALL content)
+                let maxTokensForRequest = agentTools.isEmpty ? nil : 32768
+                let stream = aiService.streamMessage(prompt, context: originalContext, images: images, maxTokens: maxTokensForRequest, systemPrompt: nil, tools: agentTools, forceToolName: forceToolName)
                 
                 var accumulatedResponse = ""
                 var detectedToolCalls: [ToolCall] = []
@@ -304,7 +313,24 @@ class AgentService: ObservableObject, Identifiable {
                 }
                 
                 guard let toolCall = allToolCalls.first, let decision = self.convertToolCallToDecision(toolCall) else {
-                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                    // Stream ended without a complete tool call (e.g. cancelled or incomplete write_file).
+                    // Clear currentActionStep so we don't get stuck on "action still in progress".
+                    await MainActor.run {
+                        let stuck = self.currentActionStep
+                        if let stuck = stuck, let idx = self.steps.firstIndex(where: { $0.id == stuck.id }) {
+                            self.steps[idx].status = .failed
+                            self.steps[idx].error = "Incomplete response from AI (stream ended early)"
+                            print("[AgentService] Clearing stuck action step (no tool call received)")
+                        }
+                        self.currentActionStep = nil
+                        // Retry once if this was an incomplete write_file (stream ended before content arrived)
+                        if stuck?.type == .codeGeneration && self.incompleteWriteRetryCount < 1 {
+                            self.incompleteWriteRetryCount += 1
+                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete, isRetry: true)
+                        } else {
+                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                        }
+                    }
                     return
                 }
 
@@ -421,7 +447,6 @@ class AgentService: ObservableObject, Identifiable {
                 
                 let originalContent = fileExisted ? (try? String(contentsOf: fullPath, encoding: .utf8)) : nil
                 try code.write(to: fullPath, atomically: true, encoding: .utf8)
-                
                 onOutput("File written: \(filePath)\n\n--- \(filePath) ---\n\(code)\n--- End of \(filePath) ---")
                 
                 NotificationCenter.default.post(name: NSNotification.Name(fileExisted ? "FileUpdated" : "FileCreated"), object: nil, userInfo: ["fileURL": fullPath, "filePath": filePath, "content": code, "originalContent": originalContent ?? ""])
@@ -649,6 +674,7 @@ class AgentService: ObservableObject, Identifiable {
         actionHistory.removeAll(); failedActions.removeAll(); recentActions.removeAll()
         searchQueries.removeAll(); filesReadThisTask.removeAll()  // Clear search and read history
         currentThinkingStep = nil; currentActionStep = nil; currentTask = task
+        incompleteWriteRetryCount = 0
     }
 
     private func clearThinkingStep() {

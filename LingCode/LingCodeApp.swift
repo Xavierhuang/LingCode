@@ -19,8 +19,10 @@ struct LingCodeApp: App {
             ThemeService.shared.setTheme(preference)
         }
         
-        // Check Ollama status on startup
-        LocalOnlyService.shared.checkOllamaStatus()
+        // Only check Ollama when Local mode is enabled (avoids connection-refused spam for Cloud users)
+        if LocalOnlyService.shared.isLocalModeEnabled {
+            LocalOnlyService.shared.checkOllamaStatus()
+        }
     }
     
     var body: some Scene {

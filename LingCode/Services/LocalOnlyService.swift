@@ -25,10 +25,9 @@ class LocalOnlyService: ObservableObject {
     
     private init() {
         loadSettings()
-        // Check Ollama status on startup
-        checkOllamaStatus()
-        // Only detect models if local mode is enabled (to avoid connection errors)
+        // Only hit localhost:11434 when Local mode is on; avoids connection-refused console spam for Cloud users
         if isLocalModeEnabled {
+            checkOllamaStatus()
             detectLocalModels()
         }
     }

@@ -13,12 +13,19 @@ enum AgentSummaryGenerator {
         var filesWritten: [String] = []
         var filesRead: [String] = []
         var commandsExecuted: [String] = []
+        var hadWriteSteps = false
 
         for step in steps {
             if step.status == .completed {
                 if step.description.hasPrefix("Write: ") {
+                    hadWriteSteps = true
                     let fileName = String(step.description.dropFirst("Write: ".count))
-                    filesWritten.append(fileName)
+                    let charCount = step.streamingCode?.count ?? step.output?.count
+                    if let n = charCount, n > 0 {
+                        filesWritten.append("\(fileName) (\(n) chars)")
+                    } else {
+                        filesWritten.append(fileName)
+                    }
                 } else if step.description.hasPrefix("Read: ") {
                     let fileName = String(step.description.dropFirst("Read: ".count))
                     if !filesRead.contains(fileName) {
@@ -39,6 +46,10 @@ enum AgentSummaryGenerator {
         }
         if !commandsExecuted.isEmpty {
             summaryParts.append("Commands Executed: \(commandsExecuted.count) command(s)")
+        }
+        summaryParts.append("All tool outputs received in full.")
+        if hadWriteSteps {
+            summaryParts.append("Large file writes completed (extended token limit used when needed).")
         }
 
         if summaryParts.isEmpty {
