@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 // ARCHITECTURE: This view does NOT import EditorCore.
 // All EditorCore access goes through EditorCoreAdapter wrapper types.
 
@@ -37,61 +38,96 @@ struct EditorView: View {
     var body: some View {
         Group {
             if let document = viewModel.editorState.activeDocument {
+                if let fileURL = document.filePath, EditorViewModel.isPreviewableFile(fileURL) {
+                    FilePreviewView(fileURL: fileURL)
+                } else {
                 ZStack {
-                    // Combined editor with line numbers in a single scroll view
-                    GhostTextEditorWithLineNumbers(
-                        text: Binding(
-                            get: { document.content },
-                            set: { newValue in
-                                document.content = newValue
-                            }
-                        ),
-                        isModified: Binding(
-                            get: { document.isModified },
-                            set: { newValue in
-                                document.isModified = newValue
-                            }
-                        ),
-                        fontSize: viewModel.fontSize,
-                        fontName: viewModel.fontName,
-                        language: document.language,
-                        aiGeneratedRanges: document.aiGeneratedRanges,
-                        diagnostics: viewModel.currentDiagnostics,
-                        onTextChange: { text in
-                            viewModel.updateDocumentContent(text)
-                            
-                            // 🟢 Trigger the "Hot Start" speculation - pre-fetch context when user pauses typing
-                            ContextOrchestrator.shared.onUserTyping(text: text)
-                            
-                            // Update diagnostics with current content (for unsaved changes)
-                            if let fileURL = document.filePath {
-                                // Send didChange to LSP to trigger diagnostics update
-                                Task {
-                                    // Ensure file is open and send didChange notification
-                                    // LSP will send publishDiagnostics when content changes
-                                    // DiagnosticsService will update automatically via callback
-                                    do {
-                                        try await SourceKitLSPClient.shared.ensureFileOpen(fileURL: fileURL, content: text)
-                                    } catch {
-                                        // Silently handle errors (LSP might not be available)
+                    // When agent changed file: red/green line diff; else normal editable editor
+                    Group {
+                        if let original = document.originalContent, !original.isEmpty {
+                            let hunks = ChangeHighlighter.diffHunks(original: original, modified: document.content)
+                            DiffCodeView(
+                                original: original,
+                                modified: document.content,
+                                fontSize: viewModel.fontSize,
+                                fontName: viewModel.fontName,
+                                language: document.language,
+                                hunks: hunks,
+                                onHunkUndo: { index in
+                                    guard index < hunks.count else { return }
+                                    let hunk = hunks[index]
+                                    let contentNS = document.content as NSString
+                                    guard hunk.rangeInModified.location <= contentNS.length else { return }
+                                    let pre = contentNS.substring(to: min(hunk.rangeInModified.location, contentNS.length))
+                                    let end = hunk.rangeInModified.location + hunk.rangeInModified.length
+                                    let post = end >= contentNS.length ? "" : contentNS.substring(from: end)
+                                    document.content = pre + hunk.oldText + post
+                                    document.isModified = true
+                                    if let url = document.filePath {
+                                        try? FileService.shared.saveFile(content: document.content, to: url)
                                     }
+                                    viewModel.editorState.objectWillChange.send()
+                                },
+                                onHunkKeep: { index in
+                                    guard index < hunks.count, let orig = document.originalContent else { return }
+                                    let hunk = hunks[index]
+                                    let origNS = orig as NSString
+                                    guard hunk.rangeInOriginal.location <= origNS.length else { return }
+                                    let pre = origNS.substring(to: min(hunk.rangeInOriginal.location, origNS.length))
+                                    let end = hunk.rangeInOriginal.location + hunk.rangeInOriginal.length
+                                    let post = end >= origNS.length ? "" : origNS.substring(from: end)
+                                    document.originalContent = pre + hunk.newText + post
+                                    if (document.originalContent ?? "") == document.content {
+                                        document.clearAIHighlighting()
+                                    }
+                                    viewModel.editorState.objectWillChange.send()
                                 }
-                            }
-                            // Request autocomplete after typing
-                            requestAutocomplete(for: text, at: viewModel.editorState.cursorPosition, in: document)
-                        },
-                        onSelectionChange: { text, position in
-                            viewModel.updateSelection(text, position: position)
-                        },
-                        onAutocompleteRequest: { position in
-                            if let doc = viewModel.editorState.activeDocument {
-                                requestAutocomplete(for: doc.content, at: position, in: doc)
-                            }
-                        },
-                        onScrollViewCreated: { scrollView in
-                            editorScrollView = scrollView
+                            )
+                        } else {
+                            GhostTextEditorWithLineNumbers(
+                                text: Binding(
+                                    get: { document.content },
+                                    set: { newValue in
+                                        document.content = newValue
+                                    }
+                                ),
+                                isModified: Binding(
+                                    get: { document.isModified },
+                                    set: { newValue in
+                                        document.isModified = newValue
+                                    }
+                                ),
+                                fontSize: viewModel.fontSize,
+                                fontName: viewModel.fontName,
+                                language: document.language,
+                                aiGeneratedRanges: document.aiGeneratedRanges,
+                                diagnostics: viewModel.currentDiagnostics,
+                                onTextChange: { text in
+                                    viewModel.updateDocumentContent(text)
+                                    ContextOrchestrator.shared.onUserTyping(text: text)
+                                    if let fileURL = document.filePath {
+                                        Task {
+                                            do {
+                                                try await SourceKitLSPClient.shared.ensureFileOpen(fileURL: fileURL, content: text)
+                                            } catch { }
+                                        }
+                                    }
+                                    requestAutocomplete(for: text, at: viewModel.editorState.cursorPosition, in: document)
+                                },
+                                onSelectionChange: { text, position in
+                                    viewModel.updateSelection(text, position: position)
+                                },
+                                onAutocompleteRequest: { position in
+                                    if let doc = viewModel.editorState.activeDocument {
+                                        requestAutocomplete(for: doc.content, at: position, in: doc)
+                                    }
+                                },
+                                onScrollViewCreated: { scrollView in
+                                    editorScrollView = scrollView
+                                }
+                            )
                         }
-                    )
+                    }
                     .contextMenu {
                         Button {
                             // Capture current cursor position
@@ -128,6 +164,32 @@ struct EditorView: View {
                                 Label("Start Live Server", systemImage: "play.circle")
                             }
                         }
+                    }
+
+                    // Full-file Undo all / Keep all bar (per-change buttons are inside diff on the left)
+                    if document.originalContent != nil, !(document.originalContent ?? "").isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Spacer(minLength: 0)
+                            DiffBarView(
+                                onUndo: {
+                                    guard let original = document.originalContent else { return }
+                                    document.content = original
+                                    document.isModified = false
+                                    if let url = document.filePath {
+                                        try? FileService.shared.saveFile(content: original, to: url)
+                                    }
+                                    document.clearAIHighlighting()
+                                    viewModel.editorState.objectWillChange.send()
+                                },
+                                onKeep: {
+                                    document.clearAIHighlighting()
+                                    viewModel.editorState.objectWillChange.send()
+                                }
+                            )
+                            .padding(.leading, 12)
+                            .padding(.bottom, 12)
+                        }
+                        .allowsHitTesting(true)
                     }
                     
                     // Ghost text indicator
@@ -252,6 +314,7 @@ struct EditorView: View {
                             showRenameSheet = false
                         }
                     )
+                }
                 }
             } else {
                 VStack(spacing: 20) {

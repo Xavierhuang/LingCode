@@ -17,10 +17,11 @@ enum AgentStepHelpers {
     static func mapType(_ action: String) -> AgentStepType {
         switch action.lowercased() {
         case "terminal", "run_terminal_command": return .terminal
-        case "code", "write_file": return .codeGeneration
+        case "code", "write_file", "search_replace": return .codeGeneration
         case "search", "search_web", "codebase_search": return .webSearch
         case "file", "read_file": return .fileOperation
         case "directory", "read_directory": return .fileOperation
+        case "spawn_subagent": return .fileOperation
         case "done": return .complete
         default: return .thinking
         }
@@ -35,12 +36,19 @@ enum AgentStepHelpers {
         }
     }
 
-    /// Extract normalized paths of files that were written (from completed Write: steps).
+    /// Extract normalized paths of files that were written (from completed Write: or Replace in: steps).
     static func filesWritten(from steps: [AgentStep], normalizePath: (String) -> String) -> [String] {
         steps.compactMap { step -> String? in
-            guard step.type == .codeGeneration, step.status == .completed, step.description.hasPrefix("Write: ") else { return nil }
-            let filePath = String(step.description.dropFirst("Write: ".count))
-            return normalizePath(filePath)
+            guard step.type == .codeGeneration, step.status == .completed else { return nil }
+            if step.description.hasPrefix("Write: ") {
+                let filePath = String(step.description.dropFirst("Write: ".count))
+                return normalizePath(filePath)
+            }
+            if step.description.hasPrefix("Replace in ") {
+                let filePath = String(step.description.dropFirst("Replace in ".count))
+                return normalizePath(filePath)
+            }
+            return nil
         }
     }
 }

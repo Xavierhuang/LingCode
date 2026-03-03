@@ -31,12 +31,16 @@ class EditorViewModel: ObservableObject {
     // Project - @Published so UI updates when folder changes
     @Published var rootFolderURL: URL? {
         didSet {
-            // Index codebase when project opens
-            if let url = rootFolderURL {
-                print("rootFolderURL set to: \(url.path)")
-                CodebaseIndexService.shared.indexProject(at: url) { _, _ in }
-                // Also index for semantic search
-                SemanticSearchService.shared.indexWorkspace(url)
+            guard let url = rootFolderURL else { return }
+            print("rootFolderURL set to: \(url.path)")
+            // Defer indexing so we don't publish (CodebaseIndexService @Published) during view update
+            DispatchQueue.main.async { [weak self] in
+                guard self?.rootFolderURL == url else { return }
+                CodebaseIndexService.shared.indexProject(at: url) { _, _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        SemanticSearchService.shared.indexWorkspace(url)
+                    }
+                }
             }
         }
     }
@@ -63,18 +67,13 @@ class EditorViewModel: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
-            self.refreshFileTree()
-            
-            // FIX: Open file in editor with highlighting (like Cursor does)
-            if let userInfo = notification.userInfo,
-               let fileURL = userInfo["fileURL"] as? URL,
-               let originalContent = userInfo["originalContent"] as? String {
-                // Small delay to ensure file write is complete
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
-                    print("🟢 [EditorViewModel] Opening newly created file: \(fileURL.lastPathComponent)")
-                    self.openFile(at: fileURL, originalContent: originalContent)
-                }
+            DispatchQueue.main.async { self.refreshFileTree() }
+            guard let userInfo = notification.userInfo,
+                  let fileURL = Self.resolveFileURL(from: userInfo, rootFolderURL: self.rootFolderURL) else { return }
+            let originalContent = userInfo["originalContent"] as? String
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                self.openFile(at: fileURL, originalContent: originalContent)
             }
         }
         
@@ -84,18 +83,12 @@ class EditorViewModel: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
-            self.refreshFileTree()
-            
-            // FIX: Open file in editor with change highlighting (like Cursor does)
-            if let userInfo = notification.userInfo,
-               let fileURL = userInfo["fileURL"] as? URL,
-               let originalContent = userInfo["originalContent"] as? String {
-                // Small delay to ensure file write is complete
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
-                    print("🟢 [EditorViewModel] Opening updated file with highlighting: \(fileURL.lastPathComponent)")
-                    self.openFile(at: fileURL, originalContent: originalContent)
-                }
+            DispatchQueue.main.async { self.refreshFileTree() }
+            guard let userInfo = notification.userInfo else { return }
+            let originalContent = userInfo["originalContent"] as? String
+            guard let fileURL = Self.resolveFileURL(from: userInfo, rootFolderURL: self.rootFolderURL) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.openFile(at: fileURL, originalContent: originalContent)
             }
         }
         
@@ -106,18 +99,12 @@ class EditorViewModel: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
-            self.refreshFileTree()
-            
-            // FIX: Open file in editor when tool writes it
-            if let userInfo = notification.userInfo,
-               let fileURL = userInfo["fileURL"] as? URL {
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
-                    print("🟢 [EditorViewModel] Opening file written by tool: \(fileURL.lastPathComponent)")
-                    // Try to get original content if available
-                    let originalContent = userInfo["originalContent"] as? String
-                    self.openFile(at: fileURL, originalContent: originalContent)
-                }
+            DispatchQueue.main.async { self.refreshFileTree() }
+            guard let userInfo = notification.userInfo,
+                  let fileURL = Self.resolveFileURL(from: userInfo, rootFolderURL: self.rootFolderURL) else { return }
+            let originalContent = userInfo["originalContent"] as? String
+            DispatchQueue.main.async { [weak self] in
+                self?.openFile(at: fileURL, originalContent: originalContent)
             }
         }
         
@@ -259,14 +246,26 @@ class EditorViewModel: ObservableObject {
         if response == .OK {
             if let url = panel.url {
                 print("Selected folder: \(url.path)")
-                self.rootFolderURL = url
-                print("rootFolderURL is now: \(self.rootFolderURL?.path ?? "nil")")
+                let urlToSet = url
+                DispatchQueue.main.async { [weak self] in
+                    self?.rootFolderURL = urlToSet
+                    print("rootFolderURL is now: \(self?.rootFolderURL?.path ?? "nil")")
+                }
             } else {
                 print("panel.url was nil")
             }
         }
     }
     
+    /// Resolve file URL from notification userInfo. Tries "fileURL" first; if that fails (e.g. URL not surviving userInfo), builds from "filePath" + rootFolderURL so agent-triggered FileUpdated still opens the file and shows diff in the main editor.
+    private static func resolveFileURL(from userInfo: [AnyHashable: Any], rootFolderURL: URL?) -> URL? {
+        if let url = userInfo["fileURL"] as? URL { return url }
+        guard let root = rootFolderURL,
+              let path = userInfo["filePath"] as? String else { return nil }
+        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        return root.appendingPathComponent(trimmed)
+    }
+
     func openFile(at url: URL, originalContent: String? = nil) {
         // Precompute AST in background for performance
         if let projectURL = rootFolderURL {
@@ -277,26 +276,37 @@ class EditorViewModel: ObservableObject {
         // Resolve symlinks and standardize the URL
         let resolvedURL = url.resolvingSymlinksInPath()
         let standardizedURL = URL(fileURLWithPath: resolvedURL.path)
+        let standardizedPath = standardizedURL.path
+        let standardizedLastComponent = standardizedURL.lastPathComponent
+        let standardizedParentPath = standardizedURL.deletingLastPathComponent().path
 
-        // Check if file is already open (compare by path to handle URL variations)
+        // Check if file is already open (exact path first, then fallback by filename + parent so script.js / index get diff when agent updates them)
         if let existingDocument = editorState.documents.first(where: { doc in
             guard let docPath = doc.filePath else { return false }
-            return docPath.path == standardizedURL.path
+            if docPath.path == standardizedPath { return true }
+            return docPath.lastPathComponent == standardizedLastComponent && docPath.deletingLastPathComponent().path == standardizedParentPath
         }) {
-            // File already open - refresh it with latest content from disk
-            // Defer state changes to avoid publishing during view updates
-            Task { @MainActor in
-                // Always read latest content from disk to ensure it's up to date
-                if let diskContent = try? String(contentsOf: standardizedURL, encoding: .utf8) {
+            // Defer state changes to next run loop to avoid "Publishing changes from within view updates"
+            let urlToRead = standardizedURL
+            let originalToApply = originalContent
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let ext = urlToRead.pathExtension.lowercased()
+                let isPreview = Self.previewableImageExtensions.contains(ext) || ext == "pdf"
+                if isPreview {
+                    existingDocument.filePath = urlToRead
+                    existingDocument.content = ""
+                } else if let diskContent = try? String(contentsOf: urlToRead, encoding: .utf8) {
+                    existingDocument.filePath = urlToRead
                     existingDocument.content = diskContent
                     existingDocument.isModified = false
-                    
-                    // Mark as AI-generated if we have original content for highlighting
-                    if let original = originalContent {
+                    let originalForDiff = existingDocument.originalContent ?? originalToApply
+                    if let original = originalForDiff {
                         existingDocument.markAsAIGenerated(originalContent: original)
                     }
                 }
-                editorState.setActiveDocument(existingDocument.id)
+                self.editorState.setActiveDocument(existingDocument.id)
+                self.objectWillChange.send()
             }
             return
         }
@@ -304,6 +314,26 @@ class EditorViewModel: ObservableObject {
         // Check if file exists
         guard FileManager.default.fileExists(atPath: standardizedURL.path) else {
             print("⚠️ File does not exist: \(standardizedURL.path)")
+            return
+        }
+
+        let ext = standardizedURL.pathExtension.lowercased()
+        let isImageOrPDF = Self.previewableImageExtensions.contains(ext) || ext == "pdf"
+
+        if isImageOrPDF {
+            let document = Document(
+                id: UUID(),
+                filePath: standardizedURL,
+                content: "",
+                isModified: false
+            )
+            document.language = ext
+            let docToAdd = document
+            DispatchQueue.main.async { [weak self] in
+                self?.editorState.addDocument(docToAdd)
+                self?.editorState.setActiveDocument(docToAdd.id)
+                self?.objectWillChange.send()
+            }
             return
         }
 
@@ -322,14 +352,25 @@ class EditorViewModel: ObservableObject {
                 document.markAsAIGenerated(originalContent: original)
             }
 
-            // Defer state changes to avoid publishing during view updates
-            Task { @MainActor in
-                editorState.addDocument(document)
-                editorState.setActiveDocument(document.id)
+            let docToAdd = document
+            DispatchQueue.main.async { [weak self] in
+                self?.editorState.addDocument(docToAdd)
+                self?.editorState.setActiveDocument(docToAdd.id)
+                self?.objectWillChange.send()
             }
         } catch {
             // Silently handle errors
         }
+    }
+
+    private static let previewableImageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "webp", "ico"
+    ]
+
+    static func isPreviewableFile(_ url: URL?) -> Bool {
+        guard let url = url else { return false }
+        let ext = url.pathExtension.lowercased()
+        return previewableImageExtensions.contains(ext) || ext == "pdf"
     }
     
     func closeDocument(_ documentId: UUID) {
@@ -423,11 +464,13 @@ class EditorViewModel: ObservableObject {
         // Cancel any pending refresh
         refreshDebounceTask?.cancel()
         
-        // Debounce refresh to avoid excessive updates
+        // Debounce refresh to avoid excessive updates; run toggle on next run loop to avoid "Publishing changes from within view updates"
         refreshDebounceTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second debounce
             guard !Task.isCancelled else { return }
-            fileTreeRefreshTrigger.toggle()
+            DispatchQueue.main.async { [weak self] in
+                self?.fileTreeRefreshTrigger.toggle()
+            }
         }
     }
 

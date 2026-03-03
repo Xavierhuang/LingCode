@@ -143,6 +143,10 @@ class IgnoreFileService: ObservableObject {
         "DerivedData/",
         "*.xcarchive",
         
+        // Xcode assets and localization (Cursor-style: skip non-code)
+        "Assets.xcassets/",
+        "*.lproj/",
+        
         // IDE/Editor
         ".idea/",
         ".vscode/",

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		6A2B00032F20000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 6A2B00022F20000000000001 /* SwiftTerm */; };
 		6A77CED82F2DC4F20091CF65 /* EditorParsers in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9741312F170931004027AD /* EditorParsers */; };
 		6A9741302F170931004027AC /* EditorCore in Frameworks */ = {isa = PBXBuildFile; productRef = 6A97412F2F170931004027AC /* EditorCore */; };
 		6A9CA1482F1A8E8200E5C691 /* SwiftBasicFormat in Frameworks */ = {isa = PBXBuildFile; productRef = 6A9CA1472F1A8E8200E5C691 /* SwiftBasicFormat */; };
@@ -58,6 +59,7 @@
 				6A9CA14A2F1A8E8200E5C691 /* SwiftCompilerPlugin in Frameworks */,
 				6A9CA1582F1A8E8200E5C691 /* SwiftParserDiagnostics in Frameworks */,
 				6A9CA1522F1A8E8200E5C691 /* SwiftLexicalLookup in Frameworks */,
+				6A2B00032F20000000000001 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 				6A9CA1612F1A8E8200E5C691 /* SwiftSyntaxMacros */,
 				6A9CA1672F1A8E8200E5C691 /* _SwiftCompilerPluginMessageHandling */,
 				6A9CA1692F1A8E8200E5C691 /* _SwiftLibraryPluginProvider */,
+				6A2B00022F20000000000001 /* SwiftTerm */,
 			);
 			productName = LingCode;
 			productReference = 6AC1F4BB2ED398A200283169 /* LingCode.app */;
@@ -151,6 +154,7 @@
 			packageReferences = (
 				6A97412E2F170931004027AC /* XCLocalSwiftPackageReference "EditorCore" */,
 				6A9CA1462F1A8E8200E5C691 /* XCRemoteSwiftPackageReference "swift-syntax" */,
+				6A2B00012F20000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			productRefGroup = 6AC1F4BC2ED398A200283169 /* Products */;
 			projectDirPath = "";
@@ -315,7 +319,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 8;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = HPTTZS5J27;
 				ENABLE_APP_SANDBOX = NO;
@@ -328,7 +332,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				MARKETING_VERSION = 5;
 				PRODUCT_BUNDLE_IDENTIFIER = hainanmandi.LingCode;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -352,7 +356,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 8;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = HPTTZS5J27;
 				ENABLE_APP_SANDBOX = NO;
@@ -365,7 +369,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 14.6;
 				MARKETING_VERSION = 5;
 				PRODUCT_BUNDLE_IDENTIFIER = hainanmandi.LingCode;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -411,6 +415,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		6A2B00012F20000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
 		6A9CA1462F1A8E8200E5C691 /* XCRemoteSwiftPackageReference "swift-syntax" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/apple/swift-syntax.git";
@@ -422,6 +434,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		6A2B00022F20000000000001 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6A2B00012F20000000000001 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
 		6A97412F2F170931004027AC /* EditorCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = EditorCore;

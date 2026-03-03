@@ -9,6 +9,7 @@ import SwiftUI
 
 struct StreamingHeaderView: View {
     @ObservedObject var viewModel: AIViewModel
+    @ObservedObject private var localOnlyService = LocalOnlyService.shared
     var projectURL: URL? = nil
     var editorViewModel: EditorViewModel? = nil
 
@@ -18,7 +19,7 @@ struct StreamingHeaderView: View {
     }
 
     private var isLocalMode: Bool {
-        LocalOnlyService.shared.isLocalModeEnabled
+        localOnlyService.isLocalModeEnabled
     }
 
     var body: some View {

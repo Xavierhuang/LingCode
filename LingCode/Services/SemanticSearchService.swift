@@ -67,29 +67,49 @@ class SemanticSearchService: ObservableObject {
         embedding = NLEmbedding.sentenceEmbedding(for: .english)
     }
     
-    /// 1. Index the workspace (Run this when opening a project)
+    /// 1. Index the workspace (Cursor-style: lazy after codebase, respect ignore files)
     func indexWorkspace(_ workspaceURL: URL) {
+        vectorDB.clear()
         self.isIndexing = true
+        
+        IgnoreFileService.shared.loadIgnoreFile(from: workspaceURL)
         
         indexQueue.async {
             var newIndex: [CodeChunk] = []
             var embeddingsToStore: [CodeEmbedding] = []
             
-            let enumerator = self.fileManager.enumerator(
+            guard let enumerator = self.fileManager.enumerator(
                 at: workspaceURL,
-                includingPropertiesForKeys: [.isRegularFileKey],
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            )
+            ) else { return }
             
-            while let fileURL = enumerator?.nextObject() as? URL {
-                // Skip non-code files
+            for case let fileURL as URL in enumerator {
+                var isDir: ObjCBool = false
+                _ = self.fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir)
+                if isDir.boolValue {
+                    let fileName = fileURL.lastPathComponent
+                    if ["Assets.xcassets", "xcassets"].contains(fileName) || fileName.hasSuffix(".lproj") {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                }
+                if IgnoreFileService.shared.shouldIgnore(url: fileURL, relativeTo: workspaceURL) {
+                    if isDir.boolValue { enumerator.skipDescendants() }
+                    continue
+                }
                 guard self.isCodeFile(fileURL) else { continue }
+                if IgnoreFileService.shared.isLikelyBinaryOrLarge(filename: fileURL.lastPathComponent) {
+                    continue
+                }
+                let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                if fileSize > 512_000 { continue }
                 
                 if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
                     let chunks = self.chunkFile(content, fileURL: fileURL, workspace: workspaceURL)
+                    guard newIndex.count + chunks.count <= 2000 else { break }
                     newIndex.append(contentsOf: chunks)
                     
-                    // Generate embeddings for chunks
                     for chunk in chunks {
                         if let embeddingVector = self.vectorDB.generateEmbedding(for: chunk.content) {
                             let codeEmbedding = CodeEmbedding(

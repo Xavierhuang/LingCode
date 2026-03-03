@@ -9,10 +9,35 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+/// Reported by AgentModeView so the host can give the panel enough width when the agent list is visible.
+struct AgentPanelMinWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 324
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct AgentModeView: View {
+    private static let debugLogPath = "/Users/weijiahuang/Desktop/LingCode-main-2/.cursor/debug-0a8696.log"
+    private static func debugLog(showAgentList: Bool, width: CGFloat, height: CGFloat) {
+        let line = "{\"sessionId\":\"0a8696\",\"location\":\"AgentModeView.swift:body\",\"message\":\"Agent layout\",\"data\":{\"showAgentList\":\(showAgentList),\"geoWidth\":\(width),\"geoHeight\":\(height)}\",\"timestamp\":\(Int(Date().timeIntervalSince1970 * 1000)),\"hypothesisId\":\"H1\"}\n"
+        Self.appendLog(line)
+    }
+    private static func appendLog(_ line: String) {
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: debugLogPath)
+        if FileManager.default.fileExists(atPath: debugLogPath) {
+            guard let h = try? FileHandle(forUpdating: url) else { return }
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
     @StateObject private var coordinator = AgentCoordinator.shared
     @StateObject private var imageContextService = ImageContextService.shared
     @StateObject private var historyService = AgentHistoryService.shared
+    @ObservedObject private var localOnlyService = LocalOnlyService.shared
     @State private var inputText: String = ""
     @State private var lastStepCount: Int = 0
     @Namespace private var bottomID
@@ -20,6 +45,9 @@ struct AgentModeView: View {
     @State private var selectedChatId: UUID?
     @State private var showAgentList: Bool = true
     @State private var isDraggingOver: Bool = false
+    @State private var activeMentions: [Mention] = []
+    @State private var showMentionPopup = false
+    @State private var showFilePicker = false
     
     @ObservedObject var editorViewModel: EditorViewModel
     
@@ -34,6 +62,9 @@ struct AgentModeView: View {
     
     var body: some View {
         GeometryReader { geometry in
+            // #region agent log
+            let _ = AgentModeView.debugLog(showAgentList: showAgentList, width: geometry.size.width, height: geometry.size.height)
+            // #endregion
             HSplitView {
                 VStack(spacing: 0) {
                     headerView
@@ -42,7 +73,7 @@ struct AgentModeView: View {
                     Divider()
                     inputAreaView
                 }
-                .frame(minWidth: 400, maxWidth: .infinity)
+                .frame(minWidth: 324, maxWidth: showAgentList ? .infinity : geometry.size.width)
                 
                 if showAgentList {
                     Rectangle()
@@ -57,21 +88,24 @@ struct AgentModeView: View {
                             selectedChatId = agent.id
                         }
                     )
-                    .frame(minWidth: 220, maxWidth: 300)
+                    .frame(minWidth: 178, maxWidth: 243)
                 }
             }
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .preference(key: AgentPanelMinWidthKey.self, value: showAgentList ? 502 : 324)
         .onAppear {
-            if selectedChatId == nil, let first = coordinator.agents.first {
-                selectedChatId = first.id
-            }
-            if coordinator.agentNeedingApprovalId != nil {
-                showApprovalDialog = true
+            DispatchQueue.main.async {
+                if selectedChatId == nil, let first = coordinator.agents.first {
+                    selectedChatId = first.id
+                }
+                if coordinator.agentNeedingApprovalId != nil {
+                    showApprovalDialog = true
+                }
             }
         }
         .onChange(of: coordinator.agentNeedingApprovalId) { _, newValue in
-            showApprovalDialog = newValue != nil
+            DispatchQueue.main.async { showApprovalDialog = newValue != nil }
         }
         .sheet(isPresented: $showApprovalDialog) {
             if let agent = coordinator.agentNeedingApproval, let decision = agent.pendingApproval {
@@ -99,7 +133,7 @@ struct AgentModeView: View {
     }
     
     private var agentIsLocalMode: Bool {
-        LocalOnlyService.shared.isLocalModeEnabled
+        localOnlyService.isLocalModeEnabled
     }
     
     private var headerView: some View {
@@ -147,11 +181,19 @@ struct AgentModeView: View {
                     .tint(.red)
             }
             
-            Button(action: { showAgentList.toggle() }) {
+            Button(action: {
+                // #region agent log
+                let line = "{\"sessionId\":\"0a8696\",\"location\":\"AgentModeView.swift:toggle\",\"message\":\"Hide/Show list tapped\",\"data\":{\"before\":\(showAgentList)}\",\"timestamp\":\(Int(Date().timeIntervalSince1970 * 1000)),\"hypothesisId\":\"H2\"}\n"
+                AgentModeView.appendLog(line)
+                // #endregion
+                showAgentList.toggle()
+            }) {
                 Image(systemName: showAgentList ? "sidebar.right" : "sidebar.left")
                     .foregroundColor(.secondary)
+                    .frame(minWidth: 32, minHeight: 32)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(PlainButtonStyle())
+            .buttonStyle(.borderless)
             .help(showAgentList ? "Hide Agent List" : "Show Agent List")
         }
         .padding()
@@ -166,14 +208,22 @@ struct AgentModeView: View {
             approvalPendingView
         } else if let agent = selectedAgent {
             if agent.isRunning || !agent.steps.isEmpty {
-                AgentStepsView(agent: agent, lastStepCount: $lastStepCount, bottomID: bottomID)
+                AgentStepsView(agent: agent, lastStepCount: $lastStepCount, bottomID: bottomID, projectURL: editorViewModel.rootFolderURL, onOpenFile: { path in
+                    guard let root = editorViewModel.rootFolderURL else { return }
+                    let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path)
+                    editorViewModel.openFile(at: url)
+                })
             } else {
                 emptyStateView
             }
         } else if let sid = selectedChatId, let historyItem = historyService.getAgent(by: sid) {
             AgentHistoryDetailView(agent: historyItem)
         } else if let firstRunning = coordinator.agents.first(where: { $0.isRunning }) {
-            AgentStepsView(agent: firstRunning, lastStepCount: $lastStepCount, bottomID: bottomID)
+            AgentStepsView(agent: firstRunning, lastStepCount: $lastStepCount, bottomID: bottomID, projectURL: editorViewModel.rootFolderURL, onOpenFile: { path in
+                    guard let root = editorViewModel.rootFolderURL else { return }
+                    let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path)
+                    editorViewModel.openFile(at: url)
+                })
         } else {
             emptyStateView
         }
@@ -189,7 +239,11 @@ struct AgentModeView: View {
                 .multilineTextAlignment(.center)
             Button("Review action") { showApprovalDialog = true }
                 .buttonStyle(.borderedProminent)
-            AgentStepsView(agent: selectedAgent!, lastStepCount: $lastStepCount, bottomID: bottomID)
+            AgentStepsView(agent: selectedAgent!, lastStepCount: $lastStepCount, bottomID: bottomID, projectURL: editorViewModel.rootFolderURL, onOpenFile: { path in
+                    guard let root = editorViewModel.rootFolderURL else { return }
+                    let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path)
+                    editorViewModel.openFile(at: url)
+                })
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
@@ -219,7 +273,61 @@ struct AgentModeView: View {
                 attachedImagesView
             }
             
+            if !activeMentions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(activeMentions) { mention in
+                            MentionBadgeView(mention: mention) {
+                                activeMentions.removeAll { $0.id == mention.id }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                }
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                .cornerRadius(6)
+            }
+            
             HStack(spacing: 8) {
+                Button(action: { showMentionPopup = true }) {
+                    Image(systemName: "at")
+                        .font(.system(size: 16))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help("Add context (@file, @codebase, etc.)")
+                .popover(isPresented: $showMentionPopup, arrowEdge: .top) {
+                    MentionPopupView(
+                        isVisible: $showMentionPopup,
+                        onSelect: { type in
+                            if type == .file {
+                                showMentionPopup = false
+                                showFilePicker = true
+                            } else {
+                                addMention(type)
+                            }
+                        },
+                        editorViewModel: editorViewModel
+                    )
+                }
+                .sheet(isPresented: $showFilePicker) {
+                    FileMentionPickerView(
+                        editorViewModel: editorViewModel,
+                        onSelect: { filePath in
+                            let mention = Mention(
+                                type: .file,
+                                value: filePath,
+                                displayName: "@file:\(filePath)"
+                            )
+                            if !activeMentions.contains(where: { $0.type == .file && $0.value == filePath }) {
+                                activeMentions.append(mention)
+                            }
+                        },
+                        isVisible: $showFilePicker
+                    )
+                }
+                
                 Button(action: openImagePicker) {
                     Image(systemName: "photo")
                         .font(.system(size: 16))
@@ -228,7 +336,7 @@ struct AgentModeView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Attach image")
                 
-                TextField("Describe the task...", text: $inputText, axis: .vertical)
+                TextField("Describe the task, @ for context", text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .lineLimit(1...3)
@@ -236,16 +344,21 @@ struct AgentModeView: View {
                     .padding(.horizontal, 12)
                     .background(Color(NSColor.controlBackgroundColor))
                     .cornerRadius(6)
-                    .onSubmit { if !inputText.isEmpty { startTask() } }
-                    .help("Cmd+Return to send (Return alone adds a new line)")
+                    .onSubmit { if !inputText.isEmpty || !activeMentions.isEmpty { startTask() } }
+                    .onChange(of: inputText) { _, newValue in
+                        if newValue.hasSuffix("@") {
+                            showMentionPopup = true
+                        }
+                    }
+                    .help("Cmd+Return to send. Type @ to add file/codebase/selection context.")
                 
-                Button(action: { if !inputText.isEmpty { startTask() } }) {
+                Button(action: { if !inputText.isEmpty || !activeMentions.isEmpty { startTask() } }) {
                     Image(systemName: "arrow.right.circle.fill")
                         .font(.system(size: 20))
                         .foregroundColor(inputText.isEmpty || targetAgent == nil ? .secondary : .accentColor)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .disabled(inputText.isEmpty || targetAgent == nil)
+                .disabled((inputText.isEmpty && activeMentions.isEmpty) || targetAgent == nil)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("Send (Cmd+Return)")
             }
@@ -284,18 +397,35 @@ struct AgentModeView: View {
     
     private func startTask() {
         guard let agent = targetAgent else { return }
-        let taskDescription = inputText
+        var taskDescription = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let images = imageContextService.attachedImages
+        let mentions = activeMentions
+        guard !taskDescription.isEmpty || !mentions.isEmpty else { return }
+        if taskDescription.isEmpty && !mentions.isEmpty {
+            taskDescription = "Use the attached context and suggest or apply changes as appropriate."
+        }
         inputText = ""
+        activeMentions.removeAll()
         lastStepCount = 0
         selectedChatId = agent.id
 
         Task { @MainActor in
-            let context = await editorViewModel.getContextForAI()
+            var context = await editorViewModel.getContextForAI() ?? ""
+            if !mentions.isEmpty {
+                let mentionContext = await MentionParser.shared.buildContextFromMentionsAsync(
+                    mentions,
+                    projectURL: editorViewModel.rootFolderURL,
+                    selectedText: editorViewModel.editorState.selectedText,
+                    terminalOutput: nil
+                )
+                if !mentionContext.isEmpty {
+                    context = mentionContext + "\n\n" + (context.isEmpty ? "" : "--- Editor context ---\n" + context)
+                }
+            }
             agent.runTask(
                 taskDescription,
                 projectURL: editorViewModel.rootFolderURL,
-                context: context,
+                context: context.isEmpty ? nil : context,
                 images: images,
                 onStepUpdate: { _ in },
                 onComplete: { result in
@@ -308,6 +438,41 @@ struct AgentModeView: View {
                 }
             )
         }
+    }
+    
+    private func addMention(_ type: MentionType) {
+        var value = ""
+        var displayName = type.rawValue
+        switch type {
+        case .selection:
+            let selection = editorViewModel.editorState.selectedText
+            if !selection.isEmpty {
+                value = selection
+                displayName = "@selection"
+            }
+        case .file:
+            displayName = "@file:\(value)"
+        case .folder:
+            if let url = editorViewModel.rootFolderURL {
+                value = url.path
+                displayName = "@folder:\(url.lastPathComponent)"
+            }
+        case .codebase:
+            displayName = "@codebase"
+        case .terminal:
+            displayName = "@terminal"
+        case .web:
+            displayName = "@web"
+        case .docs:
+            displayName = "@docs"
+        case .notepad:
+            displayName = "@notepad"
+        }
+        let mention = Mention(type: type, value: value, displayName: displayName)
+        if !activeMentions.contains(where: { $0.type == type && $0.value == value }) {
+            activeMentions.append(mention)
+        }
+        showMentionPopup = false
     }
     
     private func openImagePicker() {

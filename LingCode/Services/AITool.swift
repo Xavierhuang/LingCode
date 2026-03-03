@@ -118,11 +118,41 @@ extension AITool {
         )
     }
     
-    /// Tool for writing/editing files
+    /// Tool for small edits: replace text in a file without sending the whole file. Use for renames, title changes, single-line fixes. Fast.
+    static func searchReplace() -> AITool {
+        return AITool(
+            name: "search_replace",
+            description: "Replace text in a file. Use for small edits (rename, change title, fix one line). Fast; use write_file only when rewriting the whole file or many scattered changes.",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "file_path": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Path to the file to edit")
+                    ]),
+                    "old_string": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Exact string to find (include enough context to be unique)")
+                    ]),
+                    "new_string": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Replacement text")
+                    ]),
+                    "replace_all": AnyCodable([
+                        "type": AnyCodable("boolean"),
+                        "description": AnyCodable("If true, replace all occurrences; default false (first only)")
+                    ])
+                ]),
+                "required": AnyCodable(["file_path", "old_string", "new_string"])
+            ]
+        )
+    }
+
+    /// Tool for writing/editing files (full content). Prefer search_replace for small edits.
     static func writeFile() -> AITool {
         return AITool(
             name: "write_file",
-            description: "Write or edit a file",
+            description: "Write the full contents of a file. Use only when rewriting the whole file or making many scattered changes; for small edits use search_replace instead.",
             inputSchema: [
                 "type": AnyCodable("object"),
                 "properties": AnyCodable([
@@ -220,6 +250,37 @@ extension AITool {
                     ])
                 ]),
                 "required": AnyCodable(["summary"])
+            ]
+        )
+    }
+
+    /// Tool to delegate work to a specialized subagent; parent continues without waiting (async subagent).
+    static func spawnSubagent() -> AITool {
+        return AITool(
+            name: "spawn_subagent",
+            description: "Start a specialized subagent to do work in the background. You can continue with other tools while it runs. Use for parallel work (e.g. one subagent writes tests, another refactors). Optional parent_task_id links this subagent under another (for a tree of work).",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "subagent_type": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("One of: coder, reviewer, tester, documenter, debugger, researcher, refactorer, architect")
+                    ]),
+                    "description": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("What the subagent should do (clear task description)")
+                    ]),
+                    "file_paths": AnyCodable([
+                        "type": AnyCodable("array"),
+                        "items": AnyCodable(["type": AnyCodable("string")]),
+                        "description": AnyCodable("Optional list of file paths to give the subagent as context")
+                    ]),
+                    "parent_task_id": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Optional UUID of another subagent task; this one will be its child (for tree of work)")
+                    ])
+                ]),
+                "required": AnyCodable(["subagent_type", "description"])
             ]
         )
     }

@@ -43,6 +43,7 @@ class AgentService: ObservableObject, Identifiable {
     private var recentlyWrittenFiles: Set<String> = []
     private var searchQueries: [String] = []  // Track search queries to detect loops
     private var filesReadThisTask: [String: Int] = [:]  // Track how many times each file was read
+    private var lastFileContentByPath: [String: String] = [:]  // Cache last read content so blocked repeated reads still get content
     private let maxRecentActions = 5
     private let maxDoneRejectionsNoWrites = 1
     private var doneRejectedNoWritesCount = 0
@@ -51,6 +52,7 @@ class AgentService: ObservableObject, Identifiable {
     private let maxRepeatedSearches = 2  // Stop after 2 searches for same/similar query
     private let maxRepeatedFileReads = 2  // Stop after 2 reads of same file
     private var incompleteWriteRetryCount = 0  // Retry once when write_file stream ends early
+    private var currentTaskStepStartIndex: Int = 0  // Index of first step of current task (for continuous conversation)
 
     // Approval context
     private class PendingExecutionContext {
@@ -88,6 +90,7 @@ class AgentService: ObservableObject, Identifiable {
         recentlyWrittenFiles.removeAll()
         searchQueries.removeAll()
         filesReadThisTask.removeAll()
+        lastFileContentByPath.removeAll()
         incompleteWriteRetryCount = 0
         clearThinkingStep()
         for step in steps where step.status == .running {
@@ -131,11 +134,11 @@ class AgentService: ObservableObject, Identifiable {
         AgentCoordinator.shared.clearApproval(agentId: self.id)
         
         if approved {
-            executeDecision(decision, projectURL: context.projectURL, onOutput: { output in
+            executeDecision(decision, toolCall: nil, agentTaskId: context.task.id, projectURL: context.projectURL, onOutput: { output in
                 self.updateStep(stepId, output: output, append: true)
                 context.onStepUpdate(self.steps.first(where: { $0.id == stepId })!)
-            }, onComplete: { success, output in
-                self.updateStep(stepId, status: success ? .completed : .failed, error: success ? nil : output)
+            }, onComplete: { success, output, originalContent in
+                self.updateStep(stepId, status: success ? .completed : .failed, error: success ? nil : output, originalContent: originalContent)
                 context.onStepUpdate(self.steps.first(where: { $0.id == stepId })!)
                 self.runNextIteration(task: context.task, projectURL: context.projectURL, originalContext: context.originalContext, images: context.images, onStepUpdate: context.onStepUpdate, onComplete: context.onComplete)
             })
@@ -186,8 +189,9 @@ class AgentService: ObservableObject, Identifiable {
                 
                 let history = await self.buildHistorySnapshot()
                 let normalizePath: (String) -> String = { path in AgentLoopDetector.normalizeFilePath(path, projectURL: projectURL) }
-                let filesRead = AgentStepHelpers.filesRead(from: self.steps, normalizePath: normalizePath)
-                let filesWrittenCount = AgentStepHelpers.countFilesWritten(self.steps)
+                let currentSteps = self.currentTaskSteps
+                let filesRead = AgentStepHelpers.filesRead(from: currentSteps, normalizePath: normalizePath)
+                let filesWrittenCount = AgentStepHelpers.countFilesWritten(currentSteps)
                 let agentMemory = (projectURL != nil) ? AgentMemoryService.shared.readMemory(for: projectURL!) : ""
                 
                 // Always gather project structure so the AI knows boundaries (not just for vague tasks)
@@ -200,10 +204,10 @@ class AgentService: ObservableObject, Identifiable {
                 let requiresModifications = AgentTaskIntent.taskRequiresModifications(task.description)
                 let loopDetectionHint = AgentLoopDetector.buildLoopDetectionHint(failedActions: self.failedActions)
                 let noFilesWrittenYet = requiresModifications && filesWrittenCount == 0 && self.doneRejectedNoWritesCount > 0
+                let (previousTaskDescription, lastTaskOutcome) = self.previousTaskContext
+                let prompt = AgentPromptBuilder.buildPrompt(task: task, history: history, filesRead: filesRead, agentMemory: agentMemory, loopDetectionHint: loopDetectionHint, requiresModifications: requiresModifications, noFilesWrittenYet: noFilesWrittenYet, iterationCount: self.iterationCount, filesWrittenCount: filesWrittenCount, projectStructure: projectStructure, previousTaskDescription: previousTaskDescription, lastTaskOutcome: lastTaskOutcome)
                 
-                let prompt = AgentPromptBuilder.buildPrompt(task: task, history: history, filesRead: filesRead, agentMemory: agentMemory, loopDetectionHint: loopDetectionHint, requiresModifications: requiresModifications, noFilesWrittenYet: noFilesWrittenYet, iterationCount: self.iterationCount, filesWrittenCount: filesWrittenCount, projectStructure: projectStructure)
-                
-                var agentTools: [AITool] = [.runTerminalCommand(), .writeFile(), .codebaseSearch(), .searchWeb(), .readFile(), .readDirectory(), .done()]
+                var agentTools: [AITool] = [.runTerminalCommand(), .searchReplace(), .writeFile(), .codebaseSearch(), .searchWeb(), .readFile(), .readDirectory(), .spawnSubagent(), .done()]
                 
                 // Dynamic tool filtering to prevent loops
                 if self.iterationCount > 3 && !filesRead.isEmpty && filesWrittenCount == 0 && requiresModifications {
@@ -220,12 +224,19 @@ class AgentService: ObservableObject, Identifiable {
                 var accumulatedResponse = ""
                 var detectedToolCalls: [ToolCall] = []
                 var chunkCount = 0
+                var drainingStream = false
                 
                 for try await chunk in stream {
                     chunkCount += 1
                     if isCancelled || Task.isCancelled {
                         print("[AgentService] Breaking due to cancellation")
                         break
+                    }
+                    if drainingStream {
+                        accumulatedResponse += chunk
+                        let (_, toolCalls) = ToolCallHandler.shared.processChunk(chunk, projectURL: projectURL)
+                        if !toolCalls.isEmpty { detectedToolCalls.append(contentsOf: toolCalls) }
+                        continue
                     }
                     accumulatedResponse += chunk
                     
@@ -252,10 +263,35 @@ class AgentService: ObservableObject, Identifiable {
                                     self.steps[idx] = updated
                                     self.currentActionStep = updated
                                     self.currentThinkingStep = nil
+                                    if toolName == "write_file" {
+                                        print("[AgentService] Waiting for write_file content from API (may take 20-60s for large files)...")
+                                    }
                                 }
                             }
                         }
                         continue
+                    }
+                    
+                    // Streaming write_file preview (from AIService partial_json) - throttled so UI stays responsive
+                    if chunk.contains("WRITE_FILE_PREVIEW:"), let activeStep = self.currentActionStep, activeStep.type == .codeGeneration {
+                        for line in chunk.components(separatedBy: .newlines) {
+                            let trimmed = line.trimmingCharacters(in: .whitespaces)
+                            if trimmed.hasPrefix("WRITE_FILE_PREVIEW:") {
+                                let b64 = String(trimmed.dropFirst("WRITE_FILE_PREVIEW:".count))
+                                if let data = Data(base64Encoded: b64), let preview = String(data: data, encoding: .utf8), !preview.isEmpty {
+                                    let now = Date()
+                                    if now.timeIntervalSince(lastUIUpdateTime) > 0.12 {
+                                        let stepId = activeStep.id
+                                        let previewCode = preview
+                                        DispatchQueue.main.async {
+                                            self.updateStepStreamingCode(stepId, code: previewCode)
+                                            self.lastUIUpdateTime = now
+                                        }
+                                    }
+                                }
+                                break
+                            }
+                        }
                     }
                     
                     // Throttled live code updates
@@ -263,19 +299,23 @@ class AgentService: ObservableObject, Identifiable {
                         if let content = self.extractPartialContent(from: accumulatedResponse) {
                             let now = Date()
                             if now.timeIntervalSince(lastUIUpdateTime) > 0.05 {
-                                await MainActor.run {
-                                    self.updateStepStreamingCode(activeStep.id, code: content)
+                                let stepId = activeStep.id
+                                let contentCode = content
+                                DispatchQueue.main.async {
+                                    self.updateStepStreamingCode(stepId, code: contentCode)
                                     self.lastUIUpdateTime = now
                                 }
                             }
                         }
                     }
                     
-                    // Standard UI update
-                    await MainActor.run {
-                        self.streamingText = accumulatedResponse
-                        if self.currentActionStep == nil && self.currentThinkingStep != nil {
-                            self.updateStep(self.currentThinkingStep!.id, output: accumulatedResponse, append: false)
+                    // Standard UI update (defer to avoid publishing during view update)
+                    let response = accumulatedResponse
+                    let thinkingId = self.currentThinkingStep?.id
+                    DispatchQueue.main.async {
+                        self.streamingText = response
+                        if self.currentActionStep == nil, let id = thinkingId {
+                            self.updateStep(id, output: response, append: false)
                         }
                     }
                     
@@ -283,11 +323,10 @@ class AgentService: ObservableObject, Identifiable {
                     if !toolCalls.isEmpty {
                         print("[AgentService] Detected \(toolCalls.count) tool calls: \(toolCalls.map { $0.name })")
                         detectedToolCalls.append(contentsOf: toolCalls)
-                        // Only break for non-write tools - write_file needs full content
                         let hasWriteFile = toolCalls.contains { $0.name == "write_file" }
                         if !hasWriteFile {
-                            print("[AgentService] Breaking for non-write tool")
-                            break
+                            print("[AgentService] Have complete non-write tool call, draining stream to avoid cancellation")
+                            drainingStream = true
                         }
                     }
                 }
@@ -312,10 +351,13 @@ class AgentService: ObservableObject, Identifiable {
                     }
                 }
                 
-                guard let toolCall = allToolCalls.first, let decision = self.convertToolCallToDecision(toolCall) else {
-                    // Stream ended without a complete tool call (e.g. cancelled or incomplete write_file).
-                    // Clear currentActionStep so we don't get stuck on "action still in progress".
-                    await MainActor.run {
+                guard !allToolCalls.isEmpty else {
+                    // Stream ended without any complete tool call (e.g. cancelled or incomplete write_file). Defer to avoid "Publishing changes from within view updates".
+                    let taskCopy = task
+                    let projectURLCopy = projectURL
+                    let originalContextCopy = originalContext
+                    let imagesCopy = images
+                    DispatchQueue.main.async {
                         let stuck = self.currentActionStep
                         if let stuck = stuck, let idx = self.steps.firstIndex(where: { $0.id == stuck.id }) {
                             self.steps[idx].status = .failed
@@ -323,50 +365,28 @@ class AgentService: ObservableObject, Identifiable {
                             print("[AgentService] Clearing stuck action step (no tool call received)")
                         }
                         self.currentActionStep = nil
-                        // Retry once if this was an incomplete write_file (stream ended before content arrived)
                         if stuck?.type == .codeGeneration && self.incompleteWriteRetryCount < 1 {
                             self.incompleteWriteRetryCount += 1
-                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete, isRetry: true)
+                            self.runNextIteration(task: taskCopy, projectURL: projectURLCopy, originalContext: originalContextCopy, images: imagesCopy, onStepUpdate: onStepUpdate, onComplete: onComplete, isRetry: true)
                         } else {
-                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                            self.runNextIteration(task: taskCopy, projectURL: projectURLCopy, originalContext: originalContextCopy, images: imagesCopy, onStepUpdate: onStepUpdate, onComplete: onComplete)
                         }
                     }
                     return
                 }
 
-                // Merge heartbeat step with final decision data
-                let finalStep: AgentStep = await MainActor.run {
-                    if let existing = self.currentActionStep, let idx = self.steps.firstIndex(where: { $0.id == existing.id }) {
-                        self.steps[idx].description = decision.displayDescription
-                        self.steps[idx].output = decision.thought
-                        self.steps[idx].targetFilePath = decision.filePath
-                        if let code = decision.code { self.steps[idx].streamingCode = code }
-                        self.currentActionStep = nil
-                        return self.steps[idx]
-                    } else {
-                        let newStep = AgentStep(type: AgentStepHelpers.mapType(decision.action), description: decision.displayDescription, status: .running, output: decision.thought, streamingCode: decision.code, targetFilePath: decision.filePath)
-                        self.addStep(newStep, onUpdate: onStepUpdate)
-                        return newStep
-                    }
-                }
-                
-                // Execute tool - check if it's a "done" action to finalize instead of continuing
-                let isDoneAction = decision.action.lowercased() == "done"
-                
-                await MainActor.run {
-                    self.executeDecision(decision, projectURL: projectURL, onOutput: { output in
-                        self.updateStep(finalStep.id, output: output, append: true)
-                    }, onComplete: { success, output in
-                        self.updateStep(finalStep.id, status: success ? .completed : .failed, error: success ? nil : output)
-                        
-                        // If this was a "done" action, finalize the task instead of continuing
-                        if isDoneAction {
-                            print("[AgentService] Done action completed - finalizing task")
-                            self.finalize(success: true, error: nil, projectURL: projectURL, onComplete: onComplete)
-                        } else {
-                            self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
-                        }
-                    })
+                // Process all tool calls in sequence (batch execution). Defer to avoid "Publishing changes from within view updates".
+                let toolCallsCopy = allToolCalls
+                DispatchQueue.main.async {
+                    self.processToolCallBatch(
+                        toolCalls: toolCallsCopy,
+                        task: task,
+                        projectURL: projectURL,
+                        originalContext: originalContext,
+                        images: images,
+                        onStepUpdate: onStepUpdate,
+                        onComplete: onComplete
+                    )
                 }
 
             } catch {
@@ -392,6 +412,10 @@ class AgentService: ObservableObject, Identifiable {
             let content = input["content"]?.value as? String
             guard let path = filePath, let fileContent = content else { return nil }
             return AgentDecision(action: "code", description: "Write: \(path)", command: nil, query: nil, filePath: path, code: fileContent, thought: nil)
+        case "search_replace":
+            let filePath: String? = input["file_path"]?.value as? String ?? input["path"]?.value as? String
+            guard let path = filePath else { return nil }
+            return AgentDecision(action: "search_replace", description: "Replace in \(path)", command: nil, query: nil, filePath: path, code: nil, thought: nil)
         case "codebase_search", "search_web":
             guard let q = input["query"]?.value as? String else { return nil }
             return AgentDecision(action: "search", description: "Search: \(q)", command: nil, query: q, filePath: nil, code: nil, thought: nil)
@@ -404,77 +428,159 @@ class AgentService: ObservableObject, Identifiable {
             guard let directoryPath = path else { return nil }
             let recursive = (input["recursive"]?.value as? Bool) ?? false
             return AgentDecision(action: "directory", description: "Read: \(directoryPath)", command: nil, query: nil, filePath: directoryPath, code: nil, thought: recursive ? "recursive" : nil)
+        case "spawn_subagent":
+            let type = (input["subagent_type"]?.value as? String) ?? "coder"
+            let desc = (input["description"]?.value as? String) ?? ""
+            return AgentDecision(action: "spawn_subagent", description: "Delegate to \(type): \(desc.prefix(50))\(desc.count > 50 ? "..." : "")", command: nil, query: nil, filePath: nil, code: nil, thought: desc)
         default:
             return nil
         }
     }
+
+    /// Process multiple tool calls from one API response in sequence; chains to next on each completion.
+    private func processToolCallBatch(
+        toolCalls: [ToolCall],
+        startIndex: Int = 0,
+        task: AgentTask,
+        projectURL: URL?,
+        originalContext: String?,
+        images: [AttachedImage],
+        onStepUpdate: @escaping (AgentStep) -> Void,
+        onComplete: @escaping (AgentTaskResult) -> Void
+    ) {
+        guard startIndex < toolCalls.count else {
+            runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            return
+        }
+        let tc = toolCalls[startIndex]
+        guard let decision = convertToolCallToDecision(tc) else {
+            processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            return
+        }
+        let isDone = decision.action.lowercased() == "done"
+        let step: AgentStep = {
+            if startIndex == 0, let existing = currentActionStep, let idx = steps.firstIndex(where: { $0.id == existing.id }) {
+                steps[idx].description = decision.displayDescription
+                steps[idx].output = decision.thought
+                steps[idx].targetFilePath = decision.filePath
+                if let code = decision.code { steps[idx].streamingCode = code }
+                currentActionStep = nil
+                return steps[idx]
+            }
+            let newStep = AgentStep(type: AgentStepHelpers.mapType(decision.action), description: decision.displayDescription, status: .running, output: decision.thought, streamingCode: decision.code, targetFilePath: decision.filePath)
+            addStep(newStep, onUpdate: onStepUpdate)
+            return newStep
+        }()
+        if isDone {
+            updateStep(step.id, status: .completed, output: decision.thought)
+            print("[AgentService] Done action completed - finalizing task")
+            finalize(success: true, error: nil, projectURL: projectURL, onComplete: onComplete)
+            return
+        }
+        let replaceOld = tc.input["old_string"]?.value as? String
+        let replaceNew = tc.input["new_string"]?.value as? String
+        executeDecision(decision, toolCall: tc, agentTaskId: task.id, projectURL: projectURL, onOutput: { output in
+            DispatchQueue.main.async { self.updateStep(step.id, output: output, append: true) }
+        }, onComplete: { success, output, originalContent in
+            DispatchQueue.main.async {
+                self.updateStep(step.id, status: success ? .completed : .failed, error: success ? nil : output, originalContent: originalContent, replaceOldString: replaceOld, replaceNewString: replaceNew)
+                if !success {
+                    self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                    return
+                }
+                self.processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            }
+        })
+    }
     
-    func executeDecision(_ decision: AgentDecision, projectURL: URL?, onOutput: @escaping (String) -> Void, onComplete: @escaping (Bool, String) -> Void) {
+    func executeDecision(_ decision: AgentDecision, toolCall: ToolCall?, agentTaskId: UUID?, projectURL: URL?, onOutput: @escaping (String) -> Void, onComplete: @escaping (Bool, String, String?) -> Void) {
         switch decision.action.lowercased() {
         case "done":
             let summary = decision.thought ?? "Task completed successfully"
             onOutput("Task Complete\n\n\(summary)")
-            onComplete(true, summary)
-            
+            onComplete(true, summary, nil)
+
         case "terminal":
             guard let cmd = decision.command, !cmd.isEmpty else {
-                onComplete(false, "No command provided")
+                onComplete(false, "No command provided", nil)
                 return
             }
-            terminalService.execute(cmd, workingDirectory: projectURL, onOutput: { onOutput($0) }, onError: { onOutput("Error: \($0)") }, onComplete: { onComplete($0 == 0, "Exit code: \($0)") })
-            
+            terminalService.execute(cmd, workingDirectory: projectURL, onOutput: { onOutput($0) }, onError: { onOutput("Error: \($0)") }, onComplete: { onComplete($0 == 0, "Exit code: \($0)", nil) })
+
+        case "search_replace":
+            guard let call = toolCall else {
+                onComplete(false, "No tool call for search_replace", nil)
+                return
+            }
+            if let projectURL = projectURL { ToolExecutionService.shared.setProjectURL(projectURL) }
+            ToolExecutionService.shared.setAgentRunContext(agentTaskId: agentTaskId)
+            Task {
+                do {
+                    let result = try await ToolExecutionService.shared.executeToolCall(call)
+                    await MainActor.run {
+                        onOutput(result.content)
+                        onComplete(!result.isError, result.content, nil)
+                    }
+                } catch {
+                    await MainActor.run {
+                        onOutput("Error: \(error.localizedDescription)")
+                        onComplete(false, error.localizedDescription, nil)
+                    }
+                }
+            }
+
         case "code":
             guard let filePath = decision.filePath, let code = decision.code else {
-                onComplete(false, "Missing filePath or code")
+                onComplete(false, "Missing filePath or code", nil)
                 return
             }
-            
+
             let fullPath = projectURL?.appendingPathComponent(filePath) ?? URL(fileURLWithPath: filePath)
-            
+
             do {
                 try FileManager.default.createDirectory(at: fullPath.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
-                
+
                 let fileExisted = FileManager.default.fileExists(atPath: fullPath.path)
-                
+
                 // Idempotency check
                 if fileExisted, let existingContent = try? String(contentsOf: fullPath, encoding: .utf8) {
                     if existingContent.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) {
                         onOutput("File '\(filePath)' is already up-to-date.\n\n--- \(filePath) ---\n\(existingContent)\n--- End of \(filePath) ---")
-                        onComplete(true, "Content matches existing file.")
+                        onComplete(true, "Content matches existing file.", nil)
                         return
                     }
                 }
-                
+
                 let originalContent = fileExisted ? (try? String(contentsOf: fullPath, encoding: .utf8)) : nil
                 try code.write(to: fullPath, atomically: true, encoding: .utf8)
                 onOutput("File written: \(filePath)\n\n--- \(filePath) ---\n\(code)\n--- End of \(filePath) ---")
-                
+
                 NotificationCenter.default.post(name: NSNotification.Name(fileExisted ? "FileUpdated" : "FileCreated"), object: nil, userInfo: ["fileURL": fullPath, "filePath": filePath, "content": code, "originalContent": originalContent ?? ""])
-                
+
                 if let projectURL = projectURL {
                     AgentValidationService.shared.validateCodeAfterWrite(fileURL: fullPath, projectURL: projectURL) { result in
                         switch result {
-                        case .success: onComplete(true, "File written and validated")
-                        case .warnings(let msgs): onOutput("Warnings:\n\(msgs.joined(separator: "\n"))"); onComplete(true, "File written with warnings")
+                        case .success: onComplete(true, "File written and validated", originalContent)
+                        case .warnings(let msgs): onOutput("Warnings:\n\(msgs.joined(separator: "\n"))"); onComplete(true, "File written with warnings", originalContent)
                         case .errors(let msgs):
                             onOutput("Validation Errors:\n\(msgs.joined(separator: "\n"))")
                             Task { @MainActor in
                                 let contextualError = await self.enrichErrorWithGraphRAG(errors: msgs, fileURL: fullPath, projectURL: projectURL)
-                                onComplete(false, contextualError)
+                                onComplete(false, contextualError, nil)
                             }
-                        case .skipped: onComplete(true, "File written successfully")
+                        case .skipped: onComplete(true, "File written successfully", originalContent)
                         }
                     }
                 } else {
-                    onComplete(true, "File written successfully")
+                    onComplete(true, "File written successfully", originalContent)
                 }
             } catch {
-                onComplete(false, "Failed to write file: \(error.localizedDescription)")
+                onComplete(false, "Failed to write file: \(error.localizedDescription)", nil)
             }
             
         case "search":
             guard let query = decision.query, !query.isEmpty else {
-                onComplete(false, "No search query provided")
+                onComplete(false, "No search query provided", nil)
                 return
             }
             
@@ -487,7 +593,7 @@ class AgentService: ObservableObject, Identifiable {
             if similarSearchCount >= maxRepeatedSearches {
                 onOutput("Search skipped: Already searched for '\(query)' multiple times. Try a different approach.")
                 failedActions.insert("search:\(normalizedQuery)")
-                onComplete(false, "Repeated search detected - try writing code instead")
+                onComplete(false, "Repeated search detected - try writing code instead", nil)
                 return
             }
             
@@ -496,11 +602,11 @@ class AgentService: ObservableObject, Identifiable {
             webSearch.search(query: query) { results in
                 let summary = results.prefix(5).map { "- \($0.title): \($0.snippet.prefix(100))" }.joined(separator: "\n")
                 onOutput("Search results:\n\(summary)")
-                onComplete(true, "Found \(results.count) results")
+                onComplete(true, "Found \(results.count) results", nil)
             }
             
         case "file":
-            guard let path = decision.filePath else { onComplete(false, "No path"); return }
+            guard let path = decision.filePath else { onComplete(false, "No path", nil); return }
             
             // Normalize the path for comparison (handle relative/absolute, case differences)
             let url = (projectURL ?? URL(fileURLWithPath: "")).appendingPathComponent(path)
@@ -517,10 +623,16 @@ class AgentService: ObservableObject, Identifiable {
             print("[AgentService] File read check: '\(path)' -> normalized: '\(normalizedPath)', filename: '\(filename)', read count: \(totalReadCount)")
             
             if totalReadCount >= maxRepeatedFileReads {
+                if let cached = lastFileContentByPath[normalizedPath] ?? lastFileContentByPath[filename] {
+                    print("[AgentService] Returning cached content for repeated read: \(path)")
+                    onOutput("(Cached from previous read - use exact strings from below for search_replace)\n\n\(cached)")
+                    onComplete(true, "Cached content - proceed with search_replace or done", nil)
+                    return
+                }
                 print("[AgentService] BLOCKING repeated file read for: \(path)")
                 onOutput("File '\(path)' was already read \(totalReadCount) times. The content is in the history above. Please proceed with your task using that information.")
                 failedActions.insert("file:\(normalizedPath)")
-                onComplete(false, "File already read - use existing content from history")
+                onComplete(false, "File already read - use existing content from history", nil)
                 return
             }
             
@@ -529,27 +641,43 @@ class AgentService: ObservableObject, Identifiable {
             filesReadThisTask[filename] = totalReadCount + 1
             
             if let content = try? String(contentsOf: url) {
+                lastFileContentByPath[normalizedPath] = content
+                lastFileContentByPath[filename] = content
                 onOutput(content)
-                onComplete(true, "Read file")
+                onComplete(true, "Read file", nil)
             } else {
-                onComplete(false, "Failed to read file")
+                onComplete(false, "Failed to read file", nil)
             }
              
         case "directory":
-            guard let path = decision.filePath else { onComplete(false, "No path provided"); return }
+            guard let path = decision.filePath else { onComplete(false, "No path provided", nil); return }
             let recursive = decision.thought == "recursive"
-            let toolCall = ToolCall(id: UUID().uuidString, name: "read_directory", input: ["directory_path": AnyCodable(path), "recursive": AnyCodable(recursive)])
+            let dirToolCall = ToolCall(id: UUID().uuidString, name: "read_directory", input: ["directory_path": AnyCodable(path), "recursive": AnyCodable(recursive)])
             if let projectURL = projectURL { ToolExecutionService.shared.setProjectURL(projectURL) }
             Task {
                 do {
-                    let result = try await ToolExecutionService.shared.executeToolCall(toolCall)
-                    if result.isError { onComplete(false, result.content) }
-                    else { onOutput(result.content); onComplete(true, "Read directory") }
-                } catch { onComplete(false, "Error: \(error.localizedDescription)") }
+                    let result = try await ToolExecutionService.shared.executeToolCall(dirToolCall)
+                    if result.isError { onComplete(false, result.content, nil) }
+                    else { onOutput(result.content); onComplete(true, "Read directory", nil) }
+                } catch { onComplete(false, "Error: \(error.localizedDescription)", nil) }
+            }
+             
+        case "spawn_subagent":
+            guard let call = toolCall else { onComplete(false, "No tool call for spawn_subagent", nil); return }
+            if let projectURL = projectURL { ToolExecutionService.shared.setProjectURL(projectURL) }
+            ToolExecutionService.shared.setAgentRunContext(agentTaskId: agentTaskId)
+            Task {
+                do {
+                    let result = try await ToolExecutionService.shared.executeToolCall(call)
+                    onOutput(result.content)
+                    onComplete(!result.isError, result.content, nil)
+                } catch {
+                    onComplete(false, "Error: \(error.localizedDescription)", nil)
+                }
             }
              
         default:
-            onComplete(false, "Unknown action: \(decision.action)")
+            onComplete(false, "Unknown action: \(decision.action)", nil)
         }
     }
 
@@ -659,7 +787,8 @@ class AgentService: ObservableObject, Identifiable {
 
     private func finalize(success: Bool, error: String? = nil, projectURL: URL? = nil, summary: String? = nil, onComplete: @escaping (AgentTaskResult) -> Void) {
         isRunning = false
-        let finalSummary = success ? (summary ?? AgentSummaryGenerator.generateTaskSummary(from: steps)) : (error ?? "Task failed")
+        let stepsForSummary = currentTaskSteps
+        let finalSummary = success ? (summary ?? AgentSummaryGenerator.generateTaskSummary(from: stepsForSummary)) : (error ?? "Task failed")
         steps.append(AgentStep(type: .complete, description: "Task Complete", status: .completed, output: finalSummary))
         onComplete(AgentTaskResult(success: success, error: error, steps: steps))
     }
@@ -670,11 +799,36 @@ class AgentService: ObservableObject, Identifiable {
     }
 
     private func resetForNewTask(_ task: AgentTask) {
-        isCancelled = false; isRunning = true; steps = []; iterationCount = 0
-        actionHistory.removeAll(); failedActions.removeAll(); recentActions.removeAll()
-        searchQueries.removeAll(); filesReadThisTask.removeAll()  // Clear search and read history
-        currentThinkingStep = nil; currentActionStep = nil; currentTask = task
+        isCancelled = false
+        isRunning = true
+        iterationCount = 0
+        actionHistory.removeAll()
+        failedActions.removeAll()
+        recentActions.removeAll()
+        searchQueries.removeAll()
+        filesReadThisTask.removeAll()
+        lastFileContentByPath.removeAll()
+        currentThinkingStep = nil
+        currentActionStep = nil
+        currentTask = task
         incompleteWriteRetryCount = 0
+        let taskHeader = AgentStep(type: .taskHeader, description: "Task: \(task.description)", status: .completed, output: nil)
+        steps.append(taskHeader)
+        currentTaskStepStartIndex = steps.count - 1
+    }
+
+    private var currentTaskSteps: [AgentStep] {
+        guard currentTaskStepStartIndex < steps.count else { return steps }
+        return Array(steps[currentTaskStepStartIndex...])
+    }
+
+    /// Previous task description and outcome for prompt context (what was prompted last).
+    private var previousTaskContext: (description: String?, outcome: String?) {
+        let priorSteps = steps[0..<currentTaskStepStartIndex]
+        guard let prevHeaderIndex = priorSteps.lastIndex(where: { $0.type == .taskHeader }) else { return (nil, nil) }
+        let prevDescription = steps[prevHeaderIndex].description
+        let outcome: String? = priorSteps.last(where: { $0.type == .complete }).flatMap { $0.output }
+        return (prevDescription, outcome)
     }
 
     private func clearThinkingStep() {
@@ -695,7 +849,7 @@ class AgentService: ObservableObject, Identifiable {
 
     /// Builds execution history so the AI knows what has already been tried. Use larger output for read steps so file contents are usable.
     private func buildHistorySnapshot() async -> String {
-        steps.map { step in
+        currentTaskSteps.map { step in
             let output = step.output ?? ""
             // Read steps contain file content - allow more so the agent can use it without re-reading
             let limit = (step.type == .fileOperation && step.description.hasPrefix("Read:")) ? 6000 : 1200
@@ -704,9 +858,8 @@ class AgentService: ObservableObject, Identifiable {
         }.joined(separator: "\n---\n")
     }
     
-    private func updateStep(_ id: UUID, status: AgentStepStatus? = nil, result: String? = nil, error: String? = nil, output: String? = nil, append: Bool = false) {
+    private func updateStep(_ id: UUID, status: AgentStepStatus? = nil, result: String? = nil, error: String? = nil, output: String? = nil, append: Bool = false, originalContent: String? = nil, replaceOldString: String? = nil, replaceNewString: String? = nil) {
         if let index = steps.firstIndex(where: { $0.id == id }) {
-            // Create a mutable copy, update it, then reassign to trigger @Published
             var updatedStep = steps[index]
             if let st = status { updatedStep.status = st }
             if let e = error { updatedStep.error = e }
@@ -714,6 +867,9 @@ class AgentService: ObservableObject, Identifiable {
                 if append { updatedStep.output = (updatedStep.output ?? "") + o }
                 else { updatedStep.output = o }
             }
+            if originalContent != nil { updatedStep.originalContent = originalContent }
+            if replaceOldString != nil { updatedStep.replaceOldString = replaceOldString }
+            if replaceNewString != nil { updatedStep.replaceNewString = replaceNewString }
             steps[index] = updatedStep
         }
     }

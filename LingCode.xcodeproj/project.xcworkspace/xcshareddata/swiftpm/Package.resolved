@@ -1,6 +1,15 @@
 {
-  "originHash" : "b2f13041efdf415967c3d30d897bbe4e824f9fb16db7bb732bd3e711216952cb",
+  "originHash" : "8f235ee5d69b6f814fcb96a085a60b86c9108b560287b5c2023d0f4f1ef80561",
   "pins" : [
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "c5d11a805e765f52ba34ec7284bd4fcd6ba68615",
+        "version" : "1.7.0"
+      }
+    },
     {
       "identity" : "swift-syntax",
       "kind" : "remoteSourceControl",
@@ -11,57 +20,12 @@
       }
     },
     {
-      "identity" : "swift-tree-sitter",
+      "identity" : "swiftterm",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/swift-tree-sitter",
+      "location" : "https://github.com/migueldeicaza/SwiftTerm.git",
       "state" : {
-        "revision" : "08ef81eb8620617b55b08868126707ad72bf754f",
-        "version" : "0.25.0"
-      }
-    },
-    {
-      "identity" : "tree-sitter",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/tree-sitter",
-      "state" : {
-        "revision" : "da6fe9beb4f7f67beb75914ca8e0d48ae48d6406",
-        "version" : "0.25.10"
-      }
-    },
-    {
-      "identity" : "tree-sitter-go",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/tree-sitter-go",
-      "state" : {
-        "revision" : "1547678a9da59885853f5f5cc8a99cc203fa2e2c",
-        "version" : "0.25.0"
-      }
-    },
-    {
-      "identity" : "tree-sitter-javascript",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/tree-sitter-javascript",
-      "state" : {
-        "revision" : "44c892e0be055ac465d5eeddae6d3e194424e7de",
-        "version" : "0.25.0"
-      }
-    },
-    {
-      "identity" : "tree-sitter-python",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/tree-sitter-python",
-      "state" : {
-        "revision" : "293fdc02038ee2bf0e2e206711b69c90ac0d413f",
-        "version" : "0.25.0"
-      }
-    },
-    {
-      "identity" : "tree-sitter-typescript",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tree-sitter/tree-sitter-typescript",
-      "state" : {
-        "revision" : "f975a621f4e7f532fe322e13c4f79495e0a7b2e7",
-        "version" : "0.23.2"
+        "revision" : "b1262db5b6bea699a8260a8c66999436c508ca56",
+        "version" : "1.11.2"
       }
     }
   ],

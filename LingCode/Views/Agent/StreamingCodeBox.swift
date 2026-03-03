@@ -11,11 +11,14 @@ struct StreamingCodeBox: View {
     let content: String
     let isStreaming: Bool
     let fileName: String?
-    
+    /// Original file content before this write (for change highlighting)
+    var previousContent: String? = nil
+
     @State private var displayedLines: [String] = []
     @State private var currentLineIndex: Int = 0
     @State private var isAnimating: Bool = false
     @State private var lastContentHash: Int = 0
+    @State private var changedLineNumbers: Set<Int> = []
     
     private var allLines: [String] {
         content.components(separatedBy: .newlines)
@@ -30,9 +33,25 @@ struct StreamingCodeBox: View {
         .background(Color(NSColor.textBackgroundColor).opacity(0.5))
         .cornerRadius(6)
         .overlay(streamingBorder)
-        .onAppear { initializeContent() }
+        .onAppear {
+            DispatchQueue.main.async { initializeContent(); updateChangedLines() }
+        }
         .onChange(of: content) { oldContent, newContent in
-            handleContentUpdate(oldContent: oldContent, newContent: newContent)
+            DispatchQueue.main.async {
+                handleContentUpdate(oldContent: oldContent, newContent: newContent)
+                updateChangedLines()
+            }
+        }
+        .onChange(of: previousContent) { _, _ in
+            DispatchQueue.main.async { updateChangedLines() }
+        }
+        .onChange(of: isStreaming) { _, nowStreaming in
+            DispatchQueue.main.async {
+                if !nowStreaming && !content.isEmpty {
+                    displayedLines = allLines
+                    currentLineIndex = allLines.count
+                }
+            }
         }
     }
     
@@ -101,11 +120,13 @@ struct StreamingCodeBox: View {
             }
             .frame(minHeight: 60, maxHeight: 250) // minHeight prevents UI jumping during streaming
             .onChange(of: displayedLines.count) { _, newCount in
-                withAnimation(.easeOut(duration: 0.1)) {
-                    if isStreaming {
-                        proxy.scrollTo("cursor", anchor: .bottom)
-                    } else if newCount > 0 {
-                        proxy.scrollTo(newCount - 1, anchor: .bottom)
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        if isStreaming {
+                            proxy.scrollTo("cursor", anchor: .bottom)
+                        } else if newCount > 0 {
+                            proxy.scrollTo(newCount - 1, anchor: .bottom)
+                        }
                     }
                 }
             }
@@ -113,9 +134,13 @@ struct StreamingCodeBox: View {
     }
     
     private var placeholderView: some View {
-        HStack(spacing: 8) {
+        VStack(spacing: 10) {
             ProgressView()
                 .scaleEffect(0.5)
+            Text("Waiting for file content from API (large files may take 20-60s)")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(12)
@@ -136,8 +161,19 @@ struct StreamingCodeBox: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 1)
-        .background(isRecentLine(index) ? Color.blue.opacity(0.08) : Color.clear)
+        .background(backgroundColor(for: index))
         .id(index)
+    }
+
+    private func backgroundColor(for index: Int) -> Color {
+        if isChangedLine(index) { return Color(NSColor.systemYellow.withAlphaComponent(0.2)) }
+        if isRecentLine(index) { return Color.blue.opacity(0.08) }
+        return Color.clear
+    }
+
+    private func isChangedLine(_ index: Int) -> Bool {
+        guard previousContent != nil, !isStreaming else { return false }
+        return changedLineNumbers.contains(index + 1)
     }
     
     private func isRecentLine(_ index: Int) -> Bool {
@@ -169,17 +205,30 @@ struct StreamingCodeBox: View {
     private func initializeContent() {
         if !content.isEmpty {
             let lines = allLines
-            let initialCount = min(5, lines.count)
-            displayedLines = Array(lines.prefix(initialCount))
-            currentLineIndex = initialCount
-            
-            if currentLineIndex < lines.count {
-                animateRemainingLines()
+            if isStreaming {
+                let initialCount = min(5, lines.count)
+                displayedLines = Array(lines.prefix(initialCount))
+                currentLineIndex = initialCount
+                if currentLineIndex < lines.count {
+                    animateRemainingLines()
+                }
+            } else {
+                displayedLines = lines
+                currentLineIndex = lines.count
             }
         }
         lastContentHash = content.hashValue
     }
     
+    private func updateChangedLines() {
+        guard let prev = previousContent, !content.isEmpty else {
+            changedLineNumbers = []
+            return
+        }
+        let ranges = ChangeHighlighter.detectChangedRanges(original: prev, modified: content)
+        changedLineNumbers = ChangeHighlighter.changedLineNumbers(ranges: ranges, in: content)
+    }
+
     private func handleContentUpdate(oldContent: String, newContent: String) {
         let newHash = newContent.hashValue
         guard newHash != lastContentHash else { return }

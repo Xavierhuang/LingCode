@@ -15,6 +15,10 @@ class Document: ObservableObject, Identifiable {
     @Published var isModified: Bool
     @Published var language: String?
 
+    /// Virtual tab (e.g. Claude Code) shown in main editor, not a file.
+    var isClaudeCodeTab: Bool = false
+    var customDisplayName: String?
+
     // AI-generated change tracking
     @Published var aiGeneratedRanges: [NSRange] = []
     @Published var originalContent: String?
@@ -28,14 +32,14 @@ class Document: ObservableObject, Identifiable {
     }
     
     var fileName: String {
-        filePath?.lastPathComponent ?? "Untitled"
+        if let name = customDisplayName { return name }
+        return filePath?.lastPathComponent ?? "Untitled"
     }
     
     var displayName: String {
-        if isModified {
-            return fileName + " •"
-        }
-        return fileName
+        let base = fileName
+        if isModified, !isClaudeCodeTab { return base + " •" }
+        return base
     }
     
     func detectLanguage() {
@@ -73,10 +77,6 @@ class Document: ObservableObject, Identifiable {
             original: originalContent ?? "",
             modified: content
         )
-        print("🎨 Document.markAsAIGenerated: Found \(aiGeneratedRanges.count) changed ranges")
-        for (index, range) in aiGeneratedRanges.prefix(3).enumerated() {
-            print("   Range \(index): location=\(range.location), length=\(range.length)")
-        }
     }
 
     /// Clear AI-generated change highlighting

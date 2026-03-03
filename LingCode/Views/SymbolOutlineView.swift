@@ -124,11 +124,11 @@ struct SymbolOutlineView: View {
         }
         .frame(width: 250)
         .onAppear {
-            refreshSymbols()
+            DispatchQueue.main.async { refreshSymbols() }
         }
         // React to file switching
         .onChange(of: viewModel.editorState.activeDocumentId) { oldValue, newValue in
-            refreshSymbols()
+            DispatchQueue.main.async { refreshSymbols() }
         }
         // React to save events (optional, if you have a publisher for it)
     }

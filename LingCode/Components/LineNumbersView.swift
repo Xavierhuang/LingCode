@@ -162,10 +162,16 @@ class LineNumbersNSView: NSView {
     }
     
     var lineHeight: CGFloat {
-        // Try to get actual line height from editor's text view
-        if let editorScrollView = editorScrollView,
-           let textView = editorScrollView.documentView as? NSTextView,
-           let layoutManager = textView.layoutManager {
+        let resolvedTextView: NSTextView? = {
+            guard let sv = editorScrollView?.documentView else { return nil }
+            if let tv = sv as? NSTextView { return tv }
+            if let wrapper = sv as? DiffScrollDocumentView,
+               let container = wrapper.diffContainer as? EditorContainerView {
+                return container.textView
+            }
+            return nil
+        }()
+        if let textView = resolvedTextView, let layoutManager = textView.layoutManager {
             let lineFragmentRect = layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
             if lineFragmentRect.height > 0 {
                 return lineFragmentRect.height

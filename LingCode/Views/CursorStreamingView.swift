@@ -200,10 +200,8 @@ struct CursorStreamingView: View {
         // Coordinator handles throttling, parsing, and state updates internally
         // This prevents re-entrant SwiftUI update loops by centralizing all update logic
         .onChange(of: viewModel.conversation.messages.last?.content) { _, newContent in
-            // Send raw streaming text to coordinator at full speed
-            // Coordinator will throttle updates and trigger parsing as needed
             if let content = newContent {
-                updateCoordinator.updateStreamingText(content)
+                DispatchQueue.main.async { updateCoordinator.updateStreamingText(content) }
             }
         }
         // CPU OPTIMIZATION: Coordinator automatically re-parses when context changes
@@ -233,17 +231,17 @@ struct CursorStreamingView: View {
             }
         }
         .onChange(of: updateCoordinator.parsedFiles) { oldFiles, newFiles in
-            // Auto-expand new files that are streaming
-            for file in newFiles {
-                if file.isStreaming && !expandedFiles.contains(file.id) {
-                    expandedFiles.insert(file.id)
+            DispatchQueue.main.async {
+                for file in newFiles where file.isStreaming {
+                    if !expandedFiles.contains(file.id) { expandedFiles.insert(file.id) }
                 }
             }
         }
         .onAppear {
-            // Setup coordinator callbacks on appear
-            setupCoordinator()
-            handleAppear()
+            DispatchQueue.main.async {
+                setupCoordinator()
+                handleAppear()
+            }
         }
         .sheet(isPresented: $showStackDialog) {
             if let plan = stackingPlan {
@@ -299,7 +297,7 @@ struct CursorStreamingView: View {
             }
         }
         .onAppear {
-            shouldAutoScroll = true
+            DispatchQueue.main.async { shouldAutoScroll = true }
         }
     }
     
@@ -394,11 +392,12 @@ struct CursorStreamingView: View {
             contentVStack
         }
         .onChange(of: parsedFiles.count) { oldCount, newCount in
-            // Trigger code review when files are ready
             if newCount > oldCount {
-                for file in parsedFiles where !file.isStreaming {
-                    if viewModel.codeReviewResults[file.path] == nil {
-                        triggerCodeReview(for: file)
+                DispatchQueue.main.async {
+                    for file in parsedFiles where !file.isStreaming {
+                        if viewModel.codeReviewResults[file.path] == nil {
+                            triggerCodeReview(for: file)
+                        }
                     }
                 }
             }

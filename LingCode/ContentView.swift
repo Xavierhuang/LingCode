@@ -33,12 +33,13 @@ struct ContentView: View {
     
     // AI Panel Toggle (Cursor-style)
     @State private var showAIPanel: Bool = true
-    @State private var aiPanelWidth: CGFloat = 400  // Increased from 320 for wider chat view
+    @State private var aiPanelWidth: CGFloat = 324  // 10% narrower
     
     // Bottom Panel
     @State private var showBottomPanel: Bool = false
     @State private var bottomPanelHeight: CGFloat = 200
     @State private var selectedBottomTab: BottomPanelTab = .problems
+    @StateObject private var terminalManager = TerminalSessionManager()
     
     // Definition/References
     @State private var definitions: [Definition] = []
@@ -85,30 +86,12 @@ struct ContentView: View {
                             
                             // Main editor with optional minimap
                             Group {
-                                if viewModel.editorState.activeDocument == nil {
-                                    // Empty state - only show when no document
+                                if viewModel.editorState.activeDocument?.isClaudeCodeTab == true {
+                                    ClaudeCodeEditorTabView(viewModel: viewModel)
+                                } else if viewModel.editorState.activeDocument == nil {
                                     emptyStateView
                                 } else {
-                                    // Editor content - only show when document exists
-                                    HStack(spacing: 0) {
-                                        SplitEditorView(viewModel: viewModel, splitDirection: $splitDirection)
-                                        
-                                        // Minimap
-                                        if let document = viewModel.editorState.activeDocument {
-                                            Rectangle()
-                                                .fill(DesignSystem.Colors.borderSubtle)
-                                                .frame(width: 1)
-                                            
-                                            MinimapView(
-                                                content: document.content,
-                                                language: document.language,
-                                                visibleRange: nil,
-                                                onScrollTo: { _ in }
-                                            )
-                                            .frame(width: 80)
-                                            .background(DesignSystem.Colors.secondaryBackground)
-                                        }
-                                    }
+                                    SplitEditorView(viewModel: viewModel, splitDirection: $splitDirection)
                                 }
                             }
                         }
@@ -124,10 +107,15 @@ struct ContentView: View {
                                 }
                             )
                             
-                            // Right sidebar - AI Chat
+                            // Right sidebar - AI Chat (width can grow when agent list is visible)
                             rightSidebarContent
                                 .frame(width: aiPanelWidth)
                                 .background(DesignSystem.Colors.primaryBackground)
+                                .onPreferenceChange(AgentPanelMinWidthKey.self) { newMin in
+                                    if newMin > aiPanelWidth {
+                                        aiPanelWidth = newMin
+                                    }
+                                }
                         }
                     }
                 }
@@ -357,6 +345,21 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowCommandPalette"))) { _ in
             showCommandPalette = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowTerminal"))) { _ in
+            selectedBottomTab = .terminal
+            showBottomPanel = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RunActiveFile"))) { _ in
+            runActiveFile()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("RunSelectedText"))) { _ in
+            runSelectedText()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("OpenClaudeCode"))) { _ in
+            viewModel.editorState.ensureClaudeCodeTab()
+            selectedActivity = .ai
+            showAIPanel = true
+        }
         .sheet(isPresented: $showGlobalSearch) {
             GlobalSearchView(viewModel: viewModel, isPresented: $showGlobalSearch)
         }
@@ -370,8 +373,12 @@ struct ContentView: View {
             InlineAIEditView(isPresented: $showInlineEdit, viewModel: viewModel)
         }
         .sheet(isPresented: $showTerminal) {
-            PTYTerminalViewWrapper(isVisible: $showTerminal, workingDirectory: viewModel.rootFolderURL)
-                .frame(width: 800, height: 400)
+            SheetTerminalContent(
+                manager: terminalManager,
+                isVisible: $showTerminal,
+                workingDirectory: viewModel.rootFolderURL
+            )
+            .frame(width: 800, height: 400)
         }
         .sheet(isPresented: $showRefactoring) {
             RefactoringView(isPresented: $showRefactoring, viewModel: viewModel)
@@ -587,7 +594,7 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                 }
             case .terminal:
-                PTYTerminalViewWrapper(isVisible: $showBottomPanel, workingDirectory: viewModel.rootFolderURL)
+                MultiTerminalView(manager: terminalManager, isVisible: $showBottomPanel, workingDirectory: viewModel.rootFolderURL)
             case .debug:
                 ScrollView {
                     Text("Debug console")
@@ -651,6 +658,11 @@ struct ContentView: View {
                 selectedBottomTab = .terminal
                 showBottomPanel = true
             },
+            Command(title: "Claude Code: Open", subtitle: "Open Claude Code tab in editor", icon: "sparkles", keywords: ["claude", "code", "ai", "chat", "open"]) {
+                viewModel.editorState.ensureClaudeCodeTab()
+                selectedActivity = .ai
+                showAIPanel = true
+            },
             Command(title: "Settings", subtitle: "Open settings", icon: "gearshape", keywords: ["settings", "preferences", "config"]) {
                 showSettings = true
             }
@@ -704,6 +716,54 @@ struct ContentView: View {
                 in: projectURL
             )
             showReferences = true
+        }
+    }
+    
+    private func runActiveFile() {
+        guard let document = viewModel.editorState.activeDocument,
+              let fileURL = document.filePath,
+              let projectURL = viewModel.rootFolderURL else { return }
+        let command = runCommandForFile(filePath: fileURL.path, projectURL: projectURL)
+        selectedBottomTab = .terminal
+        showBottomPanel = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            terminalManager.sendCommand(command)
+        }
+    }
+    
+    private func runSelectedText() {
+        let text = viewModel.editorState.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        selectedBottomTab = .terminal
+        showBottomPanel = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            terminalManager.sendCommand(text)
+        }
+    }
+    
+    private func runCommandForFile(filePath: String, projectURL: URL) -> String {
+        let url = URL(fileURLWithPath: filePath)
+        let ext = url.pathExtension.lowercased()
+        let fileName = url.lastPathComponent
+        let hasPackageSwift = FileManager.default.fileExists(atPath: projectURL.appendingPathComponent("Package.swift").path)
+        switch ext {
+        case "py":
+            return "python3 \"\(filePath)\""
+        case "swift":
+            if hasPackageSwift && filePath.contains(projectURL.path) {
+                return "swift run"
+            }
+            return "swift \"\(filePath)\""
+        case "js":
+            return "node \"\(filePath)\""
+        case "ts", "tsx":
+            return "npx ts-node \"\(filePath)\""
+        case "sh", "bash":
+            return "bash \"\(filePath)\""
+        case "rb":
+            return "ruby \"\(filePath)\""
+        default:
+            return "echo \"Cannot run: \(fileName)\""
         }
     }
     

@@ -43,6 +43,7 @@ class ToolExecutionService {
     private let semanticSearch = SemanticSearchService.shared
     private let webSearchService = WebSearchService.shared
     private var projectURL: URL?
+    private var agentTaskId: UUID?
     
     private init() {}
     
@@ -50,11 +51,17 @@ class ToolExecutionService {
         projectURL = url
     }
     
+    func setAgentRunContext(agentTaskId: UUID?) {
+        self.agentTaskId = agentTaskId
+    }
+    
     /// Route a tool call to FileService or TerminalExecutionService (or minimal other handlers).
     func executeToolCall(_ toolCall: ToolCall) async throws -> ToolResult {
         switch toolCall.name {
         case "read_file", "write_file", "read_directory":
             return try await routeToFile(toolCall)
+        case "search_replace":
+            return try await executeSearchReplace(toolCall)
         case "run_terminal_command":
             return try await routeToTerminal(toolCall)
         case "codebase_search":
@@ -63,6 +70,8 @@ class ToolExecutionService {
             return try await executeWebSearch(toolCall)
         case "done":
             return try await executeDone(toolCall)
+        case "spawn_subagent":
+            return try await executeSpawnSubagent(toolCall)
         default:
             return ToolResult(toolUseId: toolCall.id, content: "Unknown tool: \(toolCall.name)", isError: true)
         }
@@ -105,6 +114,66 @@ class ToolExecutionService {
         }
     }
     
+    private func executeSearchReplace(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let filePathValue = toolCall.input["file_path"],
+              let filePath = filePathValue.value as? String,
+              let oldValue = toolCall.input["old_string"]?.value as? String,
+              let newValue = toolCall.input["new_string"]?.value as? String else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Missing file_path, old_string, or new_string", isError: true)
+        }
+        if oldValue == newValue {
+            return ToolResult(toolUseId: toolCall.id, content: "No change; old_string and new_string are identical. File unchanged.", isError: false)
+        }
+        let replaceAll = (toolCall.input["replace_all"]?.value as? Bool) ?? false
+        let fileURL = resolveFilePath(filePath)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: File not found at \(filePath)", isError: true)
+        }
+        do {
+            let content = try fileService.readFile(at: fileURL)
+            if !content.contains(oldValue) {
+                let snippetLen = min(1200, content.count)
+                let snippet = String(content.prefix(snippetLen))
+                let snippetNote = snippetLen < content.count ? "\n\n[Truncated. File has \(content.count) chars. Call read_file to see full content.]" : ""
+                return ToolResult(
+                    toolUseId: toolCall.id,
+                    content: "Error: old_string not found in file. Use the exact text from the file (check whitespace and line breaks). Current file content (first \(snippetLen) chars):\n\n\(snippet)\(snippetNote)",
+                    isError: true
+                )
+            }
+            let newContent: String
+            if replaceAll {
+                newContent = content.replacingOccurrences(of: oldValue, with: newValue)
+            } else {
+                if let range = content.range(of: oldValue) {
+                    newContent = content.replacingCharacters(in: range, with: newValue)
+                } else {
+                    let snippetLen = min(1200, content.count)
+                    let snippet = String(content.prefix(snippetLen))
+                    let snippetNote = snippetLen < content.count ? "\n\n[Truncated. Call read_file for full content.]" : ""
+                    return ToolResult(
+                        toolUseId: toolCall.id,
+                        content: "Error: old_string not found in file. Current file content (first \(snippetLen) chars):\n\n\(snippet)\(snippetNote)",
+                        isError: true
+                    )
+                }
+            }
+            if newContent == content {
+                return ToolResult(toolUseId: toolCall.id, content: "No change; file already contains this content.", isError: false)
+            }
+            try fileService.saveFile(content: newContent, to: fileURL)
+            NotificationCenter.default.post(
+                name: NSNotification.Name("FileUpdated"),
+                object: nil,
+                userInfo: ["fileURL": fileURL, "filePath": filePath, "content": newContent, "originalContent": content]
+            )
+            let summary = replaceAll ? " (all occurrences)" : ""
+            return ToolResult(toolUseId: toolCall.id, content: "Replaced in \(filePath)\(summary).", isError: false)
+        } catch {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     private func executeWriteFile(_ toolCall: ToolCall) async throws -> ToolResult {
         guard let filePathValue = toolCall.input["file_path"],
               let filePath = filePathValue.value as? String,
@@ -234,6 +303,34 @@ class ToolExecutionService {
     private func executeDone(_ toolCall: ToolCall) async throws -> ToolResult {
         let summary = (toolCall.input["summary"]?.value as? String) ?? ""
         return ToolResult(toolUseId: toolCall.id, content: summary, isError: false)
+    }
+    
+    private func executeSpawnSubagent(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let typeRaw = toolCall.input["subagent_type"]?.value as? String,
+              let subagentType = SubagentType(rawValue: typeRaw.lowercased()) else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Invalid subagent_type. Use one of: coder, reviewer, tester, documenter, debugger, researcher, refactorer, architect", isError: true)
+        }
+        guard let description = toolCall.input["description"]?.value as? String, !description.isEmpty else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Missing or empty 'description' for the subagent task", isError: true)
+        }
+        var fileURLs: [URL] = []
+        if let paths = toolCall.input["file_paths"]?.value as? [String] {
+            for path in paths {
+                fileURLs.append(resolveFilePath(path))
+            }
+        }
+        var parentId: UUID? = agentTaskId
+        if let parentRaw = toolCall.input["parent_task_id"]?.value as? String, let parsed = UUID(uuidString: parentRaw) {
+            parentId = parsed
+        }
+        let task = SubagentService.shared.createTask(
+            type: subagentType,
+            description: description,
+            context: SubagentContext(projectURL: projectURL, files: fileURLs, selectedText: nil, additionalContext: nil),
+            parentTaskId: parentId
+        )
+        let msg = "Subagent [\(subagentType.displayName)] started in background. Task ID: \(task.id). You can continue with other work; check the Subagents panel for results."
+        return ToolResult(toolUseId: toolCall.id, content: msg, isError: false)
     }
     
     private func resolveFilePath(_ path: String) -> URL {

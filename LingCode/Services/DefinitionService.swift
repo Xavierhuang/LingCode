@@ -228,9 +228,9 @@ class DefinitionService {
         in content: String,
         at position: Int
     ) -> String? {
-        guard position >= 0 && position <= content.count else { return nil }
+        guard !content.isEmpty, position >= 0, position < content.count else { return nil }
         
-        let index = content.index(content.startIndex, offsetBy: min(position, content.count - 1))
+        let index = content.index(content.startIndex, offsetBy: position)
         
         // Find word boundaries
         var start = index

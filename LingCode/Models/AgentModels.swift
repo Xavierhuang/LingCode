@@ -28,6 +28,11 @@ struct AgentStep: Identifiable {
     var streamingCode: String?
     // File path for code operations
     var targetFilePath: String?
+    // Original file content before write (for change highlighting in write step view)
+    var originalContent: String?
+    // For search_replace steps: show diff (red = deleted line, green = new line)
+    var replaceOldString: String?
+    var replaceNewString: String?
 }
 
 enum AgentStepType: String, Codable {
@@ -37,6 +42,7 @@ enum AgentStepType: String, Codable {
     case webSearch
     case fileOperation
     case complete
+    case taskHeader
 
     var icon: String {
         switch self {
@@ -46,6 +52,7 @@ enum AgentStepType: String, Codable {
         case .codeGeneration: return "doc.text"
         case .webSearch: return "magnifyingglass"
         case .fileOperation: return "folder"
+        case .taskHeader: return "text.badge.plus"
         }
     }
 }

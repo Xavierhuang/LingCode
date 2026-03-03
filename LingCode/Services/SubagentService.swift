@@ -393,10 +393,14 @@ class SubagentService: ObservableObject {
         Available capabilities: \(task.type.capabilities.joined(separator: ", "))
         
         Complete the assigned task. Be thorough but concise.
+        
+        To delegate a subtask to another specialized agent (creates a child subagent), output exactly one line:
+        DELEGATE_SUBAGENT:<type>:<description>
+        where type is one of: coder, reviewer, tester, documenter, debugger, researcher, refactorer, architect. The child runs in the background while you continue. You may output this at most once per task.
         """
         
-        // Call AI service
-        let response = try await callAI(systemPrompt: systemPrompt, userPrompt: prompt)
+        // Call AI service (stream and watch for DELEGATE_SUBAGENT so subagents can spawn children)
+        let response = try await callAIAndHandleDelegation(systemPrompt: systemPrompt, userPrompt: prompt, parentTaskId: task.id, projectURL: task.context.projectURL)
         
         // Parse result
         let changes = parseChanges(response, projectURL: task.context.projectURL)
@@ -411,19 +415,44 @@ class SubagentService: ObservableObject {
     
     private func callAI(systemPrompt: String, userPrompt: String) async throws -> String {
         var fullResponse = ""
-        
-        let stream = AIService.shared.streamMessage(
-            userPrompt,
-            context: nil,
-            images: [],
-            maxTokens: nil,
-            systemPrompt: systemPrompt
-        )
-        
+        let stream = AIService.shared.streamMessage(userPrompt, context: nil, images: [], maxTokens: nil, systemPrompt: systemPrompt)
         for try await chunk in stream {
             fullResponse += chunk
         }
-        
+        return fullResponse
+    }
+    
+    private func callAIAndHandleDelegation(systemPrompt: String, userPrompt: String, parentTaskId: UUID, projectURL: URL?) async throws -> String {
+        var fullResponse = ""
+        var lastLineBuffer = ""
+        let stream = AIService.shared.streamMessage(userPrompt, context: nil, images: [], maxTokens: nil, systemPrompt: systemPrompt)
+        for try await chunk in stream {
+            fullResponse += chunk
+            lastLineBuffer += chunk
+            if lastLineBuffer.contains("\n") {
+                let lines = lastLineBuffer.split(separator: "\n", omittingEmptySubsequences: false)
+                lastLineBuffer = String(lines.last ?? "")
+                for line in lines.dropLast() {
+                    let trimmed = String(line).trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("DELEGATE_SUBAGENT:") {
+                        let rest = String(trimmed.dropFirst("DELEGATE_SUBAGENT:".count))
+                        let parts = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                        let typeRaw = parts.first.map(String.init)?.lowercased() ?? "coder"
+                        let desc = parts.count > 1 ? String(parts[1]) : "Delegated subtask"
+                        if let subagentType = SubagentType(rawValue: typeRaw) {
+                            await MainActor.run {
+                                _ = SubagentService.shared.createTask(
+                                    type: subagentType,
+                                    description: desc,
+                                    context: SubagentContext(projectURL: projectURL, files: [], selectedText: nil, additionalContext: nil),
+                                    parentTaskId: parentTaskId
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return fullResponse
     }
     

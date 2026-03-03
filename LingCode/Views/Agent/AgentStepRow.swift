@@ -9,8 +9,24 @@ import SwiftUI
 
 struct AgentStepRow: View {
     let step: AgentStep
-    @State private var isExpanded: Bool = true
-    
+    var projectURL: URL? = nil
+    var onOpenFile: ((String) -> Void)? = nil
+    @State private var isExpanded: Bool
+
+    init(step: AgentStep, projectURL: URL? = nil, onOpenFile: ((String) -> Void)? = nil) {
+        self.step = step
+        self.projectURL = projectURL
+        self.onOpenFile = onOpenFile
+        _isExpanded = State(initialValue: step.status != .failed)
+    }
+
+    private var fullPathForFile: String? {
+        guard let path = step.targetFilePath else { return nil }
+        if path.hasPrefix("/") { return path }
+        guard let root = projectURL else { return path }
+        return root.appendingPathComponent(path).path
+    }
+
     private var isFileWriteStep: Bool {
         step.type == .codeGeneration || 
         step.description.lowercased().contains("write:") ||
@@ -20,7 +36,11 @@ struct AgentStepRow: View {
     private var isFileReadStep: Bool {
         step.type == .fileOperation || step.description.lowercased().contains("read:")
     }
-    
+
+    private var isReplaceStep: Bool {
+        step.description.hasPrefix("Replace in ")
+    }
+
     private var fileName: String? {
         if let path = step.targetFilePath {
             return URL(fileURLWithPath: path).lastPathComponent
@@ -91,34 +111,42 @@ struct AgentStepRow: View {
         if isFileReadStep { return "doc.text" }
         return step.type.icon
     }
-    
+
+    private var isTaskHeader: Bool {
+        step.type == .taskHeader
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             headerView
-            contentView
+            if !isTaskHeader { contentView }
         }
         .padding(12)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .background(isTaskHeader ? Color(NSColor.controlBackgroundColor).opacity(0.3) : Color(NSColor.controlBackgroundColor).opacity(0.5))
         .cornerRadius(8)
+        .onChange(of: step.status) { _, newStatus in
+            if newStatus == .failed {
+                DispatchQueue.main.async { isExpanded = false }
+            }
+        }
     }
-    
+
     // MARK: - Header
     
     private var headerView: some View {
         HStack(alignment: .top, spacing: 12) {
-            StatusIndicator(status: step.status)
-            
+            if !isTaskHeader { StatusIndicator(status: step.status) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(step.description)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary)
-                
-                statusText
-                
+                descriptionView
+                    .font(.system(size: isTaskHeader ? 13 : 14, weight: isTaskHeader ? .medium : .medium))
+                    .foregroundColor(isTaskHeader ? .secondary : .primary)
+                if !isTaskHeader { statusText }
                 if let error = step.error {
-                    Text(error)
+                    let summary = error.count > 80 ? String(error.prefix(80)) + "..." : error
+                    Text(isExpanded ? error : summary)
                         .font(.caption)
                         .foregroundColor(.red)
+                        .lineLimit(isExpanded ? nil : 2)
                 }
                 
                 if let result = step.result, !isFileWriteStep && !isFileReadStep {
@@ -129,29 +157,57 @@ struct AgentStepRow: View {
             }
             
             Spacer()
-            
-            Image(systemName: stepIcon)
-                .foregroundColor(.secondary)
-                .font(.system(size: 14))
+            if !isTaskHeader {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                Image(systemName: stepIcon)
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 14))
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            guard !isTaskHeader else { return }
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isExpanded.toggle()
             }
+        }
+    }
+
+    @ViewBuilder
+    private var descriptionView: some View {
+        if let path = step.targetFilePath, onOpenFile != nil {
+            let displayName = fileName ?? path
+            let prefix: String = {
+                if step.description.hasPrefix("Replace in ") { return "Replace in " }
+                if step.description.lowercased().hasPrefix("write:") { return "Write: " }
+                if step.description.lowercased().hasPrefix("read:") { return "Read: " }
+                return step.description.replacingOccurrences(of: displayName, with: "").trimmingCharacters(in: .whitespacesAndNewlines) + " "
+            }()
+            HStack(spacing: 0) {
+                Text(prefix)
+                Button(displayName) {
+                    onOpenFile?(path)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.primary)
+                .contentShape(Rectangle())
+            }
+            .help(fullPathForFile ?? path)
+        } else {
+            Text(step.description)
         }
     }
     
     @ViewBuilder
     private var statusText: some View {
         if step.status == .running {
-            // Don't show status text if StreamingCodeBox or FileReadBox will be shown
-            // (they have their own status badges)
+            // Don't show status text if StreamingCodeBox will be shown (it has its own "Writing" badge)
             if isFileWriteStep {
-                // StreamingCodeBox will show "Writing" badge - don't duplicate
                 EmptyView()
             } else if isFileReadStep {
-                // FileReadBox will show "Reading" badge - don't duplicate  
+                // Read steps don't open a content view - show "Processing..." while running
                 EmptyView()
             } else {
                 HStack(spacing: 6) {
@@ -176,28 +232,56 @@ struct AgentStepRow: View {
             StreamingCodeBox(
                 content: codeContent ?? step.streamingCode ?? "",
                 isStreaming: step.status == .running,
-                fileName: fileName
+                fileName: fileName,
+                previousContent: step.originalContent
             )
             .transition(.opacity.combined(with: .move(edge: .top)))
             .animation(.easeOut(duration: 0.2), value: codeContent)
-        } else if isExpanded && isFileReadStep && (step.status == .running || (step.output != nil && !(step.output ?? "").isEmpty)) {
-            FileReadBox(
-                content: step.output ?? "",
-                isStreaming: step.status == .running,
-                fileName: extractReadFileName
-            )
-            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else if isExpanded && isReplaceStep {
+            let isNoOp = (step.output?.contains("No change;") ?? false) || (step.replaceOldString == step.replaceNewString && step.replaceOldString != nil)
+            if isNoOp, let output = step.output, !output.isEmpty {
+                regularOutputView(output: output)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if let oldStr = step.replaceOldString, let newStr = step.replaceNewString {
+                replaceDiffView(oldString: oldStr, newString: newStr)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if let output = step.output, !output.isEmpty {
+                regularOutputView(output: output)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         } else if isExpanded, !isFileWriteStep, !isFileReadStep, let output = step.output, !output.isEmpty {
             regularOutputView(output: output)
                 .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
     
+    private func replaceDiffView(oldString: String, newString: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(oldString)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.red.opacity(0.2))
+                .cornerRadius(4)
+                .textSelection(.enabled)
+            Text(newString)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.green.opacity(0.2))
+                .cornerRadius(4)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func regularOutputView(output: String) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 Text(output)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
@@ -208,9 +292,11 @@ struct AgentStepRow: View {
             .background(Color(NSColor.controlBackgroundColor))
             .cornerRadius(6)
             .onChange(of: output) { _, _ in
-                if step.status == .running {
-                    withAnimation(.none) {
-                        proxy.scrollTo("streaming-output", anchor: .bottom)
+                DispatchQueue.main.async {
+                    if step.status == .running {
+                        withAnimation(.none) {
+                            proxy.scrollTo("streaming-output", anchor: .bottom)
+                        }
                     }
                 }
             }

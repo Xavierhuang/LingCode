@@ -208,6 +208,7 @@ class AIService: AIProviderProtocol {
         lastHTTPStatusCode = httpResp.statusCode
         
         var lineCount = 0
+        var writeFilePreviewLastLen = 0
         for try await line in bytes.lines {
             lineCount += 1
             if !hasReceivedChunks && Date().timeIntervalSince(requestStartTime) > timeoutLimit {
@@ -235,7 +236,17 @@ class AIService: AIProviderProtocol {
                     hasReceivedChunks = true
                     if let delta = json["delta"] as? [String: Any] {
                         if let text = delta["text"] as? String { continuation.yield(text) }
-                        if let part = delta["partial_json"] as? String { currentToolUse?.partialJson += part }
+                        if let part = delta["partial_json"] as? String {
+                            currentToolUse?.partialJson += part
+                            if let tool = currentToolUse, tool.name == "write_file" {
+                                let preview = extractPartialContentFromJson(tool.partialJson)
+                                if tool.partialJson.count - writeFilePreviewLastLen > 500, let p = preview, !p.isEmpty {
+                                    writeFilePreviewLastLen = tool.partialJson.count
+                                    let b64 = Data(p.utf8).base64EncodedString()
+                                    continuation.yield("WRITE_FILE_PREVIEW:\(b64)\n")
+                                }
+                            }
+                        }
                     }
                 case "content_block_stop":
                     if let tool = currentToolUse {
@@ -283,6 +294,37 @@ class AIService: AIProviderProtocol {
         var finalJson = json.trimmingCharacters(in: .whitespacesAndNewlines)
         if !finalJson.hasSuffix("}") { finalJson += "}" }
         return Data(finalJson.utf8).base64EncodedString()
+    }
+
+    /// Extracts the "content" field value from write_file partial JSON (may be incomplete).
+    private func extractPartialContentFromJson(_ json: String) -> String? {
+        guard let range = json.range(of: "\"content\"") else { return nil }
+        var i = range.upperBound
+        while i < json.endIndex && (json[i].isWhitespace || json[i] == ":") { i = json.index(after: i) }
+        if i >= json.endIndex || json[i] != "\"" { return nil }
+        i = json.index(after: i)
+        var result = ""
+        while i < json.endIndex {
+            let c = json[i]
+            if c == "\\" {
+                i = json.index(after: i)
+                if i < json.endIndex {
+                    switch json[i] {
+                    case "n": result.append("\n")
+                    case "t": result.append("\t")
+                    case "\"": result.append("\"")
+                    case "\\": result.append("\\")
+                    default: result.append(json[i])
+                    }
+                    i = json.index(after: i)
+                }
+                continue
+            }
+            if c == "\"" { break }
+            result.append(c)
+            i = json.index(after: i)
+        }
+        return result.isEmpty ? nil : result
     }
     
     /// Unwraps AnyCodable and nested collections so JSONSerialization can encode the payload.

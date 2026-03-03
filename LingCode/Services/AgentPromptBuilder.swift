@@ -27,7 +27,9 @@ enum AgentPromptBuilder {
         noFilesWrittenYet: Bool = false,
         iterationCount: Int = 0,
         filesWrittenCount: Int = 0,
-        projectStructure: String? = nil
+        projectStructure: String? = nil,
+        previousTaskDescription: String? = nil,
+        lastTaskOutcome: String? = nil
     ) -> String {
         
         // 1. Validate project directory - warn if it looks wrong
@@ -69,7 +71,7 @@ enum AgentPromptBuilder {
             *  ATTENTION: You have read files but HAVEN'T modified any!*
             ************************************************************
             
-            You MUST call 'write_file' before you can call 'done'.
+            You MUST call search_replace or write_file before you can call 'done'.
             If you are unsure, pick the most relevant file from History and improve it now.
             
             """
@@ -77,7 +79,7 @@ enum AgentPromptBuilder {
             criticalAlert = """
             
             WARNING: \(iterationCount) iterations without writing any files.
-            STOP exploring. You MUST call write_file NOW with improvements.
+            STOP exploring. You MUST call search_replace or write_file NOW with improvements.
             
             """
         } else {
@@ -92,7 +94,18 @@ enum AgentPromptBuilder {
         
         """
 
-        // 4. Determine suggested action
+        // 4. Previous task context (so the model knows what was prompted last)
+        func previousTaskSection(previousTaskDescription: String?, lastTaskOutcome: String?) -> String {
+            guard let prev = previousTaskDescription, !prev.isEmpty else { return "" }
+            var lines = ["# PREVIOUS TASK (for context only - focus on the current task below)", "Previous task: \(prev)"]
+            if let outcome = lastTaskOutcome, !outcome.isEmpty {
+                let oneLine = outcome.replacingOccurrences(of: "\n", with: " ").prefix(200)
+                lines.append("Outcome: \(oneLine)\(outcome.count > 200 ? "..." : "")")
+            }
+            return lines.joined(separator: "\n") + "\n\n"
+        }
+
+        // 5. Determine suggested action
         let hasReadFiles = !filesRead.isEmpty
         let nextStep: String
         if isInvalidProject {
@@ -100,7 +113,7 @@ enum AgentPromptBuilder {
         } else if !hasReadFiles && history.isEmpty {
             nextStep = "Start by calling read_directory with \".\" to see the project structure."
         } else if hasReadFiles && requiresModifications && filesWrittenCount == 0 {
-            nextStep = "You have read files. NOW call write_file to modify one of them."
+            nextStep = "You have read files. For small edits use search_replace; for whole-file changes use write_file."
         } else if filesWrittenCount > 0 {
             nextStep = "Files written. Verify if needed, then call done with a summary."
         } else {
@@ -113,6 +126,7 @@ enum AgentPromptBuilder {
         Current Project Directory: \(projectPath)
         \(projectWarning)
         \(projectStructureSection)
+        \(previousTaskSection(previousTaskDescription: previousTaskDescription, lastTaskOutcome: lastTaskOutcome))
         # TASK
         \(task.description)
         \(criticalAlert)
@@ -125,8 +139,12 @@ enum AgentPromptBuilder {
         # STRICT RULES
         1. ACTIONS ONLY: Never explain what you are about to do - just call the tool.
         2. NO DUPLICATE READS: Do not call read_file or read_directory for paths already accessed.
-        3. MODIFICATION REQUIREMENT: \(requiresModifications ? "This task requires code changes. You MUST call write_file." : "Read-only task.")
-        4. VERIFICATION: After writing, you may read once to verify, then call done.
+        3. MODIFICATION REQUIREMENT: \(requiresModifications ? "This task requires code changes. You MUST call search_replace or write_file." : "Read-only task.")
+        4. PREFER search_replace FOR SMALL EDITS: For renames, title/text changes, or single-line fixes use search_replace (file_path, old_string, new_string). It is fast. Use write_file only when rewriting the whole file or making many scattered changes.
+        5. search_replace: old_string must match the file EXACTLY (whitespace, line breaks). Copy from read_file. Multiple search_replace calls run IN ORDER; after each one the file changes, so later old_strings must match the file as it is AFTER earlier replacements. For one word/name in many places use a single search_replace with replace_all: true.
+        6. If search_replace returns "old_string not found", the error includes a file snippet. Use the EXACT text from that snippet for your next search_replace (copy character-for-character); or call read_file to get the full file and try again.
+        7. For script.js and style.css always read_file first, then use only exact strings from that output for old_string (do not use strings from index.html or other files).
+        8. VERIFICATION: After writing, you may read once to verify, then call done.
 
         \(loopDetectionHint.isEmpty ? "" : "LOOP WARNING: \(loopDetectionHint)\n")
         # NEXT STEP

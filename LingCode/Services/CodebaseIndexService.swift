@@ -65,23 +65,19 @@ class CodebaseIndexService: ObservableObject {
     
     // MARK: - Index Project
     
-    /// Index entire project
+    /// Index entire project (Cursor-style: clear previous, respect ignore files)
     func indexProject(at url: URL, completion: ((Int, Int) -> Void)? = nil) {
         guard !isIndexing else { return }
         
         currentProjectURL = url
+        indexedFiles.removeAll()
+        symbolIndex.removeAll()
         
         DispatchQueue.main.async {
             self.isIndexing = true
             self.indexProgress = 0
         }
         
-        // Start file watcher for incremental updates
-        fileWatcher.startWatching(url) { [weak self] changedFileURL in
-            self?.handleFileChanged(changedFileURL)
-        }
-        
-        // Start file watcher for incremental updates
         fileWatcher.startWatching(url) { [weak self] changedFileURL in
             self?.handleFileChanged(changedFileURL)
         }
@@ -187,7 +183,8 @@ class CodebaseIndexService: ObservableObject {
     // MARK: - File Collection
     
     private func collectFiles(in directory: URL, into files: inout [URL]) {
-        let ignoredDirs = [".git", "node_modules", ".build", "build", "DerivedData", "Pods", ".swiftpm", "__pycache__", "venv", ".venv"]
+        let ignoredDirs = [".git", "node_modules", ".build", "build", "dist", "out", "DerivedData", "Pods", ".swiftpm", "__pycache__", "venv", ".venv", "Assets.xcassets", "xcassets"]
+        IgnoreFileService.shared.loadIgnoreFile(from: directory)
         
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
@@ -198,9 +195,17 @@ class CodebaseIndexService: ObservableObject {
         for case let fileURL as URL in enumerator {
             let fileName = fileURL.lastPathComponent
             
-            // Skip ignored directories
-            if ignoredDirs.contains(fileName) {
+            // Skip ignored directories (Cursor-style)
+            if ignoredDirs.contains(fileName) || fileName.hasSuffix(".lproj") {
                 enumerator.skipDescendants()
+                continue
+            }
+            
+            // Respect .gitignore / .cursorignore / .lingcodeignore
+            if IgnoreFileService.shared.shouldIgnore(url: fileURL, relativeTo: directory) {
+                if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
                 continue
             }
             
@@ -215,7 +220,8 @@ class CodebaseIndexService: ObservableObject {
     // MARK: - File Indexing
     
     private func indexFile(at url: URL, relativeTo base: URL) -> IndexedFile? {
-        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        guard fileSize <= 512_000, let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         
         let relativePath = url.path.replacingOccurrences(of: base.path + "/", with: "")
         let language = detectLanguage(for: url)

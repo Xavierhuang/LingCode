@@ -57,9 +57,9 @@ struct SecondaryEditorView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Secondary tab bar
+            // Secondary tab bar (only file documents, not virtual tabs like Claude Code)
             HStack {
-                ForEach(viewModel.editorState.documents) { document in
+                ForEach(viewModel.editorState.documents.filter { !$0.isClaudeCodeTab }) { document in
                     Button(action: {
                         secondaryDocumentId = document.id
                     }) {
@@ -82,7 +82,7 @@ struct SecondaryEditorView: View {
             
             // Secondary editor content
             if let docId = secondaryDocumentId,
-               let document = viewModel.editorState.documents.first(where: { $0.id == docId }) {
+               let document = viewModel.editorState.documents.first(where: { $0.id == docId && !$0.isClaudeCodeTab }) {
                 // Combined editor with line numbers in a single scroll view
                 CodeEditorWithLineNumbers(
                     text: Binding(

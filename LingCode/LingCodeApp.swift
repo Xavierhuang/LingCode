@@ -70,7 +70,14 @@ struct LingCodeApp: App {
                 }
                 .keyboardShortcut("i", modifiers: .command)
             }
-            
+
+            CommandMenu("Claude Code") {
+                Button("Open") {
+                    NotificationCenter.default.post(name: NSNotification.Name("OpenClaudeCode"), object: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+            }
+
             // Window menu - keep the default window list AND add our custom items
             // This ensures windows appear in the menu for App Store compliance
             CommandGroup(after: .windowList) {
@@ -79,6 +86,64 @@ struct LingCodeApp: App {
                     WindowManager.shared.showMainWindow()
                 }
                 .keyboardShortcut("0", modifiers: [.command])
+            }
+            
+            // Terminal menu (Cursor-style)
+            CommandMenu("Terminal") {
+                Button("New Terminal") {
+                    NotificationCenter.default.post(name: NSNotification.Name("ShowTerminal"), object: nil)
+                }
+                .keyboardShortcut("`", modifiers: [.control, .shift])
+                
+                Divider()
+                
+                Button("Run Task...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("RunTask"), object: nil)
+                }
+                .disabled(true)
+                
+                Button("Run Build Task...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("RunBuildTask"), object: nil)
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(true)
+                
+                Button("Run Active File") {
+                    NotificationCenter.default.post(name: NSNotification.Name("RunActiveFile"), object: nil)
+                }
+                
+                Button("Run Selected Text") {
+                    NotificationCenter.default.post(name: NSNotification.Name("RunSelectedText"), object: nil)
+                }
+                
+                Divider()
+                
+                Button("Show Running Tasks...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("ShowRunningTasks"), object: nil)
+                }
+                .disabled(true)
+                
+                Button("Restart Running Task...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("RestartRunningTask"), object: nil)
+                }
+                .disabled(true)
+                
+                Button("Terminate Task...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("TerminateTask"), object: nil)
+                }
+                .disabled(true)
+                
+                Divider()
+                
+                Button("Configure Tasks...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("ConfigureTasks"), object: nil)
+                }
+                .disabled(true)
+                
+                Button("Configure Default Build Task...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("ConfigureDefaultBuildTask"), object: nil)
+                }
+                .disabled(true)
             }
         }
         .windowStyle(.automatic)

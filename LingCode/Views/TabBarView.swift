@@ -123,9 +123,11 @@ struct TabBarView: View {
     /// Clear AI change highlighting on the active document so the code uses the normal background again
     private func acceptChangesAndClearHighlight() {
         guard let doc = editorState.activeDocument else { return }
-        doc.clearAIHighlighting()
-        // Force views that show the editor to re-render so they pass the new empty aiGeneratedRanges and the highlight actually clears
-        editorState.objectWillChange.send()
+        let state = editorState
+        DispatchQueue.main.async {
+            doc.clearAIHighlighting()
+            state.objectWillChange.send()
+        }
     }
 }
 
@@ -196,6 +198,10 @@ struct TabItemView: View {
         .animation(DesignSystem.Animation.quick, value: isActive)
         .animation(DesignSystem.Animation.quick, value: isHovered)
         .contextMenu {
+            Button("Claude Code: Open") {
+                NotificationCenter.default.post(name: NSNotification.Name("OpenClaudeCode"), object: nil)
+            }
+            Divider()
             Button("Close") {
                 onClose()
             }
@@ -209,6 +215,7 @@ struct TabItemView: View {
     }
     
     private var iconName: String {
+        if document.isClaudeCodeTab { return "sparkles" }
         guard let filePath = document.filePath else { return "doc" }
         let ext = filePath.pathExtension.lowercased()
         

@@ -49,6 +49,8 @@ struct FileTreeView: NSViewRepresentable {
         scrollView.drawsBackground = false
         outlineView.backgroundColor = .clear
 
+        outlineView.registerForDraggedTypes([.fileURL])
+
         context.coordinator.outlineView = outlineView
         context.coordinator.onFileSelect = onFileSelect
         context.coordinator.rootURL = rootURL
@@ -90,14 +92,15 @@ struct FileTreeView: NSViewRepresentable {
             context.coordinator.lastRefreshTrigger = refreshTrigger
         }
 
-        // Defer reload to avoid publishing changes during view update
-        Task { @MainActor in
-            // Reload file items from disk when refresh is triggered or root changed
-            if rootURL != nil && (rootChanged || refreshChanged) {
-                context.coordinator.reloadFileItems()
-                outlineView.reloadData()
-                outlineView.expandItem(nil, expandChildren: false)
-            }
+        // Defer reload to next run loop to avoid "Publishing changes from within view updates"
+        let root = rootURL
+        let rootCh = rootChanged
+        let refCh = refreshChanged
+        DispatchQueue.main.async {
+            guard root != nil && (rootCh || refCh) else { return }
+            context.coordinator.reloadFileItems()
+            outlineView.reloadData()
+            outlineView.expandItem(nil, expandChildren: false)
         }
     }
     
@@ -316,6 +319,9 @@ struct FileTreeView: NSViewRepresentable {
                 textField.isBordered = false
                 textField.drawsBackground = false
                 textField.translatesAutoresizingMaskIntoConstraints = false
+                textField.cell?.truncatesLastVisibleLine = true
+                textField.cell?.lineBreakMode = .byTruncatingTail
+                textField.cell?.wraps = false
                 cellView?.addSubview(textField)
                 
                 NSLayoutConstraint.activate([
@@ -347,6 +353,68 @@ struct FileTreeView: NSViewRepresentable {
                !fileItem.isDirectory {
                 onFileSelect?(fileItem.url)
             }
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, validateDrop draggingInfo: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+            guard rootURL != nil else { return [] }
+            let destFolder: URL?
+            if let fileItem = item as? FileItem {
+                guard fileItem.isDirectory else { return [] }
+                destFolder = fileItem.url
+            } else {
+                destFolder = rootURL
+            }
+            guard let _ = destFolder else { return [] }
+            return .copy
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, acceptDrop draggingInfo: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+            let destFolder: URL?
+            if let fileItem = item as? FileItem {
+                guard fileItem.isDirectory else { return false }
+                destFolder = fileItem.url
+            } else {
+                destFolder = rootURL
+            }
+            guard let destination = destFolder else { return false }
+
+            let pasteboard = draggingInfo.draggingPasteboard
+            guard let raw = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !raw.isEmpty else {
+                return false
+            }
+            let urls = raw.filter { $0.isFileURL }
+            guard !urls.isEmpty else { return false }
+
+            let fileManager = FileManager.default
+            for sourceURL in urls {
+                let name = sourceURL.lastPathComponent
+                let destURL = destination.appendingPathComponent(name)
+                if sourceURL.path == destURL.path { continue }
+                do {
+                    var targetURL = destURL
+                    if fileManager.fileExists(atPath: destURL.path) {
+                        var counter = 1
+                        let baseName = destURL.deletingPathExtension().lastPathComponent
+                        let ext = destURL.pathExtension
+                        repeat {
+                            let newName = ext.isEmpty ? "\(baseName) \(counter)" : "\(baseName) \(counter).\(ext)"
+                            targetURL = destination.appendingPathComponent(newName)
+                            counter += 1
+                        } while fileManager.fileExists(atPath: targetURL.path)
+                    }
+                    try fileManager.copyItem(at: sourceURL, to: targetURL)
+                } catch {
+                    let alert = NSAlert()
+                    alert.messageText = "Could not copy \(name)"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+            reloadFileItems()
+            outlineView.reloadData()
+            outlineView.expandItem(item, expandChildren: false)
+            return true
         }
         
         @objc private func newFile() {

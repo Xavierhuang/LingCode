@@ -35,14 +35,19 @@ struct AgentListView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search Agents...", text: $historyService.searchQuery)
-                    .textFieldStyle(.plain)
+                Spacer(minLength: 0)
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search Agents...", text: $historyService.searchQuery)
+                        .textFieldStyle(.plain)
+                }
+                .padding(8)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+                .frame(maxWidth: 220)
+                Spacer(minLength: 0)
             }
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(6)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 

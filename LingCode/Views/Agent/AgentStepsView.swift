@@ -11,6 +11,12 @@ struct AgentStepsView: View {
     @ObservedObject var agent: AgentService
     @Binding var lastStepCount: Int
     var bottomID: Namespace.ID
+    var projectURL: URL? = nil
+    var onOpenFile: ((String) -> Void)? = nil
+
+    @State private var thinkingStartTime: Date?
+    @State private var showLongWaitNote: Bool = false
+    @State private var longWaitWorkItem: DispatchWorkItem?
     
     private var shouldShowStreamingPreview: Bool {
         guard agent.isRunning else { return false }
@@ -55,22 +61,24 @@ struct AgentStepsView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    if shouldShowStreamingPreview {
-                        if !agent.streamingText.isEmpty {
-                            streamingPreviewView(text: agent.streamingText)
-                                .id("streaming-preview")
-                                .transition(.opacity)
-                        } else {
-                            connectingPreviewView
-                                .id("streaming-preview")
-                                .transition(.opacity)
-                        }
+                    if shouldShowStreamingPreview, !agent.streamingText.isEmpty {
+                        streamingPreviewView(text: agent.streamingText)
+                            .id("streaming-preview")
+                            .transition(.opacity)
                     }
-                    
+                    if showLongWaitNote {
+                        Text("Taking longer than usual. The model may be thinking or generating a large response.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                    }
+
                     // Filter out intermediate "Task Complete" steps - only show the final one
                     // This prevents multiple "Task Complete" cards from stacking up
                     ForEach(filteredSteps) { step in
-                        AgentStepRow(step: step)
+                        AgentStepRow(step: step, projectURL: projectURL, onOpenFile: onOpenFile)
                             .id(step.id)
                             .transition(.asymmetric(
                                 insertion: .move(edge: .bottom).combined(with: .opacity),
@@ -86,30 +94,67 @@ struct AgentStepsView: View {
                 .animation(.easeInOut(duration: 0.2), value: agent.steps.count)
             }
             .onChange(of: agent.steps.count) { _, newCount in
-                if newCount > lastStepCount {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        proxy.scrollTo(bottomID, anchor: .bottom)
+                DispatchQueue.main.async {
+                    if newCount > lastStepCount {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                        lastStepCount = newCount
                     }
-                    lastStepCount = newCount
+                    if let last = agent.steps.last, last.type != .thinking {
+                        longWaitWorkItem?.cancel()
+                        longWaitWorkItem = nil
+                        thinkingStartTime = nil
+                        showLongWaitNote = false
+                    }
+                }
+            }
+            .onChange(of: agent.isRunning) { _, running in
+                DispatchQueue.main.async {
+                    if !running {
+                        longWaitWorkItem?.cancel()
+                        longWaitWorkItem = nil
+                        thinkingStartTime = nil
+                        showLongWaitNote = false
+                        return
+                    }
+                    showLongWaitNote = false
+                    guard thinkingStartTime == nil else { return }
+                    thinkingStartTime = Date()
+                    let item = DispatchWorkItem { [weak agent] in
+                        DispatchQueue.main.async {
+                            if agent?.isRunning == true {
+                                showLongWaitNote = true
+                            }
+                        }
+                    }
+                    longWaitWorkItem = item
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: item)
                 }
             }
             .onChange(of: agent.steps.last?.output) { _, _ in
-                scrollToBottomIfRunning(proxy: proxy)
+                DispatchQueue.main.async { scrollToBottomIfRunning(proxy: proxy) }
             }
             .onChange(of: agent.steps.last?.streamingCode) { _, _ in
-                scrollToBottomIfRunning(proxy: proxy)
+                DispatchQueue.main.async { scrollToBottomIfRunning(proxy: proxy) }
             }
             .onChange(of: agent.streamingText) { _, _ in
-                if shouldShowStreamingPreview {
-                    withAnimation(.none) {
-                        proxy.scrollTo("streaming-preview", anchor: .bottom)
+                DispatchQueue.main.async {
+                    if shouldShowStreamingPreview {
+                        withAnimation(.none) {
+                            proxy.scrollTo("streaming-preview", anchor: .bottom)
+                        }
+                    } else {
+                        scrollToBottomIfRunning(proxy: proxy)
                     }
-                } else {
-                    scrollToBottomIfRunning(proxy: proxy)
                 }
             }
-            .onChange(of: agent.steps.last?.status) { _, _ in
-                scrollToBottomIfRunning(proxy: proxy)
+            .onChange(of: agent.steps.last?.status) { _, newStatus in
+                DispatchQueue.main.async {
+                    if newStatus != .failed {
+                        scrollToBottomIfRunning(proxy: proxy)
+                    }
+                }
             }
         }
     }
@@ -133,7 +178,7 @@ struct AgentStepsView: View {
             ScrollViewReader { innerProxy in
                 ScrollView {
                     Text(text)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -144,8 +189,10 @@ struct AgentStepsView: View {
                 .background(Color(NSColor.controlBackgroundColor))
                 .cornerRadius(6)
                 .onChange(of: text) { _, _ in
-                    withAnimation(.none) {
-                        innerProxy.scrollTo("streaming-text-end", anchor: .bottom)
+                    DispatchQueue.main.async {
+                        withAnimation(.none) {
+                            innerProxy.scrollTo("streaming-text-end", anchor: .bottom)
+                        }
                     }
                 }
             }
@@ -159,16 +206,4 @@ struct AgentStepsView: View {
         )
     }
 
-    private var connectingPreviewView: some View {
-        HStack(spacing: 8) {
-            PulseDot(color: .accentColor, size: 8, minScale: 0.8, maxScale: 1.0, minOpacity: 0.5, maxOpacity: 1.0, duration: 1.1)
-            Text("Connecting to model...")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-        .cornerRadius(8)
-    }
 }
