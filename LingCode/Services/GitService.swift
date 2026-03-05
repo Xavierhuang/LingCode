@@ -69,6 +69,13 @@ class GitService: ObservableObject {
         repositoryURL = url
         refreshStatus()
     }
+
+    /// Set the repository URL without triggering a full status refresh.
+    /// Use this when the caller will fetch git data itself (e.g. MagicPushView).
+    func setRepositoryURL(_ url: URL) {
+        guard isGitRepository(url) else { return }
+        repositoryURL = url
+    }
     
     func refreshStatus() {
         guard let url = repositoryURL else { return }
@@ -164,11 +171,25 @@ class GitService: ObservableObject {
     }
     
     // MARK: - Push/Pull
+
+    /// List remote names (e.g. ["origin", "upstream"]).
+    func getRemotes(in directory: URL) -> [String] {
+        let result = runGit(["remote"], in: directory)
+        return result.output
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
     
-    func push(in directory: URL, setUpstream: Bool = false) -> GitResult {
+    /// Push current branch to the given remote and branch ref.
+    /// If branch is nil, uses currentBranch. If setUpstream, sets upstream to remote/branch.
+    func push(in directory: URL, remote: String = "origin", branch: String? = nil, setUpstream: Bool = false) -> GitResult {
+        let targetBranch = branch ?? currentBranch
         var args = ["push"]
         if setUpstream {
-            args.append(contentsOf: ["-u", "origin", currentBranch])
+            args.append(contentsOf: ["-u", remote, targetBranch])
+        } else {
+            args.append(contentsOf: [remote, targetBranch])
         }
         let result = runGit(args, in: directory)
         if result.success {
@@ -344,6 +365,11 @@ class GitService: ObservableObject {
     
     // MARK: - Process Execution
     
+    /// Public wrapper for running arbitrary git commands — used by MagicPushView for `git remote add`.
+    func runGitPublic(_ arguments: [String], in directory: URL) -> GitResult {
+        runGit(arguments, in: directory)
+    }
+
     private func runGit(_ arguments: [String], in directory: URL) -> GitResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

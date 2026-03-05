@@ -103,6 +103,11 @@ struct DeploymentPanelView: View {
                     .background(Color.blue.opacity(0.2))
                     .cornerRadius(4)
             }
+
+            // Magic Deploy one-tap button
+            if let url = editorViewModel.rootFolderURL {
+                MagicDeployButton(projectURL: url)
+            }
             
             // History button
             Button(action: { showHistorySheet = true }) {

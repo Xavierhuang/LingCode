@@ -116,6 +116,10 @@ struct AgentStepRow: View {
         step.type == .taskHeader
     }
 
+    private var isCompleteStep: Bool {
+        step.type == .complete
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             headerView
@@ -249,6 +253,9 @@ struct AgentStepRow: View {
                 regularOutputView(output: output)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
+        } else if isExpanded && isCompleteStep, let output = step.output, !output.isEmpty {
+            TypingTextView(fullText: output)
+                .transition(.opacity.combined(with: .move(edge: .top)))
         } else if isExpanded, !isFileWriteStep, !isFileReadStep, let output = step.output, !output.isEmpty {
             regularOutputView(output: output)
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -301,6 +308,83 @@ struct AgentStepRow: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Typing Text View (Cursor-style character-by-character reveal)
+
+/// Reveals `fullText` character by character with a blinking cursor.
+/// Plain prose styling — not a code box.
+struct TypingTextView: View {
+    let fullText: String
+
+    @State private var displayedCount: Int = 0
+    @State private var cursorVisible: Bool = true
+    @State private var timer: Timer? = nil
+    @State private var blinkTimer: Timer? = nil
+
+    private let charsPerTick: Int = 4
+    private let tickInterval: TimeInterval = 0.018
+
+    private var isFinished: Bool { displayedCount >= fullText.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            (Text(String(fullText.prefix(displayedCount)))
+                .foregroundColor(.primary)
+             + (isFinished ? Text("") : Text(cursorVisible ? "▍" : " ")
+                .foregroundColor(.accentColor))
+            )
+            .font(.system(size: 12))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(6)
+        .onAppear {
+            startTyping()
+        }
+        .onChange(of: fullText) { _, _ in
+            stopTimers()
+            displayedCount = 0
+            startTyping()
+        }
+        .onDisappear {
+            stopTimers()
+        }
+    }
+
+    private func startTyping() {
+        displayedCount = 0
+        cursorVisible = true
+
+        // Single typing timer — invalidates itself when done
+        timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { t in
+            let next = min(displayedCount + charsPerTick, fullText.count)
+            displayedCount = next
+            if displayedCount >= fullText.count {
+                t.invalidate()
+                timer = nil
+                cursorVisible = false
+                blinkTimer?.invalidate()
+                blinkTimer = nil
+            }
+        }
+
+        // Slow blink timer — 2 Hz, only while typing
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            guard !isFinished else { return }
+            cursorVisible.toggle()
+        }
+    }
+
+    private func stopTimers() {
+        timer?.invalidate()
+        timer = nil
+        blinkTimer?.invalidate()
+        blinkTimer = nil
     }
 }
 

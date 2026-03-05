@@ -11,15 +11,29 @@ import Combine
 
 // MARK: - Rule Types
 
+/// How a rule is applied — mirrors Cursor's "Always / Auto-attached / Agent-requested / Manual" taxonomy.
+enum RuleApplyMode: String, Codable, CaseIterable {
+    /// Injected into every prompt, regardless of file.
+    case always = "Always"
+    /// Injected only when the active file path matches `pattern` (glob).
+    case fileScoped = "File-scoped"
+    /// Never injected automatically; user must invoke it explicitly.
+    case manual = "Manual"
+}
+
 struct AIRule: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
     var description: String
-    var pattern: String?  // File pattern this rule applies to (e.g., "*.swift")
+    var pattern: String?  // Glob pattern for fileScoped rules (e.g., "*.swift", "src/**/*.ts")
     var content: String   // The actual rule content
     var isEnabled: Bool
     var priority: Int     // Higher priority rules override lower ones
     var source: RuleSource
+    /// How / when this rule is injected. Derived from .mdc frontmatter or defaults.
+    var applyMode: RuleApplyMode
+    /// Original filename (for rules loaded from .cursor/rules/ directory).
+    var fileName: String?
     
     init(
         id: UUID = UUID(),
@@ -29,7 +43,9 @@ struct AIRule: Identifiable, Codable, Equatable {
         content: String,
         isEnabled: Bool = true,
         priority: Int = 0,
-        source: RuleSource = .project
+        source: RuleSource = .project,
+        applyMode: RuleApplyMode = .always,
+        fileName: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -39,12 +55,15 @@ struct AIRule: Identifiable, Codable, Equatable {
         self.isEnabled = isEnabled
         self.priority = priority
         self.source = source
+        self.applyMode = applyMode
+        self.fileName = fileName
     }
 }
 
 enum RuleSource: String, Codable {
     case builtin = "Built-in"
     case project = "Project"
+    case cursorDir = ".cursor/rules"
     case user = "User"
     case workspace = "Workspace"
 }
@@ -178,9 +197,9 @@ class RulesService: ObservableObject {
         // Check for .cursorrules (Cursor compatibility)
         loadRulesFile(projectURL.appendingPathComponent(".cursorrules"), source: .project)
         
-        // Check for .cursor/rules directory
+        // Check for .cursor/rules directory — tagged with its own source so the UI can group them
         let cursorRulesDir = projectURL.appendingPathComponent(".cursor/rules")
-        loadRulesDirectory(cursorRulesDir, source: .project)
+        loadRulesDirectory(cursorRulesDir, source: .cursorDir)
         
         // Check for WORKSPACE.md
         loadWorkspaceMd(projectURL.appendingPathComponent("WORKSPACE.md"))
@@ -194,7 +213,7 @@ class RulesService: ObservableObject {
             let rules = parseRulesFile(content, filename: url.lastPathComponent, source: source)
             
             switch source {
-            case .project:
+            case .project, .cursorDir:
                 projectRules.append(contentsOf: rules)
             case .user:
                 userRules.append(contentsOf: rules)
@@ -213,12 +232,64 @@ class RulesService: ObservableObject {
         
         do {
             let files = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
-            for file in files where file.pathExtension == "md" || file.pathExtension == "txt" {
+            let allowed = Set(["md", "mdc", "txt"])
+            for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+            where allowed.contains(file.pathExtension) {
                 loadRulesFile(file, source: source)
             }
         } catch {
             print("RulesService: Failed to load rules directory: \(error)")
         }
+    }
+    
+    // MARK: - .mdc Frontmatter Parsing
+    
+    /// Parses YAML-ish frontmatter from a `.mdc` file.
+    /// Supported keys: `description`, `globs` (comma-separated), `alwaysApply` (bool).
+    private struct MdcFrontmatter {
+        var description: String = ""
+        var globs: String? = nil
+        var alwaysApply: Bool = true
+    }
+    
+    private func parseMdcFrontmatter(_ content: String) -> (frontmatter: MdcFrontmatter, body: String) {
+        var fm = MdcFrontmatter()
+        
+        // Frontmatter is delimited by leading `---` … `---`
+        let lines = content.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else {
+            return (fm, content)
+        }
+        
+        var endIndex: Int? = nil
+        for (idx, line) in lines.dropFirst().enumerated() {
+            if line.trimmingCharacters(in: .whitespaces) == "---" {
+                endIndex = idx + 1  // +1 because we dropped first
+                break
+            }
+        }
+        
+        guard let end = endIndex else { return (fm, content) }
+        
+        let fmLines = lines[1..<end]
+        for line in fmLines {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2 else { continue }
+            switch parts[0].lowercased() {
+            case "description":
+                fm.description = parts[1]
+            case "globs":
+                let raw = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                fm.globs = raw.isEmpty ? nil : raw
+            case "alwaysapply":
+                fm.alwaysApply = parts[1].lowercased() == "true"
+            default:
+                break
+            }
+        }
+        
+        let body = lines[(end + 1)...].joined(separator: "\n")
+        return (fm, body)
     }
     
     private func loadWorkspaceMd(_ url: URL) {
@@ -241,6 +312,40 @@ class RulesService: ObservableObject {
     
     private func parseRulesFile(_ content: String, filename: String, source: RuleSource) -> [AIRule] {
         var rules: [AIRule] = []
+        
+        // .mdc files — parse YAML frontmatter first
+        if filename.hasSuffix(".mdc") {
+            let (fm, body) = parseMdcFrontmatter(content)
+            let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedBody.isEmpty else { return rules }
+            
+            let ruleName = String(filename.dropLast(4))  // strip .mdc
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+            
+            var applyMode: RuleApplyMode
+            var pattern: String?
+            
+            if fm.alwaysApply {
+                applyMode = .always
+            } else if let globs = fm.globs, !globs.isEmpty {
+                applyMode = .fileScoped
+                pattern = globs
+            } else {
+                applyMode = .manual
+            }
+            
+            rules.append(AIRule(
+                name: ruleName,
+                description: fm.description,
+                pattern: pattern,
+                content: trimmedBody,
+                source: source,
+                applyMode: applyMode,
+                fileName: filename
+            ))
+            return rules
+        }
         
         // Check if it's a JSON array of rules
         if content.trimmingCharacters(in: .whitespaces).hasPrefix("[") {
@@ -339,6 +444,29 @@ class RulesService: ObservableObject {
         return allRules
     }
     
+    /// Returns rules that should be injected into the AI prompt for the given active file.
+    /// - `always` rules are always included (when enabled).
+    /// - `fileScoped` rules are included only when `activeFilePath` matches their glob pattern.
+    /// - `manual` rules are never injected automatically.
+    func getActiveRulesForPrompt(activeFilePath: String? = nil) -> [AIRule] {
+        let pool = userRules + projectRules + workspaceRules
+        
+        let eligible = pool.filter { rule in
+            guard rule.isEnabled else { return false }
+            switch rule.applyMode {
+            case .always:
+                return true
+            case .fileScoped:
+                guard let filePath = activeFilePath, let pattern = rule.pattern else { return false }
+                return matchesPattern(path: filePath, pattern: pattern)
+            case .manual:
+                return false
+            }
+        }
+        
+        return eligible.sorted { $0.priority > $1.priority }
+    }
+    
     private func matchesPattern(path: String, pattern: String) -> Bool {
         // Simple glob matching
         if pattern.hasPrefix("*.") {
@@ -359,11 +487,10 @@ class RulesService: ObservableObject {
     // MARK: - Generate System Prompt
     
     func generateRulesPrompt(for filePath: String? = nil) -> String {
-        let rules = getActiveRules(for: filePath)
+        let rules = getActiveRulesForPrompt(activeFilePath: filePath)
         guard !rules.isEmpty else { return "" }
         
-        var prompt = "## Project Rules\n\n"
-        prompt += "Follow these rules when generating code:\n\n"
+        var prompt = "## Project Rules\n\nFollow these rules when generating code:\n\n"
         
         for rule in rules {
             prompt += "### \(rule.name)\n"

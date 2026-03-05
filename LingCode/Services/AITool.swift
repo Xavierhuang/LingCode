@@ -254,6 +254,72 @@ extension AITool {
         )
     }
 
+    /// Tool for browsing a URL and returning the page content/title.
+    static func browsePage() -> AITool {
+        return AITool(
+            name: "browse_page",
+            description: "Open a URL in the browser and return the page content. Use url='auto' to auto-detect a running dev server. Actions: 'extract_text' (default), 'screenshot' (saves PNG, read with read_file), 'get_links'. Console logs are written to a file you can grep.",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "url": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("The URL to navigate to (full URL with https://, or 'auto' to detect dev server)")
+                    ]),
+                    "action": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("'extract_text' | 'screenshot' | 'get_links'. Default: 'extract_text'")
+                    ]),
+                    "selector": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Optional CSS selector to focus on a specific element")
+                    ])
+                ]),
+                "required": AnyCodable(["url"])
+            ]
+        )
+    }
+
+    /// Tool for clicking an element in the browser.
+    static func browserClick() -> AITool {
+        return AITool(
+            name: "browser_click",
+            description: "Click an element on the currently open browser page using a CSS selector.",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "selector": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("CSS selector for the element to click (e.g. 'button#submit', '.nav-link')")
+                    ])
+                ]),
+                "required": AnyCodable(["selector"])
+            ]
+        )
+    }
+
+    /// Tool for typing into a browser input.
+    static func browserType() -> AITool {
+        return AITool(
+            name: "browser_type",
+            description: "Type text into a focused input field in the browser.",
+            inputSchema: [
+                "type": AnyCodable("object"),
+                "properties": AnyCodable([
+                    "selector": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("CSS selector for the input element")
+                    ]),
+                    "text": AnyCodable([
+                        "type": AnyCodable("string"),
+                        "description": AnyCodable("Text to type into the element")
+                    ])
+                ]),
+                "required": AnyCodable(["selector", "text"])
+            ]
+        )
+    }
+
     /// Tool to delegate work to a specialized subagent; parent continues without waiting (async subagent).
     static func spawnSubagent() -> AITool {
         return AITool(

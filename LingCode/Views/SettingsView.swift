@@ -29,6 +29,7 @@ struct SettingsView: View {
                 rulesSection
                 codeGenSection
                 themeSection
+                agentSection
             }
             .navigationTitle("Settings")
             .toolbar {
@@ -448,6 +449,25 @@ struct SettingsView: View {
             return "Get your key from console.anthropic.com\nKey format: sk-ant-api03-..."
         case .openAI:
             return "Get your key from platform.openai.com\nKey format: sk-..."
+        }
+    }
+
+    // MARK: - Agent section (command allowlist)
+
+    @ViewBuilder private var agentSection: some View {
+        Section("Agent") {
+            NavigationLink {
+                CommandAllowlistSettingsView()
+            } label: {
+                HStack {
+                    Label("Command Allowlist", systemImage: "checkmark.shield")
+                    Spacer()
+                    Text("\(CommandAllowlistService.shared.allowlist.count) entries")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .help("Commands on the allowlist run without an approval dialog")
         }
     }
 }

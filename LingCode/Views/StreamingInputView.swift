@@ -17,6 +17,7 @@ struct StreamingInputView: View {
     @Binding var activeMentions: [Mention]
     @State private var showMentionPopup = false
     @State private var showFilePicker = false
+    @State private var showSlashPopup = false
     
     let onSendMessage: () -> Void
     let onImageDrop: ([NSItemProvider]) async -> Bool
@@ -196,7 +197,28 @@ struct StreamingInputView: View {
                         if newValue.hasSuffix("@") {
                             showMentionPopup = true
                         }
+                        // Slash command popup: show when input starts with "/"
+                        showSlashPopup = newValue.hasPrefix("/") && !newValue.contains(" ")
                         // Note: Speculative context is now handled by AIViewModel's Combine pipeline
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if showSlashPopup {
+                            let query = String(viewModel.currentInput.dropFirst())
+                            SlashCommandPopupView(
+                                query: query,
+                                onSelect: { skill in
+                                    viewModel.currentInput = "/\(skill.name) "
+                                    showSlashPopup = false
+                                },
+                                onDismiss: {
+                                    showSlashPopup = false
+                                }
+                            )
+                            .offset(y: -8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            .zIndex(100)
+                        }
                     }
                 
                 // ⚡️ Speculative context indicator

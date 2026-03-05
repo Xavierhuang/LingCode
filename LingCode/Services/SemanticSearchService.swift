@@ -138,71 +138,81 @@ class SemanticSearchService: ObservableObject {
         }
     }
     
-    /// 2. Find relevant code chunks for a query (new API with vector search)
-    /// FIX: Mark as nonisolated to allow calling from actor contexts
+    /// 2. Find relevant code chunks for a query.
+    ///
+    /// Scoring is a two-stage hybrid:
+    ///   Stage 1 – GPU/Accelerate cosine similarity via VectorDB (Metal MPS or
+    ///             vDSP matrix multiply, returning pre-scored CodeEmbeddings).
+    ///   Stage 2 – keyword and filename boosting on top of the vector score.
+    ///
+    /// Marked nonisolated so it can be called from actor contexts.
     nonisolated func search(query: String, limit: Int = 10) -> [CodeChunk] {
         guard !index.isEmpty else { return [] }
-        
-        // FIX: Access vectorDB and create vectorMap in a way that's safe for nonisolated context
-        // VectorDB is a regular class, so accessing it is safe
-        let vectorResults = vectorDB.search(query: query, limit: limit * 2) // Get more for hybrid scoring
-        
-        // Create a map of vector results for fast lookup
-        // FIX: CodeEmbedding is a struct with value semantics, safe to use
-        let vectorMap = Dictionary(uniqueKeysWithValues: vectorResults.map { ($0.id, $0) })
-        
-        // A. Keyword Boosting (Fast)
+
+        // ── Stage 1: GPU/CPU vector similarity (returns top limit*2 results) ──
+        // VectorDB.search() runs MPS matrix multiply on GPU when Metal is
+        // available, otherwise falls back to Accelerate vDSP mmul on CPU.
+        // Both paths operate on L2-normalised vectors so the scores are
+        // cosine similarities in [-1, 1].
+        let vectorResults = vectorDB.search(query: query, limit: limit * 2)
+        let vectorScores: [String: Double] = Dictionary(
+            uniqueKeysWithValues: vectorResults.map { ($0.id, Double($0.embedding.count)) }
+        )
+
+        // Build a proper score map: run vDSP dot product between the stored
+        // (normalised) embedding and the query embedding so the score is
+        // a true cosine value in [0, 1] rather than an embedding-count proxy.
+        let vectorSimilarityMap: [String: Double] = {
+            guard let queryVec = vectorDB.generateEmbedding(for: query) else {
+                return [:]
+            }
+            let queryEmb = CodeEmbedding(id: "query", filePath: "", startLine: 0,
+                                         endLine: 0, content: query,
+                                         embedding: queryVec, keywords: [])
+            return Dictionary(uniqueKeysWithValues:
+                vectorResults.map { ($0.id, $0.similarity(to: queryEmb)) }
+            )
+        }()
+
+        // ── Stage 2: Hybrid keyword + filename boosting ────────────────────
         let queryTerms = query.lowercased().split(separator: " ").map(String.init)
-        
-        // B. Hybrid Scoring: Vector Similarity + Keyword Match
-        let scoredChunks = index.map { chunk -> (CodeChunk, Double) in
-            var score = 0.0
-            
-            // 1. Vector similarity (primary signal)
-            // FIX: Accessing chunk.id and vectorMap is safe - both are value types
-            if let vectorEmbedding = vectorMap[chunk.id] {
-                // Use similarity score from vector DB (0.0 to 1.0)
-                // FIX: similarity() is a method on a struct, safe to call
-                let queryEmbedding = CodeEmbedding(
-                    id: "query",
-                    filePath: "",
-                    startLine: 0,
-                    endLine: 0,
-                    content: query,
-                    embedding: [],
-                    keywords: []
-                )
-                score += vectorEmbedding.similarity(to: queryEmbedding) * 50.0 // Weight vector similarity heavily
-            }
-            
-            // 2. Keyword overlap
-            let contentLower = chunk.content.lowercased()
-            for term in queryTerms {
-                if contentLower.contains(term) {
-                    score += 10.0 // Strong signal
-                }
-            }
-            
-            // 3. Filename match
-            if !queryTerms.isEmpty && chunk.filePath.lowercased().contains(queryTerms[0]) {
-                score += 20.0 // Very strong signal
-            }
-            
-            // 4. Fallback: NLEmbedding distance (if vector DB doesn't have this chunk)
-            if vectorMap[chunk.id] == nil, let embedding = self.embedding {
+
+        // Only score chunks that are either in the vector results or in the
+        // full index (NLEmbedding fallback for chunks not yet embedded).
+        let scoredChunks: [(CodeChunk, Double)] = index.compactMap { chunk in
+            var score: Double = 0.0
+
+            if let vecScore = vectorSimilarityMap[chunk.id] {
+                // Vector similarity weighted heavily (primary signal).
+                score += vecScore * 50.0
+            } else if let emb = self.embedding {
+                // Fallback for chunks missing from the vector DB.
                 let keywordsText = chunk.keywords.joined(separator: " ")
                 if !keywordsText.isEmpty {
-                    let dist = embedding.distance(between: query, and: keywordsText)
+                    let dist = emb.distance(between: query, and: keywordsText)
                     score += (1.0 - dist) * 15.0
                 }
             }
-            
+
+            // Keyword overlap boost.
+            let contentLower = chunk.content.lowercased()
+            for term in queryTerms where contentLower.contains(term) {
+                score += 10.0
+            }
+
+            // Filename match boost.
+            if !queryTerms.isEmpty && chunk.filePath.lowercased().contains(queryTerms[0]) {
+                score += 20.0
+            }
+
+            guard score > 5.0 else { return nil }
             return (chunk, score)
         }
-        
-        // Return top N
+
+        // Suppress unused-variable warning on the proxy map.
+        _ = vectorScores
+
         return scoredChunks
-            .filter { $0.1 > 5.0 } // Minimum relevance threshold
             .sorted { $0.1 > $1.1 }
             .prefix(limit)
             .map { $0.0 }

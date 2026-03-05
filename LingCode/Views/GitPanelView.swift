@@ -20,6 +20,9 @@ struct GitPanelView: View {
     @State private var isPulling: Bool = false
     @State private var showError: Bool = false
     @State private var errorMessage: String = ""
+    @State private var isReviewing: Bool = false
+    @State private var showReviewPanel: Bool = false
+    @ObservedObject private var bugbot = BugbotService.shared
     
     var body: some View {
         VStack(spacing: 0) {
@@ -56,6 +59,13 @@ struct GitPanelView: View {
         }
         .sheet(isPresented: $showCreateBranch) {
             createBranchSheet
+        }
+        .sheet(isPresented: $showReviewPanel) {
+            if let review = bugbot.currentReview, let url = editorViewModel.rootFolderURL {
+                AgentReviewPanel(review: review, projectURL: url) {
+                    showReviewPanel = false
+                }
+            }
         }
     }
     
@@ -231,6 +241,23 @@ struct GitPanelView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(isPushing || gitService.aheadBehind.ahead == 0)
+
+            // Agent Review
+            Button {
+                runAgentReview()
+            } label: {
+                HStack(spacing: 4) {
+                    if bugbot.isReviewing {
+                        ProgressView().scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "ant.fill")
+                    }
+                    Text("Review")
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(bugbot.isReviewing || editorViewModel.rootFolderURL == nil)
+            .help("Agent Review — AI analyzes your local changes for bugs and issues")
             
             Spacer()
             
@@ -434,6 +461,21 @@ struct GitPanelView: View {
         if !result.success, let error = result.error {
             errorMessage = error
             showError = true
+        }
+    }
+
+    private func runAgentReview() {
+        guard let url = editorViewModel.rootFolderURL else { return }
+        Task {
+            do {
+                _ = try await bugbot.reviewCurrentBranch(projectURL: url)
+                await MainActor.run { showReviewPanel = true }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    showError = true
+                }
+            }
         }
     }
 }

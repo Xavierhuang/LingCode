@@ -48,9 +48,13 @@ class CodebaseIndexService: ObservableObject {
     
     private var indexedFiles: [String: IndexedFile] = [:]
     private var symbolIndex: [String: [IndexedSymbol]] = [:] // name -> symbols
-    private var fileQueue = DispatchQueue(label: "com.lingcode.indexer", qos: .utility)
+    private var fileQueue = DispatchQueue(label: "com.lingcode.indexer", qos: .background)
     private var currentProjectURL: URL?
     private let fileWatcher = FileWatcherService.shared
+    /// Tracks the last indexed URL + time so we skip redundant re-indexes.
+    private var lastIndexedURL: URL?
+    private var lastIndexedDate: Date?
+    private let reindexCooldown: TimeInterval = 60  // seconds
     
     private let supportedExtensions = ["swift", "py", "js", "ts", "jsx", "tsx", "java", "kt", "go", "rs", "c", "cpp", "h", "hpp", "m", "mm"]
     
@@ -68,6 +72,13 @@ class CodebaseIndexService: ObservableObject {
     /// Index entire project (Cursor-style: clear previous, respect ignore files)
     func indexProject(at url: URL, completion: ((Int, Int) -> Void)? = nil) {
         guard !isIndexing else { return }
+
+        // Skip if we indexed this exact URL recently
+        if let last = lastIndexedURL, let lastDate = lastIndexedDate,
+           last == url, Date().timeIntervalSince(lastDate) < reindexCooldown {
+            completion?(indexedFileCount, totalSymbolCount)
+            return
+        }
         
         currentProjectURL = url
         indexedFiles.removeAll()
@@ -87,15 +98,15 @@ class CodebaseIndexService: ObservableObject {
             
             var files: [URL] = []
             self.collectFiles(in: url, into: &files)
-            
-            let total = files.count
+
+            // Cap at 500 files to prevent runaway CPU on large repos
+            let capped = Array(files.prefix(500))
+            let total = capped.count
             var processed = 0
-            
-            for fileURL in files {
+
+            for fileURL in capped {
                 if let indexed = self.indexFile(at: fileURL, relativeTo: url) {
                     self.indexedFiles[indexed.relativePath] = indexed
-                    
-                    // Update symbol index
                     for symbol in indexed.symbols {
                         if self.symbolIndex[symbol.name] == nil {
                             self.symbolIndex[symbol.name] = []
@@ -103,13 +114,16 @@ class CodebaseIndexService: ObservableObject {
                         self.symbolIndex[symbol.name]?.append(symbol)
                     }
                 }
-                
                 processed += 1
-                let progress = Double(processed) / Double(total)
-                
-                DispatchQueue.main.async {
-                    self.indexProgress = progress
-                    self.indexedFileCount = processed
+
+                // Batch progress updates — only publish every 25 files
+                if processed % 25 == 0 {
+                    let p = Double(processed) / Double(total)
+                    let c = processed
+                    DispatchQueue.main.async {
+                        self.indexProgress = p
+                        self.indexedFileCount = c
+                    }
                 }
             }
             
@@ -120,6 +134,8 @@ class CodebaseIndexService: ObservableObject {
                 self.indexProgress = 1.0
                 self.totalSymbolCount = symbolCount
                 self.lastIndexDate = Date()
+                self.lastIndexedURL = url
+                self.lastIndexedDate = Date()
                 completion?(processed, symbolCount)
             }
         }
@@ -221,19 +237,20 @@ class CodebaseIndexService: ObservableObject {
     
     private func indexFile(at url: URL, relativeTo base: URL) -> IndexedFile? {
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard fileSize <= 512_000, let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        
+        guard fileSize <= 256_000, let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+
         let relativePath = url.path.replacingOccurrences(of: base.path + "/", with: "")
         let language = detectLanguage(for: url)
         let lines = content.components(separatedBy: .newlines)
-        
-        let symbols = extractSymbols(from: content, language: language, filePath: relativePath, fileURL: url)
+
+        // Use fast regex-only symbol scan — skip AST/SwiftSyntax here to keep
+        // background indexing cheap. Full AST is available via ASTIndex on demand.
+        let symbols = extractSymbolsFast(from: content, language: language, filePath: relativePath)
         let imports = extractImports(from: content, language: language)
-        let summary = generateSummary(from: content, symbols: symbols)
-        
+
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let modDate = attributes?[.modificationDate] as? Date ?? Date()
-        
+
         return IndexedFile(
             id: UUID(),
             path: url.path,
@@ -243,8 +260,44 @@ class CodebaseIndexService: ObservableObject {
             lineCount: lines.count,
             symbols: symbols,
             imports: imports,
-            summary: summary
+            summary: nil  // skip summary generation — not needed for index
         )
+    }
+
+    /// Fast symbol extraction using line-prefix heuristics — no AST, no regex engine.
+    private func extractSymbolsFast(from content: String, language: String, filePath: String) -> [IndexedSymbol] {
+        var symbols: [IndexedSymbol] = []
+        let lines = content.components(separatedBy: .newlines)
+
+        let swiftKinds: [(String, IndexedSymbol.SymbolKind)] = [
+            ("class ", .class), ("struct ", .struct), ("enum ", .enum),
+            ("protocol ", .protocol), ("func ", .function), ("extension ", .extension)
+        ]
+        let jsKinds: [(String, IndexedSymbol.SymbolKind)] = [
+            ("function ", .function), ("class ", .class), ("const ", .variable), ("let ", .variable)
+        ]
+        let kinds = (language == "swift") ? swiftKinds : jsKinds
+
+        for (lineIdx, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            for (prefix, kind) in kinds {
+                if trimmed.hasPrefix(prefix) {
+                    // Extract the name: everything up to ( { < or whitespace
+                    let rest = String(trimmed.dropFirst(prefix.count))
+                    let name = rest.components(separatedBy: CharacterSet(charactersIn: "({<: ")).first ?? rest
+                    if !name.isEmpty && name.first?.isLetter == true {
+                        symbols.append(IndexedSymbol(
+                            id: UUID(), name: name, kind: kind,
+                            filePath: filePath, line: lineIdx,
+                            signature: nil, documentation: nil
+                        ))
+                    }
+                    break
+                }
+            }
+            if symbols.count >= 50 { break }  // cap per file
+        }
+        return symbols
     }
     
     private func extractSymbols(from content: String, language: String, filePath: String, fileURL: URL) -> [IndexedSymbol] {

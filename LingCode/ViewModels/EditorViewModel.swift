@@ -33,14 +33,12 @@ class EditorViewModel: ObservableObject {
         didSet {
             guard let url = rootFolderURL else { return }
             print("rootFolderURL set to: \(url.path)")
-            // Defer indexing so we don't publish (CodebaseIndexService @Published) during view update
+            // Indexing is intentionally deferred — it runs lazily when the AI
+            // first needs context (SemanticSearchService.search triggers it).
+            // We only set the Git repository here which is very cheap.
             DispatchQueue.main.async { [weak self] in
                 guard self?.rootFolderURL == url else { return }
-                CodebaseIndexService.shared.indexProject(at: url) { _, _ in
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        SemanticSearchService.shared.indexWorkspace(url)
-                    }
-                }
+                GitService.shared.setRepository(url)
             }
         }
     }

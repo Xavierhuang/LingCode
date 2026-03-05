@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct UndoSnapshot {
+struct UndoSnapshot: Identifiable {
     let id: UUID
     let asts: [URL: [ASTSymbol]]
     let fileContents: [URL: String]  // Store actual file contents for restoration

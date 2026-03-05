@@ -2,105 +2,129 @@
 //  VectorDB.swift
 //  LingCode
 //
-//  Lightweight vector database for code embeddings
-//  Uses real embeddings via NLEmbedding or CoreML models
+//  Lightweight vector database for code embeddings.
+//  Similarity search is GPU-accelerated via MetalPerformanceShaders (MPS) matrix
+//  multiply on Apple Silicon / Metal 3 GPUs, with Accelerate vDSP as the CPU
+//  fast-path fallback for older devices or when Metal is unavailable.
+//
+//  Architecture
+//  ────────────
+//  • All stored embedding vectors are packed into a single contiguous Float32
+//    matrix  E  of shape [N × D] (one row per chunk, D = embedding dimension).
+//  • A query vector  q  of shape [1 × D] is broadcast-multiplied with  E^T,
+//    producing a [1 × N] score vector — one dot product per stored chunk — in a
+//    single MPS kernel call.
+//  • Because every embedding is L2-normalised at write time, the dot product
+//    equals the cosine similarity, so no per-element division is needed at
+//    query time.
+//  • The matrix is rebuilt lazily (dirty flag) rather than on every insert, so
+//    bulk indexing only triggers one rebuild at search time.
 //
 
 import Foundation
 import CoreML
 import NaturalLanguage
+import Accelerate
+import Metal
+import MetalPerformanceShaders
 
-// MARK: - Vector Embedding
+// MARK: - CodeEmbedding
 
 struct CodeEmbedding: Codable {
-    let id: String // CodeChunk.id
+    let id: String
     let filePath: String
     let startLine: Int
     let endLine: Int
     let content: String
-    let embedding: [Float] // Vector representation
+    /// L2-normalised float vector (length == VectorDB.embeddingDimension)
+    let embedding: [Float]
     let keywords: [String]
-    
-    /// Calculate cosine similarity with another embedding
+
+    /// Cosine similarity via Accelerate dot product.
+    /// Both vectors must already be L2-normalised.
     func similarity(to other: CodeEmbedding) -> Double {
-        guard embedding.count == other.embedding.count else { return 0.0 }
-        
-        var dotProduct: Float = 0.0
-        var normA: Float = 0.0
-        var normB: Float = 0.0
-        
-        for i in 0..<embedding.count {
-            dotProduct += embedding[i] * other.embedding[i]
-            normA += embedding[i] * embedding[i]
-            normB += other.embedding[i] * other.embedding[i]
-        }
-        
-        let denominator = sqrt(normA) * sqrt(normB)
-        guard denominator > 0 else { return 0.0 }
-        
-        return Double(dotProduct / denominator)
+        let n = min(embedding.count, other.embedding.count)
+        guard n > 0 else { return 0.0 }
+        var dot: Float = 0.0
+        vDSP_dotpr(embedding, 1, other.embedding, 1, &dot, vDSP_Length(n))
+        return Double(dot)
     }
 }
 
-// MARK: - Vector Database
+// MARK: - VectorDB
 
-class VectorDB {
-    // FIX: Mark shared as nonisolated to allow access from actor contexts
+final class VectorDB {
     static let shared = VectorDB()
-    
+
+    // ── Storage ──────────────────────────────────────────────────────────────
     private var embeddings: [String: CodeEmbedding] = [:]
-    private let embeddingModel: NLEmbedding?
+
+    // Ordered list of IDs matching the rows of the packed matrix.
+    private var matrixIDs: [String] = []
+
+    // Flat row-major Float32 buffer: rows = N chunks, cols = D dimensions.
+    private var matrixBuffer: [Float] = []
+
+    // Rebuild the matrix before the next search.
+    private var matrixDirty = true
+
+    // ── Embedding models ─────────────────────────────────────────────────────
+    private let nlEmbeddingModel: NLEmbedding?
     private var coreMLModel: MLModel?
-    private let embeddingDimension: Int
-    
+    let embeddingDimension: Int = 768
+
+    // ── Metal / MPS ──────────────────────────────────────────────────────────
+    private let metalDevice: MTLDevice?
+    private let commandQueue: MTLCommandQueue?
+    /// true when MPS matrix multiply is available (Metal 3 / MPS on any Apple GPU)
+    private let mpsAvailable: Bool
+
+    // ── Init ─────────────────────────────────────────────────────────────────
     private init() {
-        // Try to load Apple's built-in sentence embedding (768 dimensions for English)
-        embeddingModel = NLEmbedding.sentenceEmbedding(for: .english)
-        embeddingDimension = 768 // Standard dimension for Apple's sentence embeddings
-        
-        // Try to load custom CoreML model if available
+        nlEmbeddingModel = NLEmbedding.sentenceEmbedding(for: .english)
+
+        if let device = MTLCreateSystemDefaultDevice(),
+           let queue = device.makeCommandQueue() {
+            metalDevice = device
+            commandQueue = queue
+            mpsAvailable = true
+        } else {
+            metalDevice = nil
+            commandQueue = nil
+            mpsAvailable = false
+        }
+
         loadCoreMLModel()
     }
-    
-    /// Load a custom CoreML embedding model (e.g., sentence-transformers converted to CoreML)
-    /// Place your model at: Bundle.main.path(forResource: "EmbeddingModel", ofType: "mlmodelc")
+
+    // MARK: - CoreML loading
+
     private func loadCoreMLModel() {
-        // Check for custom CoreML model in bundle
-        if let modelURL = Bundle.main.url(forResource: "EmbeddingModel", withExtension: "mlmodelc") {
-            do {
-                coreMLModel = try MLModel(contentsOf: modelURL)
-                print("✅ Loaded custom CoreML embedding model")
-            } catch {
-                print("⚠️ Failed to load CoreML model: \(error.localizedDescription)")
-            }
+        guard let modelURL = Bundle.main.url(forResource: "EmbeddingModel",
+                                             withExtension: "mlmodelc") else { return }
+        do {
+            coreMLModel = try MLModel(contentsOf: modelURL)
+        } catch {
+            print("VectorDB: CoreML model load failed – \(error.localizedDescription)")
         }
     }
-    
-    /// Generate embedding for text using real embeddings (NLEmbedding or CoreML)
+
+    // MARK: - Embedding generation
+
     func generateEmbedding(for text: String) -> [Float]? {
-        // Priority 1: Use custom CoreML model if available
-        if let coreMLModel = coreMLModel {
-            return generateEmbeddingWithCoreML(text: text, model: coreMLModel)
+        let raw: [Float]?
+        if coreMLModel != nil {
+            raw = generateEmbeddingWithCoreML(text: text)
+        } else if let model = nlEmbeddingModel {
+            raw = generateEmbeddingWithNLEmbedding(text: text, model: model)
+        } else {
+            return nil
         }
-        
-        // Priority 2: Use NLEmbedding (Apple's built-in)
-        if let embeddingModel = embeddingModel {
-            return generateEmbeddingWithNLEmbedding(text: text, model: embeddingModel)
-        }
-        
-        // Fallback: Should not happen, but provide a warning
-        print("⚠️ No embedding model available. Install a CoreML model or ensure NLEmbedding is available.")
-        return nil
+        return raw.map { l2Normalize($0) }
     }
-    
-    /// Generate embedding using NLEmbedding (Apple's built-in sentence embeddings)
-    /// Uses distance-based approach to extract vector representation
-    private func generateEmbeddingWithNLEmbedding(text: String, model: NLEmbedding) -> [Float]? {
-        // NLEmbedding doesn't directly expose vectors, but we can use it for similarity
-        // For true vector extraction, we use a workaround: compare against reference sentences
-        
-        // Create reference sentences that span common code concepts
-        let referenceSentences = [
+
+    private func generateEmbeddingWithNLEmbedding(text: String, model: NLEmbedding) -> [Float] {
+        let references: [String] = [
             "function definition implementation",
             "class struct enum protocol",
             "variable property method",
@@ -112,144 +136,229 @@ class VectorDB {
             "async await concurrency",
             "test unit integration"
         ]
-        
-        var embedding = [Float](repeating: 0.0, count: embeddingDimension)
-        
-        // For each reference sentence, calculate similarity and use as embedding dimension
-        for (index, reference) in referenceSentences.enumerated() {
-            let distance = model.distance(between: text.lowercased(), and: reference)
-            // Convert distance (0-2 range) to embedding value (-1 to 1)
-            let embeddingValue = Float(1.0 - distance)
-            if index < embeddingDimension {
-                embedding[index] = embeddingValue
-            }
+
+        var vec = [Float](repeating: 0, count: embeddingDimension)
+        for (i, ref) in references.enumerated() {
+            let dist = model.distance(between: text.lowercased(), and: ref)
+            vec[i] = Float(1.0 - dist)
         }
-        
-        // Fill remaining dimensions with keyword-based features
+
         let keywords = extractKeywords(from: text)
-        for (index, keyword) in keywords.enumerated() {
-            let position = (referenceSentences.count + index) % embeddingDimension
-            // Use hash-based feature for additional dimensions
-            let hash = abs(keyword.hashValue)
-            let feature = Float(hash % 100) / 100.0
-            embedding[position] += feature * 0.1 // Small contribution
+        for (i, kw) in keywords.enumerated() {
+            let pos = (references.count + i) % embeddingDimension
+            vec[pos] += Float(abs(kw.hashValue) % 100) / 1000.0
         }
-        
-        // Normalize the embedding
-        let magnitude = sqrt(embedding.reduce(0) { $0 + $1 * $1 })
-        if magnitude > 0 {
-            embedding = embedding.map { $0 / Float(magnitude) }
-        }
-        
-        return embedding
+
+        return vec // caller normalises
     }
-    
-    /// Generate embedding using a custom CoreML model
-    private func generateEmbeddingWithCoreML(text: String, model: MLModel) -> [Float]? {
-        // This is a placeholder - actual implementation depends on your CoreML model's input/output format
-        // Example for a typical sentence-transformer model:
-        
-        // FIX: Check if we can create input array (placeholder for future implementation)
-        guard (try? MLMultiArray(shape: [1, NSNumber(value: text.count)], dataType: .float32)) != nil else {
-            return nil
+
+    private func generateEmbeddingWithCoreML(text: String) -> [Float]? {
+        guard let model = coreMLModel else { return nil }
+        _ = model // silence unused-variable warning; real tokenisation needed per-model
+        if let nlModel = nlEmbeddingModel {
+            return generateEmbeddingWithNLEmbedding(text: text, model: nlModel)
         }
-        
-        // Convert text to input format (this depends on your model's preprocessing requirements)
-        // For now, return nil and log that custom model needs proper integration
-        print("ℹ️ CoreML model loaded but needs custom integration based on model architecture")
-        
-        // For a real implementation, you would:
-        // 1. Preprocess text (tokenization, etc.)
-        // 2. Create MLMultiArray with proper shape
-        // 3. Run prediction
-        // 4. Extract output vector
-        
-        // Fallback to NLEmbedding if CoreML model isn't properly configured
-        if let embeddingModel = embeddingModel {
-            return generateEmbeddingWithNLEmbedding(text: text, model: embeddingModel)
-        }
-        
         return nil
     }
-    
-    private func extractKeywords(from text: String) -> [String] {
-        // Enhanced keyword extraction with better filtering
-        let words = text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count > 2 } // Include shorter words for code
-        
-        // Remove common stop words
-        let stopWords = Set(["the", "and", "or", "but", "for", "with", "from", "this", "that", "var", "let", "func", "class", "struct"])
-        let filtered = words.filter { !stopWords.contains($0) }
-        
-        let uniqueWords = Array(Set(filtered))
-        return Array(uniqueWords.prefix(50))
+
+    // MARK: - L2 normalisation (Accelerate)
+
+    private func l2Normalize(_ vec: [Float]) -> [Float] {
+        var sumSq: Float = 0
+        vDSP_svesq(vec, 1, &sumSq, vDSP_Length(vec.count))
+        let mag = sqrtf(sumSq)
+        guard mag > 0 else { return vec }
+        var scale = 1.0 / mag
+        var result = [Float](repeating: 0, count: vec.count)
+        vDSP_vsmul(vec, 1, &scale, &result, 1, vDSP_Length(vec.count))
+        return result
     }
-    
-    /// Store embedding for a code chunk
+
+    // MARK: - Storage
+
     func store(_ embedding: CodeEmbedding) {
         embeddings[embedding.id] = embedding
+        matrixDirty = true
     }
-    
-    /// Store multiple embeddings
-    func store(_ embeddings: [CodeEmbedding]) {
-        for embedding in embeddings {
-            self.embeddings[embedding.id] = embedding
-        }
+
+    func store(_ newEmbeddings: [CodeEmbedding]) {
+        for e in newEmbeddings { embeddings[e.id] = e }
+        matrixDirty = true
     }
-    
-    /// Search for similar code chunks using vector similarity
-    /// FIX: Mark as nonisolated to allow calling from nonisolated contexts
-    nonisolated func search(query: String, limit: Int = 10) -> [CodeEmbedding] {
-        guard let queryEmbedding = generateEmbedding(for: query) else {
-            return []
-        }
-        
-        let queryCodeEmbedding = CodeEmbedding(
-            id: "query",
-            filePath: "",
-            startLine: 0,
-            endLine: 0,
-            content: query,
-            embedding: queryEmbedding,
-            keywords: []
-        )
-        
-        // Calculate similarity for all stored embeddings
-        let scored = embeddings.values.map { embedding -> (CodeEmbedding, Double) in
-            let similarity = queryCodeEmbedding.similarity(to: embedding)
-            return (embedding, similarity)
-        }
-        
-        // Sort by similarity and return top results
-        return scored
-            .sorted { $0.1 > $1.1 }
-            .prefix(limit)
-            .map { $0.0 }
-    }
-    
-    /// Find similar code to a given code chunk
-    func findSimilar(to codeEmbedding: CodeEmbedding, limit: Int = 5) -> [CodeEmbedding] {
-        let scored = embeddings.values
-            .filter { $0.id != codeEmbedding.id } // Exclude self
-            .map { embedding -> (CodeEmbedding, Double) in
-                let similarity = codeEmbedding.similarity(to: embedding)
-                return (embedding, similarity)
-            }
-        
-        return scored
-            .sorted { $0.1 > $1.1 }
-            .prefix(limit)
-            .map { $0.0 }
-    }
-    
-    /// Clear all embeddings
+
     func clear() {
         embeddings.removeAll()
+        matrixIDs.removeAll()
+        matrixBuffer.removeAll()
+        matrixDirty = true
     }
-    
-    /// Get embedding count
-    var count: Int {
-        return embeddings.count
+
+    var count: Int { embeddings.count }
+
+    // MARK: - Matrix rebuild
+
+    /// Pack all stored embedding vectors into a contiguous row-major Float32
+    /// buffer so that a single matrix multiply covers every chunk at once.
+    private func rebuildMatrix() {
+        let sorted = embeddings.values.sorted { $0.id < $1.id }
+        matrixIDs = sorted.map { $0.id }
+        matrixBuffer = sorted.flatMap { $0.embedding }
+        matrixDirty = false
+    }
+
+    // MARK: - Search  (public)
+
+    /// Returns the top `limit` most-similar chunks to `query`.
+    /// Uses MPS GPU matrix multiply when available, Accelerate vDSP otherwise.
+    nonisolated func search(query: String, limit: Int = 10) -> [CodeEmbedding] {
+        guard let queryVec = generateEmbedding(for: query), !embeddings.isEmpty else {
+            return []
+        }
+
+        if matrixDirty { rebuildMatrix() }
+
+        let n = matrixIDs.count
+        let d = embeddingDimension
+
+        guard matrixBuffer.count == n * d else { return [] }
+
+        let scores: [Float]
+        if mpsAvailable, let device = metalDevice, let queue = commandQueue {
+            scores = mpsCosineSimilarity(queryVec: queryVec, matrix: matrixBuffer,
+                                         n: n, d: d, device: device, queue: queue)
+                ?? accelerateCosineSimilarity(queryVec: queryVec, matrix: matrixBuffer, n: n, d: d)
+        } else {
+            scores = accelerateCosineSimilarity(queryVec: queryVec, matrix: matrixBuffer, n: n, d: d)
+        }
+
+        // Pair scores with IDs, sort, return top-limit chunks
+        let topK = zip(matrixIDs, scores)
+            .sorted { $0.1 > $1.1 }
+            .prefix(limit)
+
+        return topK.compactMap { embeddings[$0.0] }
+    }
+
+    /// Find chunks similar to a specific stored embedding.
+    func findSimilar(to target: CodeEmbedding, limit: Int = 5) -> [CodeEmbedding] {
+        if matrixDirty { rebuildMatrix() }
+
+        let n = matrixIDs.count
+        let d = embeddingDimension
+        guard matrixBuffer.count == n * d else { return [] }
+
+        let scores: [Float]
+        if mpsAvailable, let device = metalDevice, let queue = commandQueue {
+            scores = mpsCosineSimilarity(queryVec: target.embedding, matrix: matrixBuffer,
+                                         n: n, d: d, device: device, queue: queue)
+                ?? accelerateCosineSimilarity(queryVec: target.embedding, matrix: matrixBuffer, n: n, d: d)
+        } else {
+            scores = accelerateCosineSimilarity(queryVec: target.embedding, matrix: matrixBuffer, n: n, d: d)
+        }
+
+        return zip(matrixIDs, scores)
+            .filter { $0.0 != target.id }
+            .sorted { $0.1 > $1.1 }
+            .prefix(limit)
+            .compactMap { embeddings[$0.0] }
+    }
+
+    // MARK: - GPU path: MPS single-precision matrix multiply
+
+    /// Computes  scores = E · q^T  on the GPU where E is [N × D] and q is [1 × D].
+    /// Because every row of E and q are L2-normalised, the dot products equal cosine
+    /// similarities.  Returns nil on any Metal error so the caller can fall back.
+    private func mpsCosineSimilarity(queryVec: [Float],
+                                      matrix: [Float],
+                                      n: Int, d: Int,
+                                      device: MTLDevice,
+                                      queue: MTLCommandQueue) -> [Float]? {
+        // ── Allocate GPU buffers ────────────────────────────────────────────
+        let matrixBytes = n * d * MemoryLayout<Float>.stride
+        let queryBytes  = d     * MemoryLayout<Float>.stride
+        let resultBytes = n     * MemoryLayout<Float>.stride
+
+        guard let matrixBuf = device.makeBuffer(bytes: matrix,
+                                                length: matrixBytes,
+                                                options: .storageModeShared),
+              let queryBuf  = device.makeBuffer(bytes: queryVec,
+                                                length: queryBytes,
+                                                options: .storageModeShared),
+              let resultBuf = device.makeBuffer(length: resultBytes,
+                                                options: .storageModeShared)
+        else { return nil }
+
+        // ── MPS matrix descriptors ─────────────────────────────────────────
+        //  E  : [N × D]  – rows are chunk embeddings
+        //  q  : [D × 1]  – query column vector
+        //  out: [N × 1]  – one dot product per chunk
+        let descE = MPSMatrixDescriptor(rows: n, columns: d,
+                                         rowBytes: d * MemoryLayout<Float>.stride,
+                                         dataType: .float32)
+        let descQ = MPSMatrixDescriptor(rows: d, columns: 1,
+                                         rowBytes: 1 * MemoryLayout<Float>.stride,
+                                         dataType: .float32)
+        let descR = MPSMatrixDescriptor(rows: n, columns: 1,
+                                         rowBytes: 1 * MemoryLayout<Float>.stride,
+                                         dataType: .float32)
+
+        let mpsE = MPSMatrix(buffer: matrixBuf, descriptor: descE)
+        let mpsQ = MPSMatrix(buffer: queryBuf,  descriptor: descQ)
+        let mpsR = MPSMatrix(buffer: resultBuf, descriptor: descR)
+
+        // ── Encode multiply: out = E · q ───────────────────────────────────
+        let matmul = MPSMatrixMultiplication(device: device,
+                                              transposeLeft: false,
+                                              transposeRight: false,
+                                              resultRows: n,
+                                              resultColumns: 1,
+                                              interiorColumns: d,
+                                              alpha: 1.0,
+                                              beta: 0.0)
+
+        guard let cmdBuf = queue.makeCommandBuffer() else { return nil }
+        matmul.encode(commandBuffer: cmdBuf,
+                      leftMatrix: mpsE,
+                      rightMatrix: mpsQ,
+                      resultMatrix: mpsR)
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        guard cmdBuf.error == nil else { return nil }
+
+        // ── Copy results back to CPU ───────────────────────────────────────
+        let ptr = resultBuf.contents().bindMemory(to: Float.self, capacity: n)
+        return Array(UnsafeBufferPointer(start: ptr, count: n))
+    }
+
+    // MARK: - CPU fast-path: Accelerate vDSP matrix-vector multiply
+
+    /// Computes  scores = E · q  on the CPU via vDSP_mmul.
+    /// Much faster than a scalar loop for large N (e.g. 2000 chunks × 768 dims).
+    private func accelerateCosineSimilarity(queryVec: [Float],
+                                             matrix: [Float],
+                                             n: Int, d: Int) -> [Float] {
+        var scores = [Float](repeating: 0, count: n)
+        // vDSP_mmul: C[m×n] = A[m×k] · B[k×n]
+        // Here: scores[N×1] = matrix[N×D] · query[D×1]
+        vDSP_mmul(matrix, 1,
+                  queryVec, 1,
+                  &scores, 1,
+                  vDSP_Length(n),   // rows of result
+                  vDSP_Length(1),   // cols of result
+                  vDSP_Length(d))   // inner dimension
+        return scores
+    }
+
+    // MARK: - Keyword helper
+
+    private func extractKeywords(from text: String) -> [String] {
+        let stopWords: Set<String> = ["the", "and", "or", "but", "for",
+                                      "with", "from", "this", "that",
+                                      "var", "let", "func", "class", "struct"]
+        let words = text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 && !stopWords.contains($0) }
+        return Array(Set(words).prefix(50))
     }
 }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import AppKit
 
 /// Represents a tool call from the AI
 struct ToolCall: Codable {
@@ -72,6 +73,12 @@ class ToolExecutionService {
             return try await executeDone(toolCall)
         case "spawn_subagent":
             return try await executeSpawnSubagent(toolCall)
+        case "browse_page":
+            return try await executeBrowsePage(toolCall)
+        case "browser_click":
+            return try await executeBrowserClick(toolCall)
+        case "browser_type":
+            return try await executeBrowserType(toolCall)
         default:
             return ToolResult(toolUseId: toolCall.id, content: "Unknown tool: \(toolCall.name)", isError: true)
         }
@@ -108,6 +115,11 @@ class ToolExecutionService {
         }
         do {
             let content = try fileService.readFile(at: fileURL)
+            // beforeReadFile hook — fail-closed: deny blocks the read
+            let hookDecision = await HooksService.shared.beforeReadFile(filePath: fileURL.path, content: content)
+            if case .deny(let reason) = hookDecision {
+                return ToolResult(toolUseId: toolCall.id, content: "File read blocked by hook: \(reason)", isError: true)
+            }
             return ToolResult(toolUseId: toolCall.id, content: "File content for '\(filePath)':\n```\n\(content)\n```", isError: false)
         } catch {
             return ToolResult(toolUseId: toolCall.id, content: "Error reading file: \(error.localizedDescription)", isError: true)
@@ -167,6 +179,11 @@ class ToolExecutionService {
                 object: nil,
                 userInfo: ["fileURL": fileURL, "filePath": filePath, "content": newContent, "originalContent": content]
             )
+            // afterFileEdit hook (fire-and-forget — e.g. run formatter)
+            HooksService.shared.afterFileEdit(
+                filePath: fileURL.path,
+                edits: [["old_string": oldValue, "new_string": newValue]]
+            )
             let summary = replaceAll ? " (all occurrences)" : ""
             return ToolResult(toolUseId: toolCall.id, content: "Replaced in \(filePath)\(summary).", isError: false)
         } catch {
@@ -193,6 +210,11 @@ class ToolExecutionService {
                 name: NSNotification.Name("ToolFileWritten"),
                 object: nil,
                 userInfo: ["filePath": filePath, "content": content, "fileURL": fileURL, "originalContent": originalContent ?? ""]
+            )
+            // afterFileEdit hook (fire-and-forget — e.g. run formatter)
+            HooksService.shared.afterFileEdit(
+                filePath: fileURL.path,
+                edits: [["old_string": originalContent ?? "", "new_string": content]]
             )
             return ToolResult(toolUseId: toolCall.id, content: "Successfully wrote file: \(filePath)", isError: false)
         } catch {
@@ -332,7 +354,122 @@ class ToolExecutionService {
         let msg = "Subagent [\(subagentType.displayName)] started in background. Task ID: \(task.id). You can continue with other work; check the Subagents panel for results."
         return ToolResult(toolUseId: toolCall.id, content: msg, isError: false)
     }
-    
+
+    // MARK: - Browser tools
+
+    private func executeBrowsePage(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let urlStr = toolCall.input["url"]?.value as? String else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Missing or invalid 'url'", isError: true)
+        }
+        let action = toolCall.input["action"]?.value as? String ?? "extract_text"
+        let browser = BrowserIntegrationService.shared
+
+        // Auto-detect dev server if url is "auto" or "localhost"
+        var resolvedURL = urlStr
+        if urlStr == "auto" || urlStr == "localhost" || urlStr == "devserver" {
+            if let detected = await browser.detectDevServer() {
+                resolvedURL = detected
+            } else {
+                return ToolResult(toolUseId: toolCall.id,
+                    content: "No dev server found on common ports (3000, 5173, 8080, etc.). Start your dev server first.",
+                    isError: true)
+            }
+        }
+
+        guard URL(string: resolvedURL) != nil else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Invalid URL: \(resolvedURL)", isError: true)
+        }
+
+        do {
+            // Reuse existing Chrome session or launch new one
+            if !browser.isConnected {
+                let reused = await browser.tryReuseExistingSession()
+                if !reused {
+                    try await browser.launchWithDebugging(url: resolvedURL)
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } else {
+                    browser.clearConsoleLog()
+                    try await browser.navigate(to: resolvedURL)
+                    try await Task.sleep(nanoseconds: 1_500_000_000)
+                }
+            } else {
+                browser.clearConsoleLog()
+                try await browser.navigate(to: resolvedURL)
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+
+            // Build console context for agent
+            let logPath = browser.consoleLogFileURL.path
+            let logLines = (try? String(contentsOfFile: logPath))?.components(separatedBy: .newlines).filter { !$0.isEmpty } ?? []
+            let consoleCtx: String
+            if logLines.isEmpty {
+                consoleCtx = "Console: (no messages)"
+            } else {
+                let preview = logLines.suffix(5).joined(separator: "\n")
+                consoleCtx = "Console: \(logLines.count) line(s). Preview:\n\(preview)\nFull log at: \(logPath)"
+            }
+
+            switch action {
+            case "screenshot":
+                let filePath = try await browser.screenshotToFile()
+                return ToolResult(
+                    toolUseId: toolCall.id,
+                    content: "Screenshot saved to: \(filePath)\nRead it with read_file to see the image.\nURL: \(resolvedURL)\n\(consoleCtx)",
+                    isError: false
+                )
+
+            case "get_links":
+                let links = try await browser.executeJavaScript(
+                    "Array.from(document.querySelectorAll('a[href]')).slice(0,30).map(a=>a.href+'|'+a.textContent.trim()).join('\\n')"
+                )
+                let linksStr = (links as? String) ?? "(none)"
+                return ToolResult(toolUseId: toolCall.id,
+                    content: "Links on \(resolvedURL):\n\(linksStr)\n\n\(consoleCtx)", isError: false)
+
+            default: // extract_text
+                let selector = toolCall.input["selector"]?.value as? String
+                let js: String
+                if let sel = selector {
+                    js = "document.querySelector('\(sel)')?.innerText ?? '(element not found)'"
+                } else {
+                    js = "document.title + '\\n\\n' + (document.body?.innerText ?? '').slice(0, 4000)"
+                }
+                let text = try await browser.executeJavaScript(js)
+                let textStr = (text as? String) ?? "(no content)"
+                return ToolResult(toolUseId: toolCall.id,
+                    content: "URL: \(resolvedURL)\n\n\(textStr)\n\n\(consoleCtx)", isError: false)
+            }
+        } catch {
+            return ToolResult(toolUseId: toolCall.id,
+                content: "Browser error: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func executeBrowserClick(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let selector = toolCall.input["selector"]?.value as? String else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Missing 'selector'", isError: true)
+        }
+        do {
+            try await BrowserIntegrationService.shared.click(selector: selector)
+            return ToolResult(toolUseId: toolCall.id, content: "Clicked element: \(selector)", isError: false)
+        } catch {
+            return ToolResult(toolUseId: toolCall.id, content: "Click failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func executeBrowserType(_ toolCall: ToolCall) async throws -> ToolResult {
+        guard let selector = toolCall.input["selector"]?.value as? String,
+              let text = toolCall.input["text"]?.value as? String else {
+            return ToolResult(toolUseId: toolCall.id, content: "Error: Missing 'selector' or 'text'", isError: true)
+        }
+        do {
+            try await BrowserIntegrationService.shared.type(selector: selector, text: text)
+            return ToolResult(toolUseId: toolCall.id, content: "Typed into \(selector): \"\(text)\"", isError: false)
+        } catch {
+            return ToolResult(toolUseId: toolCall.id, content: "Type failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     private func resolveFilePath(_ path: String) -> URL {
         if path.hasPrefix("/") {
             return URL(fileURLWithPath: path)

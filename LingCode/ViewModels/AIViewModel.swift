@@ -156,6 +156,15 @@ class AIViewModel: ObservableObject {
     
     func sendMessage(context: String? = nil, projectURL: URL? = nil, images: [AttachedImage] = [], forceEditMode: Bool = false) {
         guard !currentInput.isEmpty, !isLoading else { return }
+
+        // Handle /summarize slash command
+        if currentInput.trimmingCharacters(in: .whitespaces).lowercased() == "/summarize" {
+            currentInput = ""
+            Task {
+                await conversation.autoSummarizeIfNeeded(threshold: 0) // force summarize regardless of size
+            }
+            return
+        }
         
         let userMessage = currentInput
         currentInput = ""
@@ -427,7 +436,8 @@ class AIViewModel: ObservableObject {
                     let (sys, user) = SpecPromptAssemblyService.buildPrompt(
                         userMessage: userMessage,
                         context: finalFullContext.isEmpty ? nil : finalFullContext,
-                        workspaceRootURL: workspaceRoot
+                        workspaceRootURL: workspaceRoot,
+                        activeFilePath: editorViewModel?.editorState.activeDocument?.filePath?.path
                     )
                     return (sys, user, nil)
                 }
@@ -772,6 +782,11 @@ class AIViewModel: ObservableObject {
                 } else {
                     self.isLoading = false
                     self.isGeneratingProject = false
+                }
+
+                // Auto-summarize if context is getting large (runs in background)
+                Task {
+                    await self.conversation.autoSummarizeIfNeeded()
                 }
                 
                 // Track performance metrics

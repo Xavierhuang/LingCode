@@ -40,6 +40,10 @@ struct ContentView: View {
     @State private var bottomPanelHeight: CGFloat = 200
     @State private var selectedBottomTab: BottomPanelTab = .problems
     @StateObject private var terminalManager = TerminalSessionManager()
+
+    // Toolbar popovers (Push / Deploy)
+    @State private var showPushPopover: Bool = false
+    @State private var showDeployPopover: Bool = false
     
     // Definition/References
     @State private var definitions: [Definition] = []
@@ -177,7 +181,7 @@ struct ContentView: View {
                 Button(action: {
                     showQuickOpen = true
                 }) {
-                    Label("Quick Open", systemImage: "magnifyingglass")
+                    Label("Quick Open", systemImage: "doc.text.magnifyingglass")
                 }
                 .keyboardShortcut("p", modifiers: .command)
                 .help("Quick Open File (⌘P)")
@@ -190,6 +194,38 @@ struct ContentView: View {
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(viewModel.editorState.activeDocument == nil)
                 .help("Save File (⌘S)")
+
+                Divider()
+
+                Button(action: {
+                    showPushPopover = true
+                }) {
+                    Label("Push", systemImage: "arrow.up.circle.fill")
+                }
+                .disabled(viewModel.rootFolderURL == nil)
+                .popover(isPresented: $showPushPopover, arrowEdge: .bottom) {
+                    if let url = viewModel.rootFolderURL {
+                        MagicPushView(projectURL: url) {
+                            showPushPopover = false
+                        }
+                    }
+                }
+                .help("Magic Push — stage, AI commit message, and push")
+
+                Button(action: {
+                    showDeployPopover = true
+                }) {
+                    Label("Deploy", systemImage: "bolt.fill")
+                }
+                .disabled(viewModel.rootFolderURL == nil)
+                .popover(isPresented: $showDeployPopover, arrowEdge: .bottom) {
+                    if let url = viewModel.rootFolderURL {
+                        MagicDeployView(projectURL: url) {
+                            showDeployPopover = false
+                        }
+                    }
+                }
+                .help("Magic Deploy — paste a token or SSH string to deploy")
                 
                 Button(action: {
                     showSearch.toggle()
@@ -203,7 +239,7 @@ struct ContentView: View {
                 Button(action: {
                     showGlobalSearch.toggle()
                 }) {
-                    Label("Search in Files", systemImage: "doc.text.magnifyingglass")
+                    Label("Search in Files", systemImage: "text.magnifyingglass")
                 }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
                 .help("Search in Files (⌘⇧F)")
@@ -269,7 +305,12 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .help(showAIPanel ? "Hide AI Panel (⌘⇧L)" : "Show AI Panel (⌘⇧L)")
-                
+
+                // Checkpoints (time-travel undo history)
+                if let url = viewModel.rootFolderURL {
+                    TimeTravelButton(workspaceURL: url)
+                }
+
                 Button(action: {
                     showSettings.toggle()
                 }) {
@@ -359,6 +400,15 @@ struct ContentView: View {
             viewModel.editorState.ensureClaudeCodeTab()
             selectedActivity = .ai
             showAIPanel = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TerminalSendCommand"))) { notification in
+            selectedBottomTab = .terminal
+            showBottomPanel = true
+            if let command = notification.object as? String {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    terminalManager.sendCommand(command)
+                }
+            }
         }
         .sheet(isPresented: $showGlobalSearch) {
             GlobalSearchView(viewModel: viewModel, isPresented: $showGlobalSearch)

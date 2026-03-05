@@ -50,7 +50,7 @@ class AgentService: ObservableObject, Identifiable {
     private var noToolUseCount = 0
     private let maxNoToolUseRetries = 2
     private let maxRepeatedSearches = 2  // Stop after 2 searches for same/similar query
-    private let maxRepeatedFileReads = 2  // Stop after 2 reads of same file
+    private let maxRepeatedFileReads = 1  // Allow only 1 read per file; serve cached content on repeat
     private var incompleteWriteRetryCount = 0  // Retry once when write_file stream ends early
     private var currentTaskStepStartIndex: Int = 0  // Index of first step of current task (for continuous conversation)
 
@@ -111,7 +111,10 @@ class AgentService: ObservableObject, Identifiable {
         let task = AgentTask(description: taskDescription, projectURL: projectURL, startTime: Date())
         resetForNewTask(task)
         AgentHistoryService.shared.saveAgentTask(task, steps: [], result: nil, status: .running)
-        
+
+        // Set project URL for hooks
+        HooksService.shared.setProjectURL(projectURL)
+
         var enrichedContext = context ?? ""
         if let projectURL = projectURL, isVagueTask(taskDescription) {
             let files = listProjectFiles(at: projectURL, maxDepth: 2)
@@ -119,8 +122,16 @@ class AgentService: ObservableObject, Identifiable {
                 enrichedContext = "Project files:\n\(files.prefix(30).joined(separator: "\n"))\n\n\(enrichedContext)"
             }
         }
-        
-        runNextIteration(task: task, projectURL: projectURL, originalContext: enrichedContext.isEmpty ? nil : enrichedContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+
+        // Fire sessionStart hook — may inject additional context
+        Task { @MainActor in
+            if let additionalContext = await HooksService.shared.fireSessionStart(
+                task: taskDescription, mode: "agent"
+            ), !additionalContext.isEmpty {
+                enrichedContext += "\n\n\(additionalContext)"
+            }
+            self.runNextIteration(task: task, projectURL: projectURL, originalContext: enrichedContext.isEmpty ? nil : enrichedContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+        }
     }
     
     func resumeWithApproval(_ approved: Bool) {
@@ -207,7 +218,7 @@ class AgentService: ObservableObject, Identifiable {
                 let (previousTaskDescription, lastTaskOutcome) = self.previousTaskContext
                 let prompt = AgentPromptBuilder.buildPrompt(task: task, history: history, filesRead: filesRead, agentMemory: agentMemory, loopDetectionHint: loopDetectionHint, requiresModifications: requiresModifications, noFilesWrittenYet: noFilesWrittenYet, iterationCount: self.iterationCount, filesWrittenCount: filesWrittenCount, projectStructure: projectStructure, previousTaskDescription: previousTaskDescription, lastTaskOutcome: lastTaskOutcome)
                 
-                var agentTools: [AITool] = [.runTerminalCommand(), .searchReplace(), .writeFile(), .codebaseSearch(), .searchWeb(), .readFile(), .readDirectory(), .spawnSubagent(), .done()]
+                var agentTools: [AITool] = [.runTerminalCommand(), .searchReplace(), .writeFile(), .codebaseSearch(), .searchWeb(), .readFile(), .readDirectory(), .browsePage(), .browserClick(), .browserType(), .spawnSubagent(), .done()]
                 
                 // Dynamic tool filtering to prevent loops
                 if self.iterationCount > 3 && !filesRead.isEmpty && filesWrittenCount == 0 && requiresModifications {
@@ -377,8 +388,8 @@ class AgentService: ObservableObject, Identifiable {
 
                 // Process all tool calls in sequence (batch execution). Defer to avoid "Publishing changes from within view updates".
                 let toolCallsCopy = allToolCalls
-                DispatchQueue.main.async {
-                    self.processToolCallBatch(
+                Task { @MainActor in
+                    await self.processToolCallBatch(
                         toolCalls: toolCallsCopy,
                         task: task,
                         projectURL: projectURL,
@@ -447,14 +458,14 @@ class AgentService: ObservableObject, Identifiable {
         images: [AttachedImage],
         onStepUpdate: @escaping (AgentStep) -> Void,
         onComplete: @escaping (AgentTaskResult) -> Void
-    ) {
+    ) async {
         guard startIndex < toolCalls.count else {
             runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
             return
         }
         let tc = toolCalls[startIndex]
         guard let decision = convertToolCallToDecision(tc) else {
-            processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            await processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
             return
         }
         let isDone = decision.action.lowercased() == "done"
@@ -474,11 +485,52 @@ class AgentService: ObservableObject, Identifiable {
         if isDone {
             updateStep(step.id, status: .completed, output: decision.thought)
             print("[AgentService] Done action completed - finalizing task")
-            finalize(success: true, error: nil, projectURL: projectURL, onComplete: onComplete)
+            finalize(success: true, error: nil, projectURL: projectURL, summary: decision.thought, onComplete: onComplete)
             return
         }
         let replaceOld = tc.input["old_string"]?.value as? String
         let replaceNew = tc.input["new_string"]?.value as? String
+
+        // ── Safety check ───────────────────────────────────────────────────
+        let safetyResult = AgentSafetyGuard.shared.check(decision)
+        switch safetyResult {
+        case .blocked(let reason):
+            updateStep(step.id, status: .failed, error: "Blocked: \(reason)")
+            await processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            return
+        case .needsApproval(let reason):
+            // Pause and ask the user
+            pendingApproval = decision
+            pendingApprovalReason = reason
+            pendingExecutionContext = PendingExecutionContext(
+                decision: decision,
+                task: task,
+                projectURL: projectURL,
+                originalContext: originalContext,
+                images: images,
+                onStepUpdate: onStepUpdate,
+                onComplete: onComplete,
+                stepId: step.id
+            )
+            AgentCoordinator.shared.notifyNeedsApproval(agentId: self.id)
+            return
+        case .safe:
+            break
+        }
+
+        // ── preToolUse hook ────────────────────────────────────────────────
+        let hookDecision = await HooksService.shared.preToolUse(
+            toolName: tc.name,
+            toolInput: Dictionary(uniqueKeysWithValues: tc.input.map { ($0.key, $0.value.value) })
+        )
+        switch hookDecision {
+        case .deny(let reason):
+            updateStep(step.id, status: .failed, error: "Hook denied: \(reason)")
+            await processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+            return
+        default:
+            break
+        }
         executeDecision(decision, toolCall: tc, agentTaskId: task.id, projectURL: projectURL, onOutput: { output in
             DispatchQueue.main.async { self.updateStep(step.id, output: output, append: true) }
         }, onComplete: { success, output, originalContent in
@@ -488,7 +540,9 @@ class AgentService: ObservableObject, Identifiable {
                     self.runNextIteration(task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
                     return
                 }
-                self.processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                Task { @MainActor in
+                    await self.processToolCallBatch(toolCalls: toolCalls, startIndex: startIndex + 1, task: task, projectURL: projectURL, originalContext: originalContext, images: images, onStepUpdate: onStepUpdate, onComplete: onComplete)
+                }
             }
         })
     }
@@ -497,7 +551,7 @@ class AgentService: ObservableObject, Identifiable {
         switch decision.action.lowercased() {
         case "done":
             let summary = decision.thought ?? "Task completed successfully"
-            onOutput("Task Complete\n\n\(summary)")
+            onOutput(summary)
             onComplete(true, summary, nil)
 
         case "terminal":
@@ -505,7 +559,30 @@ class AgentService: ObservableObject, Identifiable {
                 onComplete(false, "No command provided", nil)
                 return
             }
-            terminalService.execute(cmd, workingDirectory: projectURL, onOutput: { onOutput($0) }, onError: { onOutput("Error: \($0)") }, onComplete: { onComplete($0 == 0, "Exit code: \($0)", nil) })
+            // beforeShellExecution hook
+            Task { @MainActor in
+                let hookResult = await HooksService.shared.beforeShellExecution(command: cmd, cwd: projectURL)
+                switch hookResult {
+                case .deny(let reason):
+                    onOutput("Hook denied: \(reason)")
+                    onComplete(false, "Denied by hook: \(reason)", nil)
+                default:
+                    let start = Date()
+                    self.terminalService.execute(cmd, workingDirectory: projectURL,
+                        onOutput: { onOutput($0) },
+                        onError: { onOutput("Error: \($0)") },
+                        onComplete: { code in
+                            let ms = Int(Date().timeIntervalSince(start) * 1000)
+                            // afterShellExecution hook (fire-and-forget)
+                            // We don't have full output here so pass the exit code as output
+                            HooksService.shared.afterShellExecution(
+                                command: cmd, output: "Exit code: \(code)", durationMs: ms
+                            )
+                            onComplete(code == 0, "Exit code: \(code)", nil)
+                        }
+                    )
+                }
+            }
 
         case "search_replace":
             guard let call = toolCall else {
@@ -608,45 +685,48 @@ class AgentService: ObservableObject, Identifiable {
         case "file":
             guard let path = decision.filePath else { onComplete(false, "No path", nil); return }
             
-            // Normalize the path for comparison (handle relative/absolute, case differences)
-            let url = (projectURL ?? URL(fileURLWithPath: "")).appendingPathComponent(path)
-            let normalizedPath = url.standardizedFileURL.path.lowercased()
+            // Resolve to absolute URL — relative paths are joined with projectURL.
+            // Absolute paths are used directly so we never double-prepend the root.
+            let resolvedURL: URL
+            if path.hasPrefix("/") {
+                resolvedURL = URL(fileURLWithPath: path).standardizedFileURL
+            } else {
+                resolvedURL = (projectURL ?? URL(fileURLWithPath: ""))
+                    .appendingPathComponent(path)
+                    .standardizedFileURL
+            }
+            // Single canonical key used for ALL tracking — lowercase absolute path.
+            let canonicalKey = resolvedURL.path.lowercased()
+            let filename = resolvedURL.lastPathComponent.lowercased()
             
-            // Also check just the filename for simple cases
-            let filename = url.lastPathComponent.lowercased()
+            // Count reads by canonical path only (filename alias is just a fallback lookup)
+            let readCount = filesReadThisTask[canonicalKey] ?? 0
             
-            // Check for repeated file reads using both full path and filename
-            let readCountByPath = filesReadThisTask[normalizedPath] ?? 0
-            let readCountByFilename = filesReadThisTask[filename] ?? 0
-            let totalReadCount = max(readCountByPath, readCountByFilename)
+            print("[AgentService] File read check: '\(path)' -> canonical: '\(canonicalKey)', read count: \(readCount)")
             
-            print("[AgentService] File read check: '\(path)' -> normalized: '\(normalizedPath)', filename: '\(filename)', read count: \(totalReadCount)")
-            
-            if totalReadCount >= maxRepeatedFileReads {
-                if let cached = lastFileContentByPath[normalizedPath] ?? lastFileContentByPath[filename] {
+            if readCount >= maxRepeatedFileReads {
+                // Return cached content so the AI has what it needs and moves on
+                let cached = lastFileContentByPath[canonicalKey] ?? lastFileContentByPath[filename] ?? ""
+                if !cached.isEmpty {
                     print("[AgentService] Returning cached content for repeated read: \(path)")
-                    onOutput("(Cached from previous read - use exact strings from below for search_replace)\n\n\(cached)")
-                    onComplete(true, "Cached content - proceed with search_replace or done", nil)
-                    return
+                    onOutput("(Cached from previous read)\n\n\(cached)")
+                } else {
+                    print("[AgentService] BLOCKING repeated file read (no cache): \(path)")
+                    onOutput("File '\(path)' was already read. Use the content from the conversation history above.")
                 }
-                print("[AgentService] BLOCKING repeated file read for: \(path)")
-                onOutput("File '\(path)' was already read \(totalReadCount) times. The content is in the history above. Please proceed with your task using that information.")
-                failedActions.insert("file:\(normalizedPath)")
-                onComplete(false, "File already read - use existing content from history", nil)
+                onComplete(true, "Already read — using cached content", nil)
                 return
             }
             
-            // Track by both path and filename
-            filesReadThisTask[normalizedPath] = totalReadCount + 1
-            filesReadThisTask[filename] = totalReadCount + 1
+            filesReadThisTask[canonicalKey] = readCount + 1
             
-            if let content = try? String(contentsOf: url) {
-                lastFileContentByPath[normalizedPath] = content
+            if let content = try? String(contentsOf: resolvedURL) {
+                lastFileContentByPath[canonicalKey] = content
                 lastFileContentByPath[filename] = content
                 onOutput(content)
                 onComplete(true, "Read file", nil)
             } else {
-                onComplete(false, "Failed to read file", nil)
+                onComplete(false, "Failed to read file: \(resolvedURL.path)", nil)
             }
              
         case "directory":
@@ -790,7 +870,24 @@ class AgentService: ObservableObject, Identifiable {
         let stepsForSummary = currentTaskSteps
         let finalSummary = success ? (summary ?? AgentSummaryGenerator.generateTaskSummary(from: stepsForSummary)) : (error ?? "Task failed")
         steps.append(AgentStep(type: .complete, description: "Task Complete", status: .completed, output: finalSummary))
-        onComplete(AgentTaskResult(success: success, error: error, steps: steps))
+        let status = success ? "completed" : (isCancelled ? "aborted" : "error")
+        let result = AgentTaskResult(success: success, error: error, steps: steps)
+
+        // Fire stop hook; it may return a follow-up message to auto-iterate.
+        // sessionEnd is always fired after.
+        Task { @MainActor [weak self] in
+            let followUp = await HooksService.shared.fireStop(status: status)
+            HooksService.shared.fireSessionEnd(status: status, durationMs: 0)
+            onComplete(result)
+            // If the hook wants to continue, post a notification for the UI.
+            if let msg = followUp, !msg.isEmpty {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("AgentHookFollowUp"),
+                    object: self,
+                    userInfo: ["message": msg]
+                )
+            }
+        }
     }
 
     private func addStep(_ step: AgentStep, onUpdate: @escaping (AgentStep) -> Void) {

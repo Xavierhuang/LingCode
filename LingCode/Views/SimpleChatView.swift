@@ -21,16 +21,33 @@ struct SimpleChatView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(viewModel.conversation.messages) { message in
-                            MessageBubble(
-                                message: message,
-                                isStreaming: viewModel.isLoading && message.id == viewModel.conversation.messages.last?.id,
-                                workingDirectory: editorViewModel.rootFolderURL,
-                                onCopyCode: { code in
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(code, forType: .string)
-                                }
-                            )
-                            .id(message.id)
+                            if message.isSummary {
+                                // Summary pill — collapsed by default
+                                SummaryBannerView(content: message.content)
+                            } else {
+                                MessageBubble(
+                                    message: message,
+                                    isStreaming: viewModel.isLoading && message.id == viewModel.conversation.messages.last?.id,
+                                    workingDirectory: editorViewModel.rootFolderURL,
+                                    onCopyCode: { code in
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(code, forType: .string)
+                                    }
+                                )
+                                .id(message.id)
+                            }
+                        }
+
+                        // Summarizing indicator
+                        if viewModel.conversation.isSummarizing {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.6).frame(width: 12, height: 12)
+                                Text("Summarizing conversation…")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
                         }
                         
                         if viewModel.isLoading && viewModel.conversation.messages.isEmpty {
@@ -252,5 +269,54 @@ struct SimpleChatView: View {
         }
         
         return handled
+    }
+}
+
+// MARK: - Summary banner
+
+/// Collapsible pill shown in the chat when old messages have been summarised.
+struct SummaryBannerView: View {
+    let content: String
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.badge.checkmark")
+                        .font(.system(size: 11))
+                        .foregroundColor(.accentColor)
+                    Text("Conversation summary")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.accentColor)
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.accentColor.opacity(0.2), lineWidth: 0.5)
+                )
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            if expanded {
+                Text(content)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
     }
 }

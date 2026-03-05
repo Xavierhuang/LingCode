@@ -210,7 +210,13 @@ class DeploymentService: ObservableObject {
         result.warnings = []
         
         // Check CLI availability
-        if let cli = config.platform.cliCommand {
+        // Skip local CLI check for SSH / custom deployments — the command
+        // runs on the remote server, not locally.
+        let skipCLICheck = (config.platform == .docker || config.platform == .custom)
+            && config.customDeployCommand != nil
+        if skipCLICheck {
+            result.cliAvailable = true
+        } else if let cli = config.platform.cliCommand {
             let cliCheck = terminalService.executeSync("which \(cli)")
             result.cliAvailable = cliCheck.exitCode == 0
             if !result.cliAvailable {
@@ -345,10 +351,41 @@ class DeploymentService: ObservableObject {
         status = .deploying
         appendLog("[Deploy] Starting deployment to \(config.platform.rawValue)...")
         
-        let deployCommand = getDeployCommand(for: config)
-        appendLog("[Deploy] Command: \(deployCommand)")
+        let rawCommand = getDeployCommand(for: config)
+        
+        // For multi-line scripts (SSH deploy), write to a temp file and run with bash
+        // so the terminal sees clean execution output, not the script source.
+        let deployCommand: String
+        let tempScriptURL: URL?
+        if rawCommand.contains("\n") {
+            let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("lingcode_deploy_\(UUID().uuidString).sh")
+            do {
+                try rawCommand.write(to: tmpURL, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: tmpURL.path
+                )
+                deployCommand = tmpURL.path
+                tempScriptURL = tmpURL
+                appendLog("[Deploy] Running deploy script...")
+            } catch {
+                deployCommand = rawCommand
+                tempScriptURL = nil
+                appendLog("[Deploy] Command: \(rawCommand)")
+            }
+        } else {
+            deployCommand = rawCommand
+            tempScriptURL = nil
+            appendLog("[Deploy] Command: \(rawCommand)")
+        }
         
         let deployResult = await runCommand(deployCommand, in: url, timeout: 600)
+        
+        // Clean up temp script
+        if let tmp = tempScriptURL {
+            try? FileManager.default.removeItem(at: tmp)
+        }
         
         // Parse deployment URL from output
         let deployedURL = parseDeploymentURL(from: deployResult.output, platform: config.platform)
@@ -480,47 +517,75 @@ class DeploymentService: ObservableObject {
     }
     
     // MARK: - Command Execution
-    
+
     private func runCommand(_ command: String, in directory: URL, timeout: TimeInterval) async -> (exitCode: Int32, output: String) {
         return await withCheckedContinuation { continuation in
-            var output = ""
-            var completed = false
-            
-            terminalService.execute(
-                command,
-                workingDirectory: directory,
-                environment: nil,
-                onOutput: { text in
-                    output += text
-                    Task { @MainActor in
-                        self.appendLog(text)
-                    }
-                },
-                onError: { error in
-                    output += error
-                    Task { @MainActor in
-                        self.appendLog("[ERROR] \(error)")
-                    }
-                },
-                onComplete: { exitCode in
-                    if !completed {
-                        completed = true
-                        continuation.resume(returning: (exitCode, output))
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+
+                proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+                proc.arguments = ["-c", command]
+                proc.currentDirectoryURL = directory
+
+                var env: [String: String] = [
+                    "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+                    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                ]
+                if let sock = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
+                    env["SSH_AUTH_SOCK"] = sock
+                }
+                proc.environment = env
+                proc.standardOutput = outPipe
+                proc.standardError  = errPipe
+
+                let timer = DispatchWorkItem {
+                    proc.terminate()
+                }
+
+                do { try proc.run() } catch {
+                    continuation.resume(returning: (-1, error.localizedDescription))
+                    return
+                }
+
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+
+                // Read stderr on a side thread
+                let errQueue = DispatchQueue(label: "lc.deploy.err")
+                errQueue.async {
+                    while true {
+                        let data = errPipe.fileHandleForReading.availableData
+                        if data.isEmpty { break }
+                        if let s = String(data: data, encoding: .utf8) {
+                            Task { @MainActor in self.appendLog("[ERROR] \(s)") }
+                        }
                     }
                 }
-            )
-            
-            // Timeout handling
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if !completed {
-                    completed = true
-                    self.terminalService.cancel()
-                    continuation.resume(returning: (-1, output + "\n[TIMEOUT] Command timed out after \(Int(timeout)) seconds"))
+
+                var fullOutput = ""
+                while true {
+                    let data = outPipe.fileHandleForReading.availableData
+                    if data.isEmpty { break }
+                    if let s = String(data: data, encoding: .utf8) {
+                        fullOutput += s
+                        Task { @MainActor in self.appendLog(s) }
+                    }
                 }
+
+                proc.waitUntilExit()
+                timer.cancel()
+
+                let remaining = errPipe.fileHandleForReading.readDataToEndOfFile()
+                if let s = String(data: remaining, encoding: .utf8), !s.isEmpty {
+                    fullOutput += s
+                }
+
+                continuation.resume(returning: (proc.terminationStatus, fullOutput))
             }
         }
     }
-    
+
     private func appendLog(_ text: String) {
         deploymentLogs += text
         if !text.hasSuffix("\n") {

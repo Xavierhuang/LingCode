@@ -8,6 +8,7 @@
 import Foundation
 import Combine
 import AppKit
+import Darwin
 
 // MARK: - Browser Types
 
@@ -80,6 +81,16 @@ class BrowserIntegrationService: ObservableObject {
     @Published var tabs: [BrowserTab] = []
     @Published var consoleMessages: [ConsoleMessage] = []
     @Published var lastError: String?
+
+    /// Path to the rolling console log file — agents can grep this for errors.
+    private(set) var consoleLogFileURL: URL = {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("lingcode_browser_logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("console.log")
+    }()
+
+    /// Last detected dev-server port (e.g. 3000, 5173, 8080).
+    @Published var detectedDevServerPort: Int?
     
     private var debuggingPort: Int = 9222
     private var webSocketTask: URLSessionWebSocketTask?
@@ -668,9 +679,11 @@ class BrowserIntegrationService: ObservableObject {
                 )
                 Task { @MainActor in
                     consoleMessages.append(consoleMsg)
-                    if consoleMessages.count > 100 {
-                        consoleMessages = Array(consoleMessages.suffix(100))
+                    if consoleMessages.count > 500 {
+                        consoleMessages = Array(consoleMessages.suffix(500))
                     }
+                    // Write to grep-able log file
+                    self.appendConsoleLogToFile(consoleMsg)
                 }
             }
             
@@ -684,6 +697,96 @@ class BrowserIntegrationService: ObservableObject {
         }
     }
     
+    // MARK: - Console log file
+
+    private func appendConsoleLogToFile(_ msg: ConsoleMessage) {
+        let df = ISO8601DateFormatter()
+        let line = "[\(df.string(from: msg.timestamp))] [\(msg.level.rawValue.uppercased())] \(msg.message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: consoleLogFileURL.path) {
+                if let handle = try? FileHandle(forWritingTo: consoleLogFileURL) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: consoleLogFileURL)
+            }
+        }
+    }
+
+    /// Clear the console log file (call at start of each new navigation).
+    func clearConsoleLog() {
+        try? "".write(to: consoleLogFileURL, atomically: true, encoding: .utf8)
+        Task { @MainActor in consoleMessages.removeAll() }
+    }
+
+    // MARK: - Screenshot to file
+
+    /// Take a screenshot and save it to a temp file. Returns the file path so
+    /// the agent can read it as an image (same pattern as read_file).
+    func screenshotToFile() async throws -> String {
+        guard currentBrowser == .chrome else { throw BrowserError.unsupportedOperation }
+        let result = try await sendCommand("Page.captureScreenshot", params: ["format": "png"])
+        guard let dataString = result["data"] as? String,
+              let data = Data(base64Encoded: dataString) else {
+            throw BrowserError.unsupportedOperation
+        }
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("lingcode_browser_logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("screenshot_\(Int(Date().timeIntervalSince1970)).png")
+        try data.write(to: fileURL)
+        return fileURL.path
+    }
+
+    // MARK: - Dev server detection
+
+    /// Scan common dev-server ports and return the first one that responds.
+    /// Sets `detectedDevServerPort` and returns the full localhost URL.
+    func detectDevServer() async -> String? {
+        let ports = [3000, 3001, 4000, 5000, 5173, 8000, 8080, 8888, 9000]
+        for port in ports {
+            if await portIsListening(port) {
+                await MainActor.run { self.detectedDevServerPort = port }
+                return "http://localhost:\(port)"
+            }
+        }
+        return nil
+    }
+
+    private func portIsListening(_ port: Int) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let sock = socket(AF_INET, SOCK_STREAM, 0)
+                guard sock >= 0 else { continuation.resume(returning: false); return }
+                defer { close(sock) }
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = UInt16(port).bigEndian
+                addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+                let result = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                continuation.resume(returning: result == 0)
+            }
+        }
+    }
+
+    // MARK: - Session reuse
+
+    /// Try to connect to an already-running Chrome debugging session before launching a new one.
+    /// Returns true if an existing session was found.
+    func tryReuseExistingSession() async -> Bool {
+        do {
+            try await connectToDevTools()
+            return isConnected
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - AppleScript Helpers
     
     private func executeAppleScript(_ script: String) throws {

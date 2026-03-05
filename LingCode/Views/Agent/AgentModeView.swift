@@ -119,6 +119,10 @@ struct AgentModeView: View {
                     onDeny: {
                         agent.resumeWithApproval(false)
                         showApprovalDialog = false
+                    },
+                    onAllowlist: { _ in
+                        agent.resumeWithApproval(true)
+                        showApprovalDialog = false
                     }
                 )
             }

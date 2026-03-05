@@ -12,6 +12,8 @@ struct StatusBarView: View {
     let fontSize: CGFloat
     var editorViewModel: EditorViewModel? = nil
 
+    @State private var isDeployPopoverPresented = false
+
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.md) {
             if let document = editorState.activeDocument {
@@ -56,6 +58,33 @@ struct StatusBarView: View {
 
             CodebaseIndexStatusView(editorViewModel: editorViewModel)
                 .animation(DesignSystem.Animation.smooth, value: editorState.activeDocument?.filePath)
+
+            // Magic Deploy trigger — opens popover anchored to status bar
+            if let url = editorViewModel?.rootFolderURL {
+                Divider()
+                    .frame(height: 12)
+
+                MagicPushButton(projectURL: url)
+
+                Button {
+                    isDeployPopoverPresented.toggle()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Deploy")
+                            .font(DesignSystem.Typography.caption2)
+                    }
+                    .foregroundColor(.accentColor)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .popover(isPresented: $isDeployPopoverPresented, arrowEdge: .top) {
+                    MagicDeployView(projectURL: url) {
+                        isDeployPopoverPresented = false
+                    }
+                }
+                .help("Magic Deploy — paste a token or SSH string to deploy instantly")
+            }
 
             HStack(spacing: DesignSystem.Spacing.md) {
                 Text("UTF-8")

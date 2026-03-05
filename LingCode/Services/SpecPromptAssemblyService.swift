@@ -81,20 +81,33 @@ enum SpecPromptAssemblyService {
     ///   - userMessage: Exact user input.
     ///   - context: Editor/selection/attachments etc. Injected into ## Context (if any).
     ///   - workspaceRootURL: Project root for loading WORKSPACE.md.
+    ///   - activeFilePath: Path of the currently active editor file, used to match file-scoped rules.
     /// - Returns: (systemPrompt, userMessage). Use userMessage as the single user turn and pass context: nil to the AI service.
     static func buildPrompt(
         userMessage: String,
         context: String?,
-        workspaceRootURL: URL?
+        workspaceRootURL: URL?,
+        activeFilePath: String? = nil
     ) -> (systemPrompt: String, userMessage: String) {
         var system = coreSystemPrompt
         
-        // Add team rules first (lowest precedence in system prompt, but still in system)
+        // Team rules — lowest precedence in system prompt
         if let teamRules = TeamRulesService.shared.getTeamRulesForAI() {
             system += "\n\n\(teamRules)"
         }
         
-        // Add workspace rules (higher precedence than team rules)
+        // User rules (global_rules.md + user_rules.json loaded by LingCodeRulesService)
+        if let userRules = LingCodeRulesService.shared.getRulesForAI() {
+            system += "\n\n\(userRules)"
+        }
+        
+        // .cursor/rules/ directory files + project-level rules (file-scoped and always-apply)
+        let projectRulesPrompt = RulesService.shared.generateRulesPrompt(for: activeFilePath)
+        if !projectRulesPrompt.isEmpty {
+            system += "\n\n\(projectRulesPrompt)"
+        }
+        
+        // Workspace rules (WORKSPACE.md / .cursorrules / .lingcode) — highest precedence
         if let raw = loadWorkspaceRules(workspaceRootURL: workspaceRootURL) {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {

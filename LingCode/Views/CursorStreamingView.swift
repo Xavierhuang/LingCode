@@ -1165,8 +1165,64 @@ struct CursorStreamingView: View {
     private func sendMessage() {
         guard !viewModel.currentInput.isEmpty else { return }
 
-        // Defer all state mutations to avoid "Publishing changes from within view updates"
         let userRequest = viewModel.currentInput
+
+        // --- Slash command interception ---
+        let skillsService = SkillsService.shared
+        if let (skill, args) = skillsService.parseSlashCommand(userRequest) {
+            viewModel.currentInput = ""
+            Task { @MainActor in
+                await Task.yield()
+                updateCoordinator.reset()
+                verificationStatus = nil
+                lastUserRequest = "/\(skill.name)"
+
+                let context = await editorViewModel.getContextForAI(query: userRequest) ?? ""
+                let skillContext = SkillContext(
+                    currentFile: editorViewModel.editorState.activeDocument?.filePath,
+                    selectedText: editorViewModel.editorState.selectedText.isEmpty
+                        ? nil
+                        : editorViewModel.editorState.selectedText,
+                    projectURL: editorViewModel.rootFolderURL,
+                    additionalArgs: args
+                )
+                let result = skillsService.executeSkill(skill, context: skillContext)
+                for action in result.actions {
+                    switch action {
+                    case .sendToChat(let prompt):
+                        let fullContext = context.isEmpty ? nil : context
+                        viewModel.sendMessageInternal(
+                            userMessage: prompt,
+                            context: fullContext,
+                            projectURL: editorViewModel.rootFolderURL,
+                            images: imageContextService.attachedImages,
+                            forceEditMode: skill.category == .code
+                                || skill.category == .testing
+                                || skill.category == .refactoring
+                                || skill.category == .debugging
+                        )
+                    case .runTerminal(let command):
+                        NotificationCenter.default.post(
+                            name: NSNotification.Name("ShowTerminal"), object: nil)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            NotificationCenter.default.post(
+                                name: NSNotification.Name("TerminalSendCommand"),
+                                object: command)
+                        }
+                    case .openFile(let url):
+                        editorViewModel.openFile(at: url)
+                    case .showNotification:
+                        break
+                    }
+                }
+                imageContextService.clearImages()
+                activeMentions.removeAll()
+            }
+            return
+        }
+        // --- end slash command interception ---
+
+        // Defer all state mutations to avoid "Publishing changes from within view updates"
         Task { @MainActor in
             await Task.yield()
 

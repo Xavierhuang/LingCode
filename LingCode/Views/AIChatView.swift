@@ -90,6 +90,14 @@ struct AIChatView: View {
                                 Label("Clear Chat", systemImage: "trash")
                             }
                             Divider()
+                            Button(action: { exportChatAsMarkdown() }) {
+                                Label("Export Chat…", systemImage: "square.and.arrow.up")
+                            }
+                            Button(action: { Task { await summarizeNow() } }) {
+                                Label("Summarize Conversation", systemImage: "text.badge.checkmark")
+                            }
+                            .disabled(viewModel.conversation.messages.count < 4)
+                            Divider()
                             Toggle("Show Thinking", isOn: $viewModel.showThinkingProcess)
                             Toggle("Auto Execute", isOn: $viewModel.autoExecuteCode)
                         } label: {
@@ -409,5 +417,48 @@ struct AIChatView: View {
         }
         
         return handled
+    }
+
+    // MARK: - Export chat
+
+    private func exportChatAsMarkdown() {
+        let messages = viewModel.conversation.messages
+        guard !messages.isEmpty else { return }
+
+        var lines: [String] = ["# LingCode Chat Export", ""]
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+
+        for msg in messages {
+            switch msg.role {
+            case .user:
+                lines.append("### You  \(df.string(from: msg.timestamp))")
+                lines.append(msg.content)
+            case .assistant:
+                lines.append("### LingCode  \(df.string(from: msg.timestamp))")
+                lines.append(msg.content)
+            case .system:
+                if msg.isSummary {
+                    lines.append("> " + msg.content.replacingOccurrences(of: "\n", with: "\n> "))
+                }
+            }
+            lines.append("")
+        }
+
+        let markdown = lines.joined(separator: "\n")
+
+        let panel = NSSavePanel()
+        panel.title = "Export Chat"
+        panel.nameFieldStringValue = "LingCode-Chat-\(Int(Date().timeIntervalSince1970)).md"
+        panel.allowedContentTypes = [.plainText]
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            try? markdown.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func summarizeNow() async {
+        await viewModel.conversation.autoSummarizeIfNeeded(threshold: 0)
     }
 }

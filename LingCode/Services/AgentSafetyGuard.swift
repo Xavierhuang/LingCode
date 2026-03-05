@@ -2,7 +2,8 @@
 //  AgentSafetyGuard.swift
 //  LingCode
 //
-//  Safety checks for agent decisions (extracted from AgentService).
+//  Safety checks for agent decisions.
+//  Checks the CommandAllowlistService before requiring approval.
 //
 
 import Foundation
@@ -26,11 +27,19 @@ class AgentSafetyGuard {
 
     func check(_ decision: AgentDecision) -> SafetyCheckResult {
         if decision.action == "terminal", let cmd = decision.command?.lowercased() {
+            // Hard-blocked commands — never allowed, even if on the allowlist
             for blocked in blockedCommands {
                 if cmd.contains(blocked.lowercased()) {
                     return .blocked(reason: "Catastrophic command detected: \(blocked)")
                 }
             }
+
+            // Allowlist check — skip approval entirely
+            if CommandAllowlistService.shared.isAllowed(cmd) {
+                return .safe
+            }
+
+            // Dangerous command patterns — ask for approval
             for risk in dangerousCommands {
                 if cmd.contains(risk.lowercased()) {
                     return .needsApproval(reason: "Risky command detected: \(risk)")

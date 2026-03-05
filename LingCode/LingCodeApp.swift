@@ -13,6 +13,9 @@ struct LingCodeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     init() {
+        // Disable macOS window state restoration (prevents duplicate windows on relaunch)
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        
         // Apply saved theme preference on app launch
         if let saved = UserDefaults.standard.string(forKey: "themePreference"),
            let preference = ThemeService.ThemePreference(rawValue: saved) {
@@ -162,22 +165,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Ensure at least one window is open on launch
-        if NSApplication.shared.windows.isEmpty {
-            openMainWindow()
-        }
+        // Disable macOS window state restoration to prevent duplicate windows
+        // on relaunch. SwiftUI's WindowGroup already opens the initial window.
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        NSWindow.allowsAutomaticWindowTabbing = false
     }
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            // No visible windows, open a new one
-            openMainWindow()
+            // No visible windows – bring back or create exactly one window
+            WindowManager.shared.showMainWindow()
         }
         return true
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Don't quit when window closes - keep app running
+        // Keep the process alive when the last window is closed (like VS Code / Cursor)
         return false
     }
     
