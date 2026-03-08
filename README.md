@@ -75,21 +75,25 @@ This means:
 
 The UI shows a clear **Local** or **Cloud** chip so you always know where your code is going.
 
-### 5. Deterministic, Auditable Prompts
+### 5. Rules You Control (Project, User, Team)
 
 **Cursor:** Rules from `.cursorrules`, cloud settings, and hidden system prompts merge in unclear ways.
 
-**LingCode:** Three layers only, with explicit precedence:
+**LingCode:** Clear layers with explicit precedence. Manage everything from **Settings > Rules**:
 
 ```
 1. Core System Prompt (built-in, read-only)
-2. WORKSPACE.md (your project rules, versioned in git)
-3. Task Block (current request)
+2. Project Rules  — .cursor/rules/*.mdc, .cursorrules, WORKSPACE.md, .lingcoderules
+3. User Rules     — your personal rules (global)
+4. Team Rules     — shared URL (optional, same rules for the whole team)
+5. Task Block     — current request
 
-Precedence: Task > Workspace > Core
+Precedence: Task > Project/User/Team > Core
 ```
 
-You can inspect exactly what the AI sees. No hidden modes, no cloud-injected rules, no surprises.
+- **.mdc support:** Frontmatter with `alwaysApply`, `globs`, and file-scoped rules.
+- **Team rules:** One URL; everyone gets the same standards. Agent actions still require your approval and history is auditable.
+- You can inspect what the AI sees. No hidden modes, no surprise cloud-injected rules.
 
 ---
 
@@ -100,6 +104,8 @@ You can inspect exactly what the AI sees. No hidden modes, no cloud-injected rul
 | Feature | LingCode | Cursor |
 |---------|----------|--------|
 | Agent Mode (Autonomous) | ReAct agent with tool execution | Agent |
+| Task Complete Summary | Immediate step + streaming summary text | Basic |
+| Agent Approval & History | Approve/deny per action; full outcome + files changed | Basic |
 | Tab Completion | FIM-based ghost text | Tab |
 | Multi-file Editing | Streaming with diff review | Composer |
 | Code Review Before Apply | AI reviews changes before apply | Limited |
@@ -118,7 +124,7 @@ You can inspect exactly what the AI sees. No hidden modes, no cloud-injected rul
 | @docs | Fetch documentation (GitHub, MDN, etc.) | Yes |
 | @notepad | Persistent scratchpad | Yes |
 
-### Editor Features
+### Editor & Workflow
 
 | Feature | LingCode | Cursor |
 |---------|----------|--------|
@@ -129,6 +135,10 @@ You can inspect exactly what the AI sees. No hidden modes, no cloud-injected rul
 | Syntax Highlighting | Tree-sitter + SwiftSyntax | Yes |
 | Git Integration | Full (commit, push, pull, branches, stash) | Yes |
 | Terminal | Real PTY with background execution | Yes |
+| Magic Install | Auto-detect package manager, one-click install | Manual |
+| Magic Deploy / Push | Paste SSH or token, deploy (e.g. AWS EC2, Vercel) | Extensions |
+| Performance Dashboard | Token/latency metrics, benchmark proof | No |
+| Rules Management | Project, user, team rules; .mdc, globs | Limited |
 
 ### Search
 
@@ -213,9 +223,9 @@ open LingCode.xcodeproj
 
 ### Configuration
 
-1. **API Keys:** Settings > AI > Enter your API key
-2. **Local Models:** Settings > AI > Enable Ollama > Select model
-3. **Workspace Rules:** Create `WORKSPACE.md` in your project root
+1. **API Keys:** Settings > AI > Enter your API key (OpenAI, Anthropic).
+2. **Local Models:** Settings > AI > Enable Ollama > Select model.
+3. **Rules:** Settings > Manage Rules — project (WORKSPACE.md, .cursor/rules/*.mdc, .cursorrules), user rules, and optional team rules URL.
 
 ### Example WORKSPACE.md
 
@@ -243,6 +253,8 @@ open LingCode.xcodeproj
 
 ### Implemented
 - [x] Agent Mode with ReAct reasoning
+- [x] Task Complete step (immediate UI + streaming summary)
+- [x] Agent approval flow and history (outcome, files changed, duration)
 - [x] Tab completion with ghost text
 - [x] Multi-file streaming edits
 - [x] Tiered validation (Linter + Shadow)
@@ -251,10 +263,14 @@ open LingCode.xcodeproj
 - [x] @mentions (@file, @codebase, @web, @docs, @notepad)
 - [x] Local/offline mode with Ollama
 - [x] Human-in-the-loop tool approval
+- [x] Rules: project, user, team; .mdc with globs and alwaysApply
+- [x] Magic Install (auto-detect package manager, one-click install)
+- [x] Magic Deploy / Magic Push (SSH, AWS EC2, Vercel-style deploy)
+- [x] Performance dashboard (metrics, benchmark proof)
+- [x] Onboarding and feature discoverability (welcome, command palette)
 
 ### Coming Soon
 - [ ] MCP (Model Context Protocol) for external tools
-- [ ] Skills system (/commit, /review, /test commands)
 - [ ] Subagents for complex task delegation
 - [ ] CLI agent for terminal usage
 - [ ] GitHub PR review integration (Bugbot-style)
@@ -303,7 +319,7 @@ LingCode is available under the MIT License. See [LICENSE](LICENSE) for details.
 
 ## Links
 
-- **Website:** [https://xavierhuang.github.io/LingCode/](https://xavierhuang.github.io/LingCode/)
+- **Website:** [https://lingcode.dev](https://lingcode.dev)
 - **Documentation:** [docs/](docs/)
 - **Issues:** [GitHub Issues](https://github.com/Xavierhuang/LingCode/issues)
 
@@ -316,8 +332,9 @@ LingCode is available under the MIT License. See [LICENSE](LICENSE) for details.
 | Fast, native performance | No Electron overhead |
 | Privacy and offline | True local-first with Ollama |
 | Safe code changes | Tiered validation before apply |
-| Predictable AI behavior | Deterministic prompt architecture |
-| Full audit trail | Single write pipeline with snapshots |
+| Predictable AI behavior | Rules you control (project, user, team) |
+| Full audit trail | Single write pipeline + agent history |
+| Install & deploy in-editor | Magic Install, Magic Deploy / Push |
 | macOS integration | Native Swift/SwiftUI |
 
 **LingCode: AI coding that respects your machine, your privacy, and your code.**
